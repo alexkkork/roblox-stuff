@@ -592,6 +592,17 @@ if(TARGET alexfuscator AND RBX_RUNTIME_ENABLE_STRESS_TESTS)
     )
 endif()
 
+if(TARGET alexfuscator AND TARGET rbx_luau_runtime)
+    rbx_add_python_test(
+        alexfuscator_alex_language
+        "unit;conformance;alexfuscator"
+        240
+        test_alex_language.py
+        --alexfuscator "$<TARGET_FILE:alexfuscator>"
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
+endif()
+
 rbx_find_host_program(NPM_EXECUTABLE npm npm.cmd)
 if(NPM_EXECUTABLE)
     add_test(NAME runtime_site_check COMMAND "${NPM_EXECUTABLE}" run check)

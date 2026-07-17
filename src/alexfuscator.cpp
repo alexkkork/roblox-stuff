@@ -1878,12 +1878,30 @@ void validateV6Program(V6Program& program, std::string stage, bool validateDefin
             continue;
 
         using RegisterSet = std::unordered_set<uint32_t>;
+        std::vector<bool> reachable(prototype.blocks.size(), false);
+        std::vector<size_t> worklist{0};
+        reachable[0] = true;
+        while (!worklist.empty())
+        {
+            size_t blockId = worklist.back();
+            worklist.pop_back();
+            for (size_t successor : prototype.blocks[blockId].successors)
+            {
+                if (!reachable[successor])
+                {
+                    reachable[successor] = true;
+                    worklist.push_back(successor);
+                }
+            }
+        }
         std::vector<std::vector<size_t>> predecessors(prototype.blocks.size());
         RegisterSet universe;
         for (const V6BasicBlock& block : prototype.blocks)
         {
-            for (size_t successor : block.successors)
-                predecessors.at(successor).push_back(block.id);
+            if (reachable[block.id])
+                for (size_t successor : block.successors)
+                    if (reachable[successor])
+                        predecessors.at(successor).push_back(block.id);
             for (size_t pc = block.start; pc < block.end; ++pc)
                 for (size_t position : v6RegisterDefs(prototype.code[pc].op))
                     universe.insert(prototype.code[pc].args[position]);
@@ -1898,6 +1916,8 @@ void validateV6Program(V6Program& program, std::string stage, bool validateDefin
             changed = false;
             for (const V6BasicBlock& block : prototype.blocks)
             {
+                if (!reachable[block.id])
+                    continue;
                 RegisterSet nextIn;
                 if (block.id != 0 && !predecessors[block.id].empty())
                 {
@@ -1926,14 +1946,23 @@ void validateV6Program(V6Program& program, std::string stage, bool validateDefin
 
         for (const V6BasicBlock& block : prototype.blocks)
         {
+            if (!reachable[block.id])
+                continue;
             RegisterSet defined = in[block.id];
             for (size_t pc = block.start; pc < block.end; ++pc)
             {
                 const V6Instruction& instruction = prototype.code[pc];
                 for (size_t position : v6RegisterUses(instruction.op))
                     if (!defined.count(instruction.args[position]))
+                    {
+                        std::string incoming;
+                        for (size_t predecessor : predecessors[block.id])
+                            incoming += (incoming.empty() ? "" : ",") + std::to_string(predecessor) +
+                                (out[predecessor].count(instruction.args[position]) ? ":defined" : ":missing");
                         fail("use_before_definition", v6OpInfo(instruction.op).name, prototypeIndex + 1, pc,
-                            "AlexIR register is not definitely defined on every incoming control-flow path");
+                            "AlexIR register r" + std::to_string(instruction.args[position]) + " is not definitely defined on every incoming control-flow path to block " +
+                                std::to_string(block.id) + " (" + incoming + ")");
+                    }
                 for (size_t position : v6RegisterDefs(instruction.op))
                     defined.insert(instruction.args[position]);
             }
@@ -4798,6 +4827,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
         debug["chacha20_poly1305"] = true;
         debug["authenticated_vm_container"] = true;
         debug["chained_integrity_checks"] = config.integrityChecks && debug.value("per_block_lazy_decryption", false);
+        debug["passes"].push_back({{"name", "authenticated_container"}, {"changes", 1}});
         return VmEmitResult{out.str(), packed.integrity, std::move(debug)};
     }
     catch (const V6CompileFailure& failure)
@@ -4906,13 +4936,16 @@ void writeVmDebugMap(
         {"randomized_vm_context_fields", false},
         {"randomized_identifiers", true},
         {"vm_bundle_integrity", integrityJson(bundleIntegrity)},
-        {"notes", json::array({"Luau is lowered into typed semantic IR and register VM instructions", "fixed seeds produce deterministic output", "standalone runtime material remains recoverable through tracing", "output does not reconstruct or load the original source string"})},
+        {"notes", json::array({"Alex 1 and Luau lower into validated AlexIR 2 and AlexVM 6 instructions", "fixed seeds produce deterministic output", "standalone runtime material remains recoverable through tracing", "output does not reconstruct or load the original source string"})},
     };
     for (auto it = extra.begin(); it != extra.end(); ++it)
         data[it.key()] = it.value();
     data["feature_flags"] = {
         {"register_vm", true},
         {"typed_semantic_ir", true},
+        {"validated_control_flow", true},
+        {"declarative_instruction_set", true},
+        {"round_trip_debug_formats", true},
         {"explicit_result_arity", true},
         {"lexical_upvalue_cells", true},
         {"register_liveness_reuse", data.value("register_liveness_reuse", false)},

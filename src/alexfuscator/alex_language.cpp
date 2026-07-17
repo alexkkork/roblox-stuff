@@ -203,7 +203,14 @@ public:
                     one(TokenKind::Multiply);
                 break;
             case '/':
-                if (match('='))
+                if (match('/'))
+                {
+                    if (match('='))
+                        tokens.push_back({TokenKind::FloorDivAssign, "//=", {begin, position()}});
+                    else
+                        tokens.push_back({TokenKind::FloorDiv, "//", {begin, position()}});
+                }
+                else if (match('='))
                     tokens.push_back({TokenKind::DivideAssign, "/=", {begin, position()}});
                 else
                     one(TokenKind::Divide);
@@ -686,6 +693,7 @@ private:
         result->condition = expression();
         consumeTerminators();
         result->body = block();
+        size_t beforeElseTrivia = cursor;
         consumeTerminators();
         if (match(TokenKind::Else))
         {
@@ -700,6 +708,8 @@ private:
             else
                 result->elseBody = block();
         }
+        else
+            cursor = beforeElseTrivia;
         result->span.end = result->elseBody ? result->elseBody->span.end : result->body->span.end;
         return result;
     }

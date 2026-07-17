@@ -4,6 +4,7 @@ const PROFILES = new Set(["compatibility", "hardened", "maximum"]);
 const RUNTIMES = new Set(["universal", "roblox", "executor"]);
 const KEY_MODES = new Set(["standalone", "online"]);
 const FORMATS = new Set(["one-line", "pretty"]);
+const LANGUAGES = new Set(["auto", "luau", "alex"]);
 const LEVELS = new Set(["preset", "off", "standard", "aggressive", "maximum"]);
 const BINDINGS = new Set(["portable", "roblox", "executor"]);
 
@@ -62,6 +63,7 @@ function normalizeIntent(input = {}) {
   const analysisNotice = String(input.analysis_notice || "");
   if (analysisNotice.length > 512) throw new Error("analysis notice is too long");
   return {
+    language: choice(input.language, LANGUAGES, "auto", "language"),
     profile,
     runtime,
     key_mode: keyMode,

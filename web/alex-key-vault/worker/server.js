@@ -295,12 +295,15 @@ function validateCompilePayload(input, token) {
   if (JSON.stringify(intent) !== JSON.stringify(expected)) throw Object.assign(new Error("compile request does not match its token"), { code: "token_mismatch", status: 403 });
   const seed = String(input.seed || "auto");
   if (seed !== "auto" && !/^[0-9]+$/.test(seed)) throw Object.assign(new Error("seed must be auto or an unsigned integer"), { code: "invalid_request", status: 400 });
-  return { source, seed, ...intent };
+  const filename = String(input.filename || "script.luau");
+  if (filename.length > 255 || /[\\/\0]/.test(filename)) throw Object.assign(new Error("filename must be a simple file name"), { code: "invalid_request", status: 400 });
+  const effectiveLanguage = intent.language === "auto" && filename.toLowerCase().endsWith(".alex") ? "alex" : intent.language === "auto" ? "luau" : intent.language;
+  return { source, seed, filename, effective_language: effectiveLanguage, ...intent };
 }
 
 function compile(binary, request, token) {
   return new Promise((resolve, reject) => {
-    const args = ["--stdin", "--stdout", "--diagnostics-json", "--report-fd", "3", "--profile", request.profile, "--runtime", request.runtime, "--key-mode", request.key_mode, "--format", request.format, "--seed", request.seed];
+    const args = ["--stdin", "--stdout", "--diagnostics-json", "--report-fd", "3", "--language", request.effective_language, "--profile", request.profile, "--runtime", request.runtime, "--key-mode", request.key_mode, "--format", request.format, "--seed", request.seed];
     for (const field of LEVEL_FIELDS) args.push(`--${field.replaceAll("_", "-")}`, request.advanced[field]);
     args.push("--environment-binding", request.advanced.environment_binding);
     if (request.advanced.game_id) args.push("--game-id", request.advanced.game_id);
@@ -346,7 +349,7 @@ function compile(binary, request, token) {
       }
       let report = {};
       try { report = JSON.parse(reportText); } catch {}
-      if (report.report_version !== 3 || report.backend !== "register_vm_v5" || report.vm_version !== 5 || report.profile !== request.profile || report.fallback_used !== false) {
+      if (report.report_version !== 4 || report.backend !== "alexvm6" || report.vm_version !== 6 || report.ir_version !== 2 || report.language !== request.effective_language || report.profile !== request.profile || report.fallback_used !== false) {
         return finish(Object.assign(new Error("native compiler returned an unexpected protection backend"), { code: "compiler_contract_violation", status: 502 }));
       }
       finish(null, { output, outputBytes, report });
@@ -376,6 +379,7 @@ async function handleCompile(req, res) {
     res.setHeader("X-Alex-Backend", String(result.report.backend));
     res.setHeader("X-Alex-VM-Version", String(result.report.vm_version));
     res.setHeader("X-Alex-IR-Version", String(result.report.ir_version));
+    res.setHeader("X-Alex-Language", String(result.report.language));
     res.setHeader("X-Alex-Runtime", request.runtime);
     res.setHeader("X-Alex-Key-Mode", request.key_mode);
     if (request.advanced.game_id) res.setHeader("X-Alex-Game-Lock", "enabled");

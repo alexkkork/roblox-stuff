@@ -187,8 +187,8 @@ def verify_source(source_text, name, alexfuscator, runtime, temporary):
             ])
             generated = artifact.read_text(encoding="utf-8")
             descriptor = json.loads(compile_report.read_text(encoding="utf-8"))
-            if descriptor.get("report_version") != 3 or descriptor.get("backend") != "register_vm_v5" or descriptor.get("vm_version") != 5:
-                raise RuntimeError(f"invalid v5 report in {name}/{profile}/{seed}: {descriptor}")
+            if descriptor.get("report_version") != 4 or descriptor.get("backend") != "alexvm6" or descriptor.get("vm_version") != 6:
+                raise RuntimeError(f"invalid VM 6 report in {name}/{profile}/{seed}: {descriptor}")
             if descriptor.get("profile") != profile or descriptor.get("fallback_used") is not False:
                 raise RuntimeError(f"profile downgrade in {name}/{profile}/{seed}: {descriptor}")
             if "loadstring" in generated or source_text.strip() in generated:

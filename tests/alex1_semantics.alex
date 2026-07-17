@@ -1,0 +1,58 @@
+// Alex 1 semantic parity fixture
+fn weightedSum(...) {
+    let values = {...}
+    let total = 0
+    for index, value in ipairs(values) {
+        total += index * value
+    }
+    return total
+}
+
+fn makeCounter(startValue) {
+    let currentValue = startValue
+    return fn(amount) {
+        currentValue += amount or 1
+        return currentValue
+    }
+}
+
+fn factorial(value) {
+    if value <= 1 {
+        return 1
+    }
+    return value * factorial(value - 1)
+}
+
+fn pair(value) {
+    return value, value + 1
+}
+
+let counter = makeCounter(10)
+let first = counter(2)
+let second = counter()
+let left, right = pair(4)
+let total = 0
+
+for index = 1, 5 {
+    if index == 3 {
+        continue
+    }
+    total += index
+}
+
+repeat {
+    total += 1
+} until total >= 13
+
+let object = {base = 10}
+object.add = fn(self, value) {
+    return self.base + value
+}
+
+let methodResult = object:add(5)
+let weighted = weightedSum(2, 4, 6)
+let choice = if total > 0 { "yes" } else { "no" }
+let label = `alex {choice}`
+
+print("alex1-semantics", first, second, left, right, total, methodResult, weighted, factorial(5), label)
+return first, second, weighted

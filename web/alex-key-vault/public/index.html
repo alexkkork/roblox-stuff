@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Alexfuscator</title>
-    <meta name="alexfuscator-build" content="register-vm-v5">
-    <link rel="stylesheet" href="/obfuscator.css?v=register-vm-v5">
+    <meta name="alexfuscator-build" content="alexvm6">
+    <link rel="stylesheet" href="/obfuscator.css?v=alexvm6">
   </head>
   <body>
     <main class="app">
@@ -27,6 +27,13 @@
             <option value="universal" selected>Universal</option>
             <option value="roblox">Roblox</option>
             <option value="executor">Executor</option>
+          </select>
+        </label>
+        <label>Language
+          <select id="language">
+            <option value="auto" selected>Auto</option>
+            <option value="luau">Luau</option>
+            <option value="alex">Alex 1</option>
           </select>
         </label>
         <label class="toggle"><input id="onlineKeys" type="checkbox"><span>Online keys</span></label>
@@ -59,8 +66,8 @@
 
       <section class="editors">
         <div class="pane">
-          <div class="paneBar"><span>Input</span><div><small id="inputMeta">0 B</small><button id="open" class="ghost">Open</button><button id="clear" class="ghost">Clear</button><input id="filePicker" type="file" accept=".lua,.luau,.txt" hidden></div></div>
-          <textarea id="input" spellcheck="false" aria-label="Luau input"></textarea>
+          <div class="paneBar"><span>Input</span><div><small id="inputMeta">0 B</small><button id="open" class="ghost">Open</button><button id="clear" class="ghost">Clear</button><input id="filePicker" type="file" accept=".lua,.luau,.alex,.txt" hidden></div></div>
+          <textarea id="input" spellcheck="false" aria-label="Alex or Luau input"></textarea>
         </div>
         <div class="pane">
           <div class="paneBar"><span>Output</span><div><small id="outputMeta">0 B</small><button id="copy" class="ghost">Copy</button><button id="download" class="ghost">Download</button></div></div>
@@ -70,6 +77,6 @@
 
       <footer><span id="status">Ready.</span><span id="buildMeta"></span></footer>
     </main>
-    <script src="/obfuscator.js?v=register-vm-v5"></script>
+    <script src="/obfuscator.js?v=alexvm6"></script>
   </body>
 </html>

@@ -79,8 +79,8 @@ def main() -> int:
     if debug:
         if debug.get("fallback_used"):
             failures.append("debug map reports fallback_used=true")
-        if debug.get("mode") != "register_vm_v5" or debug.get("vm_version") != 5:
-            warnings.append(f"debug map mode is {debug.get('mode')!r}, expected register_vm_v5")
+        if debug.get("mode") != "alexvm6" or debug.get("vm_version") != 6:
+            warnings.append(f"debug map mode is {debug.get('mode')!r}, expected alexvm6")
         for key in ("stage2_key_len", "stage2_runtime_fingerprint_expected", "stage2_header_hash", "stage2_mac"):
             if key in debug:
                 failures.append(f"redacted debug field leaked: {key}")

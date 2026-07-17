@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const input = $("input");
 const output = $("output");
 let fullOutput = "";
+let inputFilename = "script.luau";
 const byteSize = (value) => new TextEncoder().encode(value).length;
 const formatSize = (bytes) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 
@@ -26,6 +27,7 @@ function selectedProfile() {
 
 function intent() {
   return {
+    language: $("language").value,
     profile: selectedProfile(),
     runtime: $("runtime").value,
     key_mode: $("onlineKeys").checked ? "online" : "standalone",
@@ -71,7 +73,7 @@ async function compile() {
     const response = await postJson(`${token.worker_url.replace(/\/$/, "")}/v2/compile`, {
       version: 2,
       source: input.value,
-      filename: "script.luau",
+      filename: inputFilename,
       seed: $("seed").value.trim() || "auto",
       ...selected
     }, { Authorization: `Bearer ${token.token}` });
@@ -94,8 +96,9 @@ async function compile() {
     const seed = response.headers.get("X-Alex-Seed") || "auto";
     const backend = response.headers.get("X-Alex-Backend") || "unknown";
     const vmVersion = response.headers.get("X-Alex-VM-Version") || "?";
+    const language = response.headers.get("X-Alex-Language") || selected.language;
     const gameLocked = response.headers.get("X-Alex-Game-Lock") === "enabled";
-    $("buildMeta").textContent = `${selected.profile} · VM ${vmVersion} · ${backend}${gameLocked ? " · game locked" : ""} · seed ${seed} · ${build}`;
+    $("buildMeta").textContent = `${language} · ${selected.profile} · VM ${vmVersion} · ${backend}${gameLocked ? " · game locked" : ""} · seed ${seed} · ${build}`;
     status(`${received.toLocaleString()} bytes`, "ok");
   } catch (error) {
     status(error.message, "bad");
@@ -124,6 +127,7 @@ $("open").addEventListener("click", () => $("filePicker").click());
 $("filePicker").addEventListener("change", async () => {
   const file = $("filePicker").files[0];
   if (!file) return;
+  inputFilename = file.name;
   input.value = await file.text();
   input.dispatchEvent(new Event("input"));
   status(file.name, "ok");
@@ -134,6 +138,7 @@ input.addEventListener("drop", async (event) => {
   event.preventDefault();
   const file = event.dataTransfer.files[0];
   if (!file) return;
+  inputFilename = file.name;
   input.value = await file.text();
   input.dispatchEvent(new Event("input"));
 });

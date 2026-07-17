@@ -143,7 +143,7 @@ def main():
 
         for profile in ("compatibility", "hardened", "maximum"):
             descriptor = compile_artifact(args.alexfuscator, source, output, report, profile, 991)
-            if descriptor.get("profile") != profile or descriptor.get("backend") != "register_vm_v5" or descriptor.get("fallback_used") is not False:
+            if descriptor.get("profile") != profile or descriptor.get("backend") != "alexvm6" or descriptor.get("vm_version") != 6 or descriptor.get("report_version") != 4 or descriptor.get("fallback_used") is not False:
                 raise RuntimeError(f"profile contract mismatch: {descriptor}")
             if profile != "maximum" and descriptor.get("per_block_lazy_decryption") is not False:
                 raise RuntimeError(f"{profile} unexpectedly enabled Maximum lazy blocks")
@@ -243,7 +243,7 @@ def main():
         if removed.returncode == 0 or removed_diagnostic.get("error", {}).get("code") != "removed_option":
             raise RuntimeError(f"removed backend selector was accepted: {removed_diagnostic}")
 
-    print(f"Register VM v5 structure OK: {args.seeds} Maximum seeds, authenticated tamper decoy, deterministic fixed seeds")
+    print(f"AlexVM 6 structure OK: {args.seeds} Maximum seeds, authenticated tamper decoy, deterministic fixed seeds")
 
 
 if __name__ == "__main__":
