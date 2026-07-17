@@ -209,6 +209,14 @@ if(TARGET alex_deobfuscator)
         --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
     )
 
+    rbx_add_python_test(
+        deobfuscator_luraph_capture_opcode_semantics
+        "conformance;integration;security;subject;deobfuscator"
+        45
+        test_luraph_capture_opcode_semantics.py
+        --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+    )
+
     if(TARGET rbx_luau_runtime)
         rbx_add_python_test(
             deobfuscator_luraph_guard_state_trace
