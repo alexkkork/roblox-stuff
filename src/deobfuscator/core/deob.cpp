@@ -11752,6 +11752,87 @@ LuraphExactLeafRecognition recognizeLuraphOpcode28IndexRead(
     return output;
 }
 
+LuraphExactLeafRecognition recognizeLuraphOpcode193EmptyTable(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    constexpr std::string_view exactTableBranch =
+        "else L[Z[_]]=({});end;else(L)[r[_]]=(R[Z[_]][v[_]])";
+    if (!range.is_object() || range.value("begin", size_t(0)) != 307936 ||
+        range.value("end", size_t(0)) != 323136 ||
+        source.find(exactTableBranch) == std::string::npos)
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-193 handler does not match the locked empty-table branch";
+        return output;
+    }
+    if (!observations || observations->empty())
+    {
+        output.diagnostic = "opcode-193 empty-table branch has no runtime observations";
+        return output;
+    }
+
+    std::optional<int64_t> destination;
+    for (const json& observation : *observations)
+    {
+        const json lanes = observation.value("runtime_lanes", json::object());
+        const std::optional<int64_t> observedDestination = luraphRuntimeLaneInteger(lanes, "Z");
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json decisions = guardPath.is_object()
+            ? guardPath.value("decisions", json::array()) : json::array();
+        const json writes = observation.value("register_writes", json::array());
+        const json origins = observation.value("write_origins", json::object());
+        if (observation.value("opcode", int64_t(-1)) != 193 || !observedDestination ||
+            !guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) || !decisions.is_array() || decisions.empty() ||
+            observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+            !writes.is_array() || writes.size() != 1 || !writes[0].is_object() ||
+            writes[0].value("register", std::numeric_limits<int64_t>::min()) != *observedDestination ||
+            !writes[0].contains("value") || !writes[0]["value"].is_object() ||
+            writes[0]["value"].value("type", "") != "table" ||
+            !origins.is_object() || !origins.empty())
+        {
+            output.status = "evidence_mismatch";
+            output.diagnostic = "opcode-193 observation does not prove one fresh table write to operand Z";
+            return output;
+        }
+        if (destination && *destination != *observedDestination)
+        {
+            output.status = "contradictory_evidence";
+            output.diagnostic = "opcode-193 destination changed across observations of one site";
+            return output;
+        }
+        destination = observedDestination;
+        ++output.validated_observations;
+    }
+
+    const std::optional<int64_t> effectiveDestination = luraphRuntimeLaneInteger(effectiveLanes, "Z");
+    if (!destination || !effectiveDestination || *destination != *effectiveDestination)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-193 effective destination disagrees with runtime evidence";
+        return output;
+    }
+    output.status = "recognized";
+    output.diagnostic = "the locked opcode-193 branch and every observation prove an empty table constructor";
+    output.operation = {
+        {"kind", "register_write"},
+        {"semantic_family", "table_constructor"},
+        {"static_semantic", false},
+        {"path_specific", true},
+        {"source_claim", false},
+        {"proof", "locked_handler_branch_and_runtime_fresh_table_write"},
+        {"observation_count", output.validated_observations},
+        {"register", luraphImmediateRuntimeLane(effectiveLanes, "Z")},
+        {"value", {{"kind", "table"}, {"entries", json::array()}}},
+    };
+    return output;
+}
+
 LuraphExactLeafRecognition recognizeLuraphOpcode89RangeClear(
     const std::vector<json>* observations)
 {
@@ -12141,6 +12222,11 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode89SitesRejected = 0;
     size_t opcode89ObservationsValidated = 0;
     json opcode89RecognitionStatusCounts = json::object();
+    size_t opcode193SitesTotal = 0;
+    size_t opcode193SitesObservational = 0;
+    size_t opcode193SitesRejected = 0;
+    size_t opcode193ObservationsValidated = 0;
+    json opcode193RecognitionStatusCounts = json::object();
     json observationalOperationCounts = json::object();
 
     json prototypes = json::array();
