@@ -12202,6 +12202,28 @@ json luraphRuntimeSemanticDispatchArtifact(
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
             const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
+            if (!semanticAccepted && opcode == 161 &&
+                observedSite != observationsBySite.end() &&
+                childActivationsForSite != childActivationsBySite.end())
+            {
+                if (std::optional<json> recognized = recognizeLuraphOpcode161TwoArgumentCall(
+                        id, pc, effectiveLanes, observedSite->second, childActivationsForSite->second))
+                {
+                    row["observational_semantic_operation"] = std::move(*recognized);
+                    row["opcode161_two_argument_call_recognition"] = {
+                        {"status", "runtime_validated"},
+                        {"validated_observations", observedSite->second.size()},
+                    };
+                    ++observationalSemanticLifted;
+                    observationalOperationCounts["call"] =
+                        observationalOperationCounts.value("call", size_t(0)) + 1;
+                }
+                else
+                    row["opcode161_two_argument_call_recognition"] = {
+                        {"status", "evidence_mismatch"},
+                        {"validated_observations", 0},
+                    };
+            }
             if (!semanticAccepted && opcode == 8 && handler != handlers.end())
             {
                 ++opcode8CallSitesTotal;
@@ -12654,6 +12676,9 @@ json luraphRuntimeSemanticDispatchArtifact(
 struct LuraphPayloadClosureMetrics
 {
     size_t activations = 0;
+    size_t activated_prototypes = 0;
+    size_t closure_expanded_prototypes = 0;
+    size_t closure_expansion_edges = 0;
     size_t prototypes = 0;
     size_t instructions = 0;
     size_t statically_lifted = 0;
@@ -13093,6 +13118,48 @@ json luraphPayloadClosureArtifact(
             prototypeIds.insert(static_cast<uint64_t>(found->second["prototype"].get<int64_t>()));
     }
 
+    std::set<uint64_t> semanticPrototypeIds;
+    if (runtimeSemantic.contains("prototypes") && runtimeSemantic["prototypes"].is_array())
+        for (const json& prototype : runtimeSemantic["prototypes"])
+        {
+            const uint64_t id = prototype.value("runtime_id", uint64_t(0));
+            if (id > 0)
+                semanticPrototypeIds.insert(id);
+        }
+
+    const size_t activatedPrototypeCount = prototypeIds.size();
+    std::set<std::pair<uint64_t, size_t>> closureExpansionEdges;
+    changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (const auto& [site, descriptor] : runtime.closure_descriptors)
+        {
+            if (!prototypeIds.contains(site.first) || !descriptor.is_object() ||
+                !descriptor.value("complete", false) || !descriptor.contains("target_prototype") ||
+                (!descriptor["target_prototype"].is_number_integer() &&
+                    !descriptor["target_prototype"].is_number_unsigned()))
+                continue;
+
+            uint64_t target = 0;
+            if (descriptor["target_prototype"].is_number_unsigned())
+                target = descriptor["target_prototype"].get<uint64_t>();
+            else
+            {
+                const int64_t signedTarget = descriptor["target_prototype"].get<int64_t>();
+                if (signedTarget <= 0)
+                    continue;
+                target = static_cast<uint64_t>(signedTarget);
+            }
+            if (target == 0 || !runtime.prototypes.contains(target) ||
+                !semanticPrototypeIds.contains(target))
+                continue;
+
+            closureExpansionEdges.insert(site);
+            changed = prototypeIds.insert(target).second || changed;
+        }
+    }
+
     std::set<std::pair<uint64_t, size_t>> observedInstructionSites;
     for (const json& observed : runtime.steps)
     {
@@ -13202,6 +13269,9 @@ json luraphPayloadClosureArtifact(
     }
 
     metrics.activations = activations.size();
+    metrics.activated_prototypes = activatedPrototypeCount;
+    metrics.closure_expanded_prototypes = prototypeIds.size() - activatedPrototypeCount;
+    metrics.closure_expansion_edges = closureExpansionEdges.size();
     metrics.prototypes = prototypes.size();
     metrics.observed_steps = steps.size();
     metrics.observed_returns = returns.size();
@@ -13288,14 +13358,17 @@ json luraphPayloadClosureArtifact(
         {"version", 1},
         {"kind", "luraph-observed-payload-closure"},
         {"scope", !dynamic.calls.empty()
-            ? "confirmed-call-roots-and-descendant-activations"
+            ? "confirmed-call-roots-descendant-activations-and-proven-closure-targets"
             : payloadRoot && payloadRoot->evidence == "sequential_top_level_handoff"
-                ? "sequential-top-level-handoff-and-descendant-activations"
-                : "bootstrap-terminal-call-root-and-descendant-activations"},
+                ? "sequential-top-level-handoff-descendant-activations-and-proven-closure-targets"
+                : "bootstrap-terminal-call-root-descendant-activations-and-proven-closure-targets"},
         {"payload_root", std::move(payloadRootArtifact)},
         {"source_recovered", false},
         {"static_semantic_complete", metrics.instructions > 0 && metrics.statically_lifted == metrics.instructions},
         {"activation_count", metrics.activations},
+        {"activated_prototype_count", metrics.activated_prototypes},
+        {"closure_expanded_prototype_count", metrics.closure_expanded_prototypes},
+        {"closure_expansion_edge_count", metrics.closure_expansion_edges},
         {"prototype_count", metrics.prototypes},
         {"instruction_count", metrics.instructions},
         {"static_semantic_lifted", metrics.statically_lifted},
@@ -16046,6 +16119,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"stage", "payload_slice"},
             {"ok", payloadClosureMetrics->prototypes > 0},
             {"activations", payloadClosureMetrics->activations},
+            {"activated_prototypes", payloadClosureMetrics->activated_prototypes},
+            {"closure_expanded_prototypes", payloadClosureMetrics->closure_expanded_prototypes},
+            {"closure_expansion_edges", payloadClosureMetrics->closure_expansion_edges},
             {"prototypes", payloadClosureMetrics->prototypes},
             {"instructions", payloadClosureMetrics->instructions},
             {"static_semantic_lifted", payloadClosureMetrics->statically_lifted},
@@ -16141,6 +16217,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"details", {{"payload_activation", payloadRoot->payload_activation},
                     {"payload_prototype", payloadRoot->payload_prototype},
                     {"activations", payloadClosureMetrics->activations},
+                    {"activated_prototypes", payloadClosureMetrics->activated_prototypes},
+                    {"closure_expanded_prototypes", payloadClosureMetrics->closure_expanded_prototypes},
+                    {"closure_expansion_edges", payloadClosureMetrics->closure_expansion_edges},
                     {"prototypes", payloadClosureMetrics->prototypes},
                     {"instructions", payloadClosureMetrics->instructions}}},
             });
@@ -16396,6 +16475,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)}}},
                 {"payload_closure", {{"available", true},
                     {"activations", payloadClosureMetrics->activations},
+                    {"activated_prototypes", payloadClosureMetrics->activated_prototypes},
+                    {"closure_expanded_prototypes", payloadClosureMetrics->closure_expanded_prototypes},
+                    {"closure_expansion_edges", payloadClosureMetrics->closure_expansion_edges},
                     {"prototypes", payloadClosureMetrics->prototypes},
                     {"instructions", payloadClosureMetrics->instructions},
                     {"static_semantic_lifted", payloadClosureMetrics->statically_lifted},
@@ -17258,6 +17340,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["payload_closure"] = payloadClosureMetrics ? json({
         {"available", true},
         {"activations", payloadClosureMetrics->activations},
+        {"activated_prototypes", payloadClosureMetrics->activated_prototypes},
+        {"closure_expanded_prototypes", payloadClosureMetrics->closure_expanded_prototypes},
+        {"closure_expansion_edges", payloadClosureMetrics->closure_expansion_edges},
         {"prototypes", payloadClosureMetrics->prototypes},
         {"instructions", payloadClosureMetrics->instructions},
         {"static_semantic_lifted", payloadClosureMetrics->statically_lifted},
