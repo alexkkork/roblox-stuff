@@ -148,6 +148,7 @@ enum class RecordLaneKind
 
 enum class ConstantKind
 {
+    Opaque,
     String,
     Integer,
     Boolean,
@@ -325,6 +326,11 @@ struct PrototypeMetadata
     ByteSpan span;
     uint64_t meta = 0;
     ByteSpan meta_span;
+    uint64_t secondary_meta = 0;
+    ByteSpan secondary_meta_span;
+    size_t range_map_count = 0;
+    ByteSpan range_map_count_span;
+    ByteSpan range_map_span;
     size_t instruction_count = 0;
     ByteSpan instruction_count_span;
     ByteSpan instruction_words_span;
@@ -350,6 +356,8 @@ struct ContainerAnalysis
     std::string decoded_sha256;
     unsigned char marker = 0;
     ByteOrder transport_byte_order = ByteOrder::Unknown;
+    bool randomized_tag_semantics = false;
+    bool tag_semantic_mapping_recovered = false;
     std::optional<size_t> encoded_error_offset;
     std::optional<size_t> parse_error_offset;
     size_t constant_count = 0;
@@ -377,6 +385,7 @@ struct ContainerMetrics
     size_t attempt_count = 0;
     size_t decoded_count = 0;
     size_t parsed_count = 0;
+    size_t structural_count = 0;
     size_t failure_count = 0;
     size_t encoded_body_bytes = 0;
     size_t radix85_group_count = 0;

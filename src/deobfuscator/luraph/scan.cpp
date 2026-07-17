@@ -1193,6 +1193,63 @@ std::optional<uint64_t> unsignedIntegerToken(std::string_view source, const Toke
     return sawDigit ? std::optional<uint64_t>(value) : std::nullopt;
 }
 
+std::optional<std::string> decodedIdentifierLiteral(std::string_view source, const Token& token)
+{
+    const LiteralDecodeResult strict = decodeQuotedLiteral(source, token, 32);
+    if (strict.status == CarrierDecodeStatus::DecodedLiteral)
+        return std::string(strict.bytes.begin(), strict.bytes.end());
+    if (token.long_string || token.content_end < token.content_begin)
+        return std::nullopt;
+
+    // Luau accepts escaped identifier characters in protector-generated string
+    // keys. Keep this permissive path private to short reader-property aliases;
+    // carrier extraction continues to use the strict literal decoder.
+    std::string value;
+    for (size_t cursor = token.content_begin; cursor < token.content_end;)
+    {
+        char ch = source[cursor++];
+        if (ch != '\\')
+        {
+            if (!identifierContinue(ch))
+                return std::nullopt;
+            value.push_back(ch);
+            continue;
+        }
+        if (cursor >= token.content_end)
+            return std::nullopt;
+        ch = source[cursor++];
+        if (ch == 'x')
+        {
+            if (cursor + 2 > token.content_end || hexDigit(source[cursor]) < 0 || hexDigit(source[cursor + 1]) < 0)
+                return std::nullopt;
+            const char decoded = static_cast<char>(hexDigit(source[cursor]) * 16 + hexDigit(source[cursor + 1]));
+            cursor += 2;
+            if (!identifierContinue(decoded))
+                return std::nullopt;
+            value.push_back(decoded);
+            continue;
+        }
+        if (ch >= '0' && ch <= '9')
+        {
+            unsigned int decoded = static_cast<unsigned int>(ch - '0');
+            size_t digits = 1;
+            while (digits < 3 && cursor < token.content_end && source[cursor] >= '0' && source[cursor] <= '9')
+            {
+                decoded = decoded * 10 + static_cast<unsigned int>(source[cursor++] - '0');
+                ++digits;
+            }
+            if (decoded > 127 || !identifierContinue(static_cast<char>(decoded)))
+                return std::nullopt;
+            value.push_back(static_cast<char>(decoded));
+            continue;
+        }
+        if (!identifierContinue(ch))
+            return std::nullopt;
+        value.push_back(ch);
+    }
+    return value.empty() ? std::nullopt : std::optional<std::string>(std::move(value));
+}
+
 struct FunctionTokenRange
 {
     size_t begin = 0;
@@ -1308,12 +1365,11 @@ void inspectLphDollarSchema(
             ++bufferAliasCount;
         if (tokens[index + 2].kind != TokenKind::String || tokens[index + 2].long_string)
             continue;
-        const LiteralDecodeResult decoded = decodeQuotedLiteral(source, tokens[index + 2], 32);
-        if (decoded.status != CarrierDecodeStatus::DecodedLiteral)
+        const std::optional<std::string> decoded = decodedIdentifierLiteral(source, tokens[index + 2]);
+        if (!decoded)
             continue;
-        const std::string primitive(decoded.bytes.begin(), decoded.bytes.end());
-        if (findReaderSpec(primitive))
-            aliases.push_back(PrimitiveAlias{std::string(source.substr(tokens[index].begin, tokens[index].end - tokens[index].begin)), primitive});
+        if (findReaderSpec(*decoded))
+            aliases.push_back(PrimitiveAlias{std::string(source.substr(tokens[index].begin, tokens[index].end - tokens[index].begin)), *decoded});
     }
 
     const auto aliasPrimitive = [&](std::string_view name) -> std::optional<std::string> {

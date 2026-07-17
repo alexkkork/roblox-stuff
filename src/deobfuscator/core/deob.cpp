@@ -8410,8 +8410,10 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
 json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, std::string_view sourceHash)
 {
     json prototypes = json::array();
+    size_t declaredInstructionCount = 0;
     for (const auto& [id, prototype] : trace.prototypes)
     {
+        declaredInstructionCount += prototype.declared_instruction_count;
         json instructions = json::array();
         for (const auto& [pc, instruction] : prototype.instructions)
         {
@@ -8475,7 +8477,7 @@ json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, st
         {"scope", "reachable-prototypes-observed-offline"},
         {"source_sha256", sourceHash},
         {"structure_reused", trace.structure_reused},
-        {"complete", trace.complete},
+        {"complete", trace.complete && trace.instruction_count == declaredInstructionCount},
         {"malformed_rows", trace.malformed_rows},
         {"malformed_row_kinds", trace.malformed_row_kinds},
         {"prototype_count", trace.prototypes.size()},
@@ -8483,6 +8485,8 @@ json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, st
         {"step_count", trace.steps.size()},
         {"return_count", trace.returns.size()},
         {"instruction_count", trace.instruction_count},
+        {"declared_instruction_count", declaredInstructionCount},
+        {"observed_instruction_count", trace.instruction_count},
         {"activations", std::move(activations)},
         {"steps", std::move(steps)},
         {"returns", std::move(returns)},
@@ -8634,6 +8638,394 @@ bool luraphObservedSemanticContradicts(
     return false;
 }
 
+bool luraphObservedValuesEqual(const json& left, const json& right)
+{
+    if (!left.is_object() || !right.is_object() || left.value("type", "") != right.value("type", ""))
+        return false;
+    const std::string type = left.value("type", "");
+    if (type == "nil")
+        return true;
+    if (type == "string")
+        return left.contains("bytes_hex") && left["bytes_hex"].is_string() &&
+            right.contains("bytes_hex") && right["bytes_hex"].is_string() &&
+            left["bytes_hex"] == right["bytes_hex"];
+    if (type == "number" || type == "boolean")
+        return left.value("value", "") == right.value("value", "");
+    if (type == "global_reference")
+        return left.value("path", "") == right.value("path", "") && !left.value("path", "").empty();
+    return false;
+}
+
+std::optional<int64_t> luraphObservedInteger(const json& value)
+{
+    if (!value.is_object() || value.value("type", "") != "number" ||
+        !value.contains("value") || !value["value"].is_string())
+        return std::nullopt;
+    return parseTraceInteger<int64_t>(value["value"].get<std::string>());
+}
+
+template<typename Value>
+void intersectLuraphEvidence(std::optional<std::set<Value>>& retained, std::set<Value> candidates)
+{
+    if (!retained)
+    {
+        retained = std::move(candidates);
+        return;
+    }
+    std::set<Value> intersection;
+    std::set_intersection(retained->begin(), retained->end(), candidates.begin(), candidates.end(),
+        std::inserter(intersection, intersection.begin()));
+    retained = std::move(intersection);
+}
+
+enum class LuraphObservationalRuleKind
+{
+    None,
+    Jump,
+    LoadConstant,
+    Move,
+    Closure,
+};
+
+struct LuraphObservationalOpcodeRule
+{
+    LuraphObservationalRuleKind kind = LuraphObservationalRuleKind::None;
+    std::string destination_lane;
+    std::string value_lane;
+    std::string source_lane;
+    std::string target_lane;
+    std::string descriptor_lane;
+    int64_t target_adjustment = 0;
+    size_t observations = 0;
+    size_t write_observations = 0;
+    size_t unchanged_observations = 0;
+    size_t sites = 0;
+};
+
+std::map<int64_t, LuraphObservationalOpcodeRule> inferLuraphObservationalOpcodeRules(
+    const LuraphRuntimeStructureTrace& trace)
+{
+    std::map<int64_t, std::vector<const json*>> byOpcode;
+    for (const json& step : trace.steps)
+        if (step.is_object() && step.contains("opcode") && step["opcode"].is_number_integer())
+            byOpcode[step["opcode"].get<int64_t>()].push_back(&step);
+
+    std::map<int64_t, LuraphObservationalOpcodeRule> rules;
+    for (const auto& [opcode, observations] : byOpcode)
+    {
+        std::optional<std::set<std::pair<std::string, int64_t>>> transferCandidates;
+        std::optional<std::set<std::string>> destinationCandidates;
+        std::optional<std::set<std::string>> constantCandidates;
+        std::optional<std::set<std::string>> moveSourceLaneCandidates;
+        std::optional<std::set<std::string>> closureDescriptorLaneCandidates;
+        std::optional<std::set<std::string>> closureTargetLaneCandidates;
+        std::set<std::string> distinctConstants;
+        std::set<std::pair<uint64_t, int64_t>> sites;
+        size_t writeObservations = 0;
+        size_t unchangedObservations = 0;
+        size_t moveEvidence = 0;
+        bool transferValid = observations.size() >= 3;
+        bool constantValid = observations.size() >= 3;
+        bool moveValid = observations.size() >= 3;
+        bool closureValid = observations.size() >= 3;
+        bool sawNonFallthrough = false;
+
+        for (const json* observation : observations)
+        {
+            const uint64_t activation = observation->value("activation", uint64_t(0));
+            const int64_t pc = observation->value("pc", int64_t(-1));
+            const int64_t nextPc = observation->value("next_pc", int64_t(-1));
+            sites.emplace(activation, pc);
+            sawNonFallthrough = sawNonFallthrough || nextPc != pc + 1;
+            const json lanes = observation->value("runtime_lanes", json::object());
+            const json writes = observation->value("register_writes", json::array());
+            auto activationRow = trace.activations.find(activation);
+            const uint64_t prototype = activationRow == trace.activations.end()
+                ? 0 : activationRow->second.value("prototype", uint64_t(0));
+
+            std::set<std::pair<std::string, int64_t>> localTransfers;
+            if (lanes.is_object())
+                for (auto lane = lanes.begin(); lane != lanes.end(); ++lane)
+                    if (const std::optional<int64_t> value = luraphObservedInteger(lane.value()))
+                        for (int64_t adjustment : {int64_t(0), int64_t(1)})
+                            if (*value + adjustment == nextPc)
+                                localTransfers.emplace(lane.key(), adjustment);
+            intersectLuraphEvidence(transferCandidates, std::move(localTransfers));
+            transferValid = transferValid && writes.is_array() && writes.empty();
+
+            if (!writes.is_array() || writes.size() > 1 || nextPc != pc + 1)
+            {
+                constantValid = false;
+                moveValid = false;
+                closureValid = false;
+                continue;
+            }
+            if (writes.empty())
+            {
+                ++unchangedObservations;
+                closureValid = false;
+                continue;
+            }
+            ++writeObservations;
+            const json& write = writes.front();
+            if (!write.contains("register") || !write["register"].is_number_integer() ||
+                !write.contains("value") || !write["value"].is_object())
+            {
+                constantValid = false;
+                moveValid = false;
+                closureValid = false;
+                continue;
+            }
+            const int64_t destination = write["register"].get<int64_t>();
+            const json& writtenValue = write["value"];
+            std::set<std::string> localDestinations;
+            std::set<std::string> localConstants;
+            if (lanes.is_object())
+                for (auto lane = lanes.begin(); lane != lanes.end(); ++lane)
+                {
+                    if (luraphObservedInteger(lane.value()) == destination)
+                        localDestinations.insert(lane.key());
+                    if (luraphObservedValuesEqual(lane.value(), writtenValue))
+                        localConstants.insert(lane.key());
+                }
+            intersectLuraphEvidence(destinationCandidates, std::move(localDestinations));
+            intersectLuraphEvidence(constantCandidates, std::move(localConstants));
+            if (writtenValue.value("primitive", false))
+                distinctConstants.insert(writtenValue.value("type", "") + ":" + writtenValue.dump());
+            else
+                constantValid = false;
+
+            std::set<std::string> localMoveSources;
+            const json origins = observation->value("write_origins", json::object());
+            const auto origin = origins.is_object() ? origins.find(std::to_string(destination)) : origins.end();
+            if (origin != origins.end() && origin->is_array() && origin->size() == 1 &&
+                (*origin)[0].value("kind", "") == "register" && (*origin)[0].contains("index") &&
+                (*origin)[0]["index"].is_number_integer())
+            {
+                const int64_t source = (*origin)[0]["index"].get<int64_t>();
+                for (auto lane = lanes.begin(); lane != lanes.end(); ++lane)
+                    if (luraphObservedInteger(lane.value()) == source)
+                        localMoveSources.insert(lane.key());
+                ++moveEvidence;
+            }
+            else
+                moveValid = false;
+            intersectLuraphEvidence(moveSourceLaneCandidates, std::move(localMoveSources));
+
+            std::set<std::string> localDescriptorLanes;
+            std::set<std::string> localTargetLanes;
+            const auto descriptor = prototype > 0
+                ? trace.closure_descriptors.find({prototype, static_cast<size_t>(pc)})
+                : trace.closure_descriptors.end();
+            if (writtenValue.value("type", "") != "function" || descriptor == trace.closure_descriptors.end() ||
+                descriptor->second.value("destination_register", std::numeric_limits<int64_t>::min()) != destination)
+                closureValid = false;
+            else if (lanes.is_object())
+            {
+                const std::string structuralLane = descriptor->second.value("descriptor_lane", "");
+                if (!structuralLane.empty() && lanes.contains(structuralLane) &&
+                    lanes[structuralLane].value("type", "") == "table")
+                    localDescriptorLanes.insert(structuralLane);
+                for (auto lane = lanes.begin(); lane != lanes.end(); ++lane)
+                    if (const std::optional<int64_t> value = luraphObservedInteger(lane.value());
+                        value && *value > 0 && *value != destination)
+                        localTargetLanes.insert(lane.key());
+            }
+            intersectLuraphEvidence(closureDescriptorLaneCandidates, std::move(localDescriptorLanes));
+            intersectLuraphEvidence(closureTargetLaneCandidates, std::move(localTargetLanes));
+        }
+
+        LuraphObservationalOpcodeRule rule;
+        rule.observations = observations.size();
+        rule.write_observations = writeObservations;
+        rule.unchanged_observations = unchangedObservations;
+        rule.sites = sites.size();
+        if (closureValid && destinationCandidates && destinationCandidates->size() == 1 &&
+            closureDescriptorLaneCandidates && closureDescriptorLaneCandidates->size() == 1 &&
+            closureTargetLaneCandidates && closureTargetLaneCandidates->size() == 1 && sites.size() >= 2)
+        {
+            rule.kind = LuraphObservationalRuleKind::Closure;
+            rule.destination_lane = *destinationCandidates->begin();
+            rule.descriptor_lane = *closureDescriptorLaneCandidates->begin();
+            rule.target_lane = *closureTargetLaneCandidates->begin();
+        }
+        else if (transferValid && sawNonFallthrough && transferCandidates && transferCandidates->size() == 1 && sites.size() >= 2)
+        {
+            rule.kind = LuraphObservationalRuleKind::Jump;
+            rule.target_lane = transferCandidates->begin()->first;
+            rule.target_adjustment = transferCandidates->begin()->second;
+        }
+        else if (moveValid && moveEvidence >= 2 && destinationCandidates && destinationCandidates->size() == 1 &&
+            moveSourceLaneCandidates && moveSourceLaneCandidates->size() == 1 && sites.size() >= 2)
+        {
+            rule.kind = LuraphObservationalRuleKind::Move;
+            rule.destination_lane = *destinationCandidates->begin();
+            rule.source_lane = *moveSourceLaneCandidates->begin();
+        }
+        else if (constantValid && writeObservations >= 2 && distinctConstants.size() >= 2 &&
+            destinationCandidates && destinationCandidates->size() == 1 && constantCandidates &&
+            constantCandidates->size() == 1 && *destinationCandidates->begin() != *constantCandidates->begin() &&
+            sites.size() >= 2)
+        {
+            rule.kind = LuraphObservationalRuleKind::LoadConstant;
+            rule.destination_lane = *destinationCandidates->begin();
+            rule.value_lane = *constantCandidates->begin();
+        }
+        if (rule.kind != LuraphObservationalRuleKind::None)
+            rules[opcode] = std::move(rule);
+    }
+    return rules;
+}
+
+json inferLuraphObservationalSiteOperation(
+    uint64_t prototype,
+    size_t pc,
+    int64_t opcode,
+    const std::vector<json>& observations,
+    const std::vector<json>* returned,
+    const std::vector<json>* children,
+    const json* closureDescriptor,
+    const std::map<int64_t, LuraphObservationalOpcodeRule>& opcodeRules,
+    const LuraphRuntimeStructureTrace& trace)
+{
+    const auto evidence = [&](std::string_view family) {
+        return json{{"semantic_family", family}, {"proof", "complete_observation_set"},
+            {"path_specific", true}, {"static_semantic", false}, {"prototype", prototype},
+            {"pc", pc}, {"opcode", opcode}, {"observation_count", observations.size()}};
+    };
+    if (returned && !returned->empty())
+    {
+        json operation = evidence("return");
+        operation["kind"] = "return";
+        operation["observed_returns"] = *returned;
+        operation["values"] = json::array();
+        return operation;
+    }
+    if (children && !children->empty())
+    {
+        json operation = evidence("call");
+        operation["kind"] = "call";
+        operation["callee_activations"] = *children;
+        std::set<uint64_t> prototypes;
+        for (const json& child : *children)
+            if (child.value("prototype", uint64_t(0)) > 0)
+                prototypes.insert(child.value("prototype", uint64_t(0)));
+        operation["callee_prototypes"] = prototypes;
+        return operation;
+    }
+    if (closureDescriptor && closureDescriptor->value("complete", false) && !observations.empty())
+    {
+        const int64_t destination = closureDescriptor->value("destination_register", std::numeric_limits<int64_t>::min());
+        bool complete = destination != std::numeric_limits<int64_t>::min();
+        for (const json& observation : observations)
+        {
+            const json writes = observation.value("register_writes", json::array());
+            complete = complete && writes.is_array() && writes.size() == 1 &&
+                writes[0].value("register", std::numeric_limits<int64_t>::min()) == destination &&
+                writes[0].contains("value") && writes[0]["value"].is_object() &&
+                writes[0]["value"].value("type", "") == "function";
+        }
+        if (complete)
+        {
+            json operation = evidence("closure");
+            operation["kind"] = "closure";
+            operation["descriptor"] = *closureDescriptor;
+            operation["destination_register"] = destination;
+            return operation;
+        }
+    }
+
+    std::set<int64_t> nextPcs;
+    for (const json& observation : observations)
+        nextPcs.insert(observation.value("next_pc", int64_t(-1)));
+    if (nextPcs.size() > 1)
+    {
+        json operation = evidence("branch");
+        operation["kind"] = "branch";
+        operation["condition"] = nullptr;
+        operation["observed_targets"] = nextPcs;
+        return operation;
+    }
+
+    bool argumentCopy = !observations.empty();
+    bool varyingArity = false;
+    std::set<size_t> arities;
+    size_t argumentWrites = 0;
+    for (const json& observation : observations)
+    {
+        const uint64_t activation = observation.value("activation", uint64_t(0));
+        if (auto activationRow = trace.activations.find(activation); activationRow != trace.activations.end())
+            arities.insert(activationRow->second.value("argument_count", size_t(0)));
+        const json writes = observation.value("register_writes", json::array());
+        const json origins = observation.value("write_origins", json::object());
+        if (!writes.is_array())
+        {
+            argumentCopy = false;
+            break;
+        }
+        for (const json& write : writes)
+        {
+            const int64_t destination = write.value("register", std::numeric_limits<int64_t>::min());
+            const auto origin = origins.is_object() ? origins.find(std::to_string(destination)) : origins.end();
+            if (destination == std::numeric_limits<int64_t>::min() || origin == origins.end() ||
+                !origin->is_array() || origin->size() != 1 || (*origin)[0].value("kind", "") != "argument")
+            {
+                argumentCopy = false;
+                break;
+            }
+            ++argumentWrites;
+        }
+        if (!argumentCopy)
+            break;
+    }
+    varyingArity = arities.size() > 1;
+    if (argumentCopy && argumentWrites > 0)
+    {
+        json operation = evidence(varyingArity ? "varargs" : "arguments");
+        operation["kind"] = varyingArity ? "capture_varargs" : "load_arguments";
+        operation["observed_argument_arities"] = arities;
+        operation["write_count"] = argumentWrites;
+        return operation;
+    }
+
+    auto rule = opcodeRules.find(opcode);
+    if (rule == opcodeRules.end())
+        return nullptr;
+    const LuraphObservationalOpcodeRule& proven = rule->second;
+    json operation = evidence(proven.kind == LuraphObservationalRuleKind::Jump ? "jump" :
+        proven.kind == LuraphObservationalRuleKind::LoadConstant ? "load_constant" :
+        proven.kind == LuraphObservationalRuleKind::Closure ? "closure" : "move");
+    operation["opcode_observations"] = proven.observations;
+    operation["opcode_sites"] = proven.sites;
+    operation["unchanged_observations"] = proven.unchanged_observations;
+    if (proven.kind == LuraphObservationalRuleKind::Jump)
+    {
+        operation["kind"] = "jump";
+        operation["target"] = {{"kind", "operand"}, {"lane", proven.target_lane},
+            {"adjustment", proven.target_adjustment}};
+    }
+    else if (proven.kind == LuraphObservationalRuleKind::Closure)
+    {
+        operation["kind"] = "closure";
+        operation["destination"] = {{"kind", "operand"}, {"lane", proven.destination_lane}};
+        operation["descriptor"] = {{"kind", "operand"}, {"lane", proven.descriptor_lane}};
+        operation["prototype_index"] = {{"kind", "operand"}, {"lane", proven.target_lane}};
+        operation["target_prototype"] = nullptr;
+        operation["captures"] = nullptr;
+    }
+    else
+    {
+        operation["kind"] = "register_write";
+        operation["register"] = {{"kind", "operand"}, {"lane", proven.destination_lane}};
+        if (proven.kind == LuraphObservationalRuleKind::LoadConstant)
+            operation["value"] = {{"kind", "operand"}, {"lane", proven.value_lane}};
+        else
+            operation["value"] = {{"kind", "register_read"},
+                {"index", {{"kind", "operand"}, {"lane", proven.source_lane}}}};
+    }
+    return operation;
+}
+
 json luraphRuntimeSemanticDispatchArtifact(
     const LuraphRuntimeStructureTrace& trace,
     const LuraphOpcodeCatalog& catalog,
@@ -8714,6 +9106,24 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"argument_count", activation.value("argument_count", json(nullptr))},
             {"entry_pc", activation.value("entry_pc", json(nullptr))},
         });
+    }
+    const std::map<int64_t, LuraphObservationalOpcodeRule> observationalOpcodeRules =
+        inferLuraphObservationalOpcodeRules(trace);
+    std::set<RuntimeSite> observationalSites;
+    for (const auto& [site, observations] : observationsBySite)
+    {
+        (void)observations;
+        observationalSites.insert(site);
+    }
+    for (const auto& [site, returns] : returnsBySite)
+    {
+        (void)returns;
+        observationalSites.insert(site);
+    }
+    for (const auto& [site, children] : childActivationsBySite)
+    {
+        (void)children;
+        observationalSites.insert(site);
     }
 
     const auto observedEffect = [&](uint64_t prototype, size_t pc, const std::vector<json>& observations) {
@@ -8840,6 +9250,8 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t traceEffectClassified = 0;
     size_t runtimeOpcodeOverrides = 0;
     size_t runtimeOperandOverrides = 0;
+    size_t observationalSemanticLifted = 0;
+    json observationalOperationCounts = json::object();
 
     json prototypes = json::array();
     for (const auto& [id, prototype] : trace.prototypes)
@@ -8921,6 +9333,7 @@ json luraphRuntimeSemanticDispatchArtifact(
             }
             row["effect_classified"] = classified;
             row["semantic_operation"] = nullptr;
+            row["observational_semantic_operation"] = nullptr;
             row["trace_specialized_operation"] = nullptr;
             bool semanticAccepted = false;
             if (handler != handlers.end() && handler->second.contains("semantic_operation") &&
@@ -8962,6 +9375,28 @@ json luraphRuntimeSemanticDispatchArtifact(
             }
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
+            const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
+            if (!semanticAccepted && (observedSite != observationsBySite.end() ||
+                observedReturnsForSite != returnsBySite.end() ||
+                childActivationsForSite != childActivationsBySite.end()))
+            {
+                static const std::vector<json> noObservations;
+                const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
+                    ? observedSite->second : noObservations;
+                const json observational = inferLuraphObservationalSiteOperation(
+                    id, pc, opcode, siteObservations,
+                    observedReturnsForSite != returnsBySite.end() ? &observedReturnsForSite->second : nullptr,
+                    childActivationsForSite != childActivationsBySite.end() ? &childActivationsForSite->second : nullptr,
+                    closureDescriptor != trace.closure_descriptors.end() ? &closureDescriptor->second : nullptr,
+                    observationalOpcodeRules, trace);
+                if (observational.is_object())
+                {
+                    row["observational_semantic_operation"] = observational;
+                    ++observationalSemanticLifted;
+                    const std::string family = observational.value("semantic_family", observational.value("kind", "unknown"));
+                    observationalOperationCounts[family] = observationalOperationCounts.value(family, size_t(0)) + 1;
+                }
+            }
             if (!semanticAccepted && (observedSite != observationsBySite.end() ||
                 observedReturnsForSite != returnsBySite.end() ||
                 childActivationsForSite != childActivationsBySite.end()))
@@ -9053,9 +9488,17 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"semantic_unresolved_instructions", effectClassified + unresolved - semanticLifted},
         {"trace_specialized_instructions", traceSpecialized},
         {"trace_effect_classified_instructions", traceEffectClassified},
+        {"observational_sites", observationalSites.size()},
+        {"observational_semantic_lifted", observationalSemanticLifted},
+        {"observational_semantic_unresolved", observationalSites.size() - observationalSemanticLifted},
+        {"unobserved_instructions", effectClassified + unresolved > observationalSites.size()
+            ? effectClassified + unresolved - observationalSites.size() : size_t(0)},
+        {"observational_operation_counts", std::move(observationalOperationCounts)},
+        {"observational_path_specific", true},
         {"runtime_opcode_overrides", runtimeOpcodeOverrides},
         {"runtime_operand_overrides", runtimeOperandOverrides},
         {"observed_semantic_coverage", semanticLifted + traceSpecialized},
+        {"observed_site_coverage", observationalSites.size()},
         {"activation_count", trace.activations.size()},
         {"activations", std::move(activations)},
         {"observed_step_count", trace.steps.size()},
@@ -9329,9 +9772,11 @@ json luraphCompactObservedSemanticArtifact(const json& runtimeSemantic)
                 for (const json& instruction : prototype["instructions"])
                 {
                     const json semantic = instruction.value("semantic_operation", json(nullptr));
+                    const json observational = instruction.value("observational_semantic_operation", json(nullptr));
                     const json specialized = instruction.value("trace_specialized_operation", json(nullptr));
                     const json returns = instruction.value("observed_returns", json::array());
-                    if (semantic.is_null() && specialized.is_null() && (!returns.is_array() || returns.empty()))
+                    if (semantic.is_null() && observational.is_null() && specialized.is_null() &&
+                        (!returns.is_array() || returns.empty()))
                         continue;
                     json row = {
                         {"pc", instruction.value("pc", size_t(0))},
@@ -9340,6 +9785,7 @@ json luraphCompactObservedSemanticArtifact(const json& runtimeSemantic)
                         {"effect_classified", instruction.value("effect_classified", false)},
                         {"path_effect_classified", instruction.value("path_effect_classified", false)},
                         {"semantic_operation", semantic},
+                        {"observational_semantic_operation", observational},
                         {"observed_returns", returns},
                     };
                     if (specialized.is_object())
@@ -11733,6 +12179,11 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeSemanticLifted = 0;
     size_t runtimeTraceSpecialized = 0;
     size_t runtimeTraceEffects = 0;
+    size_t runtimeObservationalSites = 0;
+    size_t runtimeObservationalLifted = 0;
+    size_t runtimeObservationalUnresolved = 0;
+    size_t runtimeUnobservedInstructions = 0;
+    json runtimeObservationalOperationCounts = json::object();
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -11759,6 +12210,12 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         *runtimeStructure, opcodeCatalog, runtimeEffectClassified, runtimeUnresolved, runtimeSemanticLifted);
                     runtimeTraceSpecialized = runtimeSemanticDocument->value("trace_specialized_instructions", size_t(0));
                     runtimeTraceEffects = runtimeSemanticDocument->value("trace_effect_classified_instructions", size_t(0));
+                    runtimeObservationalSites = runtimeSemanticDocument->value("observational_sites", size_t(0));
+                    runtimeObservationalLifted = runtimeSemanticDocument->value("observational_semantic_lifted", size_t(0));
+                    runtimeObservationalUnresolved = runtimeSemanticDocument->value("observational_semantic_unresolved", size_t(0));
+                    runtimeUnobservedInstructions = runtimeSemanticDocument->value("unobserved_instructions", size_t(0));
+                    runtimeObservationalOperationCounts = runtimeSemanticDocument->value(
+                        "observational_operation_counts", json::object());
                 }
                 catch (const std::exception& error)
                 {
@@ -11766,15 +12223,25 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 }
                 writeJson(runtimeSemanticPath, *runtimeSemanticDocument);
             }
+            size_t decodedDeclaredInstructions = 0;
+            for (const auto& [prototypeId, prototype] : runtimeStructure->prototypes)
+            {
+                (void)prototypeId;
+                decodedDeclaredInstructions += prototype.declared_instruction_count;
+            }
+            const bool decodedComplete = runtimeStructure->complete && decodedDeclaredInstructions > 0 &&
+                runtimeStructure->instruction_count == decodedDeclaredInstructions;
             report["passes"].push_back({
                 {"stage", "runtime_decode"},
-                {"ok", runtimeStructure->complete},
+                {"ok", decodedComplete},
                 {"scope", "reachable-prototypes-observed-offline"},
                 {"prototypes", runtimeStructure->prototypes.size()},
                 {"instructions", runtimeStructure->instruction_count},
+                {"declared_instructions", decodedDeclaredInstructions},
+                {"observed_instructions", runtimeStructure->instruction_count},
                 {"observed_steps", runtimeStructure->steps.size()},
                 {"malformed_rows", runtimeStructure->malformed_rows},
-                {"complete", runtimeStructure->complete},
+                {"complete", decodedComplete},
                 {"structure_reused", runtimeStructure->structure_reused},
                 {"semantic_classification_complete", false},
             });
@@ -11785,23 +12252,38 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"effect_classified_instructions", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
                 {"observed_effect_classified_sites", runtimeTraceEffects},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved_instructions", runtimeUnresolved},
                 {"semantic_lifted_instructions", runtimeSemanticLifted},
-                {"semantic_unresolved_instructions", runtimeStructure->instruction_count - runtimeSemanticLifted},
-                {"semantic_lifting_complete", runtimeSemanticLifted == runtimeStructure->instruction_count},
+                {"semantic_unresolved_instructions", decodedDeclaredInstructions - runtimeSemanticLifted},
+                {"semantic_lifting_complete", decodedDeclaredInstructions > 0 && runtimeSemanticLifted == decodedDeclaredInstructions},
             });
             report["diagnostics"].push_back({
                 {"stage", "runtime_decode"},
-                {"severity", runtimeStructure->complete ? "info" : "warning"},
-                {"code", runtimeStructure->complete ? "luraph_runtime_prototypes_decoded" : "luraph_runtime_prototypes_partial"},
-                {"message", runtimeStructure->complete
+                {"severity", decodedComplete ? "info" : "warning"},
+                {"code", decodedComplete ? "luraph_runtime_prototypes_decoded" : "luraph_runtime_prototypes_partial"},
+                {"message", decodedComplete
                     ? "Reachable decoded prototype lanes were captured and validated from the bounded offline runtime."
                     : "Some runtime prototype rows were missing or malformed; the partial artifact was retained without a source claim."},
             });
         }
     }
     const bool runtimeDecoded = runtimeStructure && !runtimeStructure->prototypes.empty();
+    size_t runtimeDeclaredInstructions = 0;
+    if (runtimeStructure)
+        for (const auto& [prototypeId, prototype] : runtimeStructure->prototypes)
+        {
+            (void)prototypeId;
+            runtimeDeclaredInstructions += prototype.declared_instruction_count;
+        }
+    const size_t runtimeObservedInstructions = runtimeStructure ? runtimeStructure->instruction_count : 0;
+    const bool runtimeSchemaComplete = runtimeStructure && runtimeStructure->complete &&
+        runtimeDeclaredInstructions > 0 && runtimeObservedInstructions == runtimeDeclaredInstructions;
     if (runtimeDecoded)
     {
         analysisScope = parsedContainer
@@ -11812,13 +12294,16 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         {
             report["diagnostics"].push_back({
                 {"stage", "runtime_decode"},
-                {"severity", "info"},
-                {"code", "luraph_runtime_schema_bypass"},
-                {"message", "The runtime's own deserializer exposed complete prototype objects, so the serialized LPH$ tag schema is no longer required for structural prototype and instruction recovery."},
+                {"severity", runtimeSchemaComplete ? "info" : "warning"},
+                {"code", runtimeSchemaComplete ? "luraph_runtime_schema_recovered" : "luraph_runtime_schema_partial"},
+                {"message", runtimeSchemaComplete
+                    ? "The runtime exposed a complete prototype and instruction corpus for this bounded execution."
+                    : "The runtime exposed only a partial prototype or instruction corpus; retained rows remain useful evidence but are not reported as complete."},
                 {"details", {
                     {"prototypes", runtimeStructure->prototypes.size()},
-                    {"instructions", runtimeStructure->instruction_count},
-                    {"complete", runtimeStructure->complete},
+                    {"declared_instructions", runtimeDeclaredInstructions},
+                    {"observed_instructions", runtimeObservedInstructions},
+                    {"complete", runtimeSchemaComplete},
                 }},
             });
         }
@@ -13150,8 +13635,11 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"prototypes", {{"total", analysis.container_metrics.prototype_count},
                                {"disassembled", analysis.container_metrics.prototype_count}, {"reconstructed", 0}}},
             {"blocks", {{"total", nullptr}, {"recovered", 0}, {"lifted", 0}}},
-            {"instructions", {{"total", analysis.container_metrics.instruction_count},
-                                 {"retained", retainedInstructions}, {"disassembled", retainedInstructions}, {"lifted", 0}}},
+            {"instructions", {{"total", runtimeDecoded ? json(runtimeDeclaredInstructions) : json(analysis.container_metrics.instruction_count)},
+                                 {"declared", runtimeDecoded ? json(runtimeDeclaredInstructions) : json(analysis.container_metrics.instruction_count)},
+                                 {"observed", runtimeDecoded ? json(runtimeObservedInstructions) : json(retainedInstructions)},
+                                 {"retained", runtimeDecoded ? json(runtimeObservedInstructions) : json(retainedInstructions)},
+                                 {"disassembled", runtimeDecoded ? json(runtimeObservedInstructions) : json(retainedInstructions)}, {"lifted", 0}}},
             {"constants", {{"total", analysis.container_metrics.constant_count},
                               {"metadata_recovered", analysis.container_metrics.constant_count},
                               {"values_recovered", analysis.container_metrics.constant_count},
@@ -13159,6 +13647,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"payload_decoded", false},
             {"container_decoded", true},
             {"semantic_lifted", false},
+            {"semantic_lifting_complete", false},
             {"opcode_handlers", {{"resolved", opcodeCatalog.resolved}, {"total", 256}, {"unique", opcodeCatalog.unique_handlers}}},
             {"runtime_decode", {{"available", runtimeStructure.has_value()},
                 {"complete", runtimeStructure ? json(runtimeStructure->complete) : json(nullptr)},
@@ -13168,13 +13657,19 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"effect_classified", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
                 {"observed_effect_classified_sites", runtimeTraceEffects},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeStructure ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(0)}}},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"static_container_instruction_records", retainedInstructions},
-            {"unresolved_operations", runtimeStructure
-                ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(retainedInstructions)},
+            {"unresolved_operations", runtimeDecoded
+                ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(retainedInstructions)},
         };
     }
     else
@@ -13193,16 +13688,19 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"disassembled", runtimeDecoded ? json(runtimeStructure->prototypes.size()) : json(0)},
                 {"reconstructed", 0}}},
             {"blocks", {{"total", nullptr}, {"recovered", 0}, {"lifted", 0}}},
-            {"instructions", {{"total", runtimeDecoded ? json(runtimeStructure->instruction_count) : json(nullptr)},
-                {"retained", runtimeDecoded ? json(runtimeStructure->instruction_count) : json(0)},
-                {"disassembled", runtimeDecoded ? json(runtimeStructure->instruction_count) : json(0)},
+            {"instructions", {{"total", runtimeDecoded ? json(runtimeDeclaredInstructions) : json(nullptr)},
+                {"declared", runtimeDecoded ? json(runtimeDeclaredInstructions) : json(nullptr)},
+                {"observed", runtimeDecoded ? json(runtimeObservedInstructions) : json(0)},
+                {"retained", runtimeDecoded ? json(runtimeObservedInstructions) : json(0)},
+                {"disassembled", runtimeDecoded ? json(runtimeObservedInstructions) : json(0)},
                 {"lifted", runtimeSemanticLifted}}},
             {"constants", {{"total", nullptr}, {"decoded", 0}}},
             {"payload_decoded", runtimeDecoded},
             {"container_decoded", decodedContainer},
-            {"runtime_prototype_schema_recovered", runtimeDecoded},
+            {"runtime_prototype_schema_recovered", runtimeSchemaComplete},
             {"static_serialized_schema_recovered", false},
-            {"semantic_lifted", runtimeDecoded && runtimeSemanticLifted == runtimeStructure->instruction_count},
+            {"semantic_lifted", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions},
+            {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions},
             {"opcode_handlers", {{"resolved", opcodeCatalog.resolved}, {"total", 256}, {"unique", opcodeCatalog.unique_handlers}}},
             {"runtime_decode", {{"available", runtimeStructure.has_value()},
                 {"complete", runtimeStructure ? json(runtimeStructure->complete) : json(nullptr)},
@@ -13212,12 +13710,18 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"effect_classified", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
                 {"observed_effect_classified_sites", runtimeTraceEffects},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeStructure ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(0)}}},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"unresolved_operations", runtimeDecoded
-                ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(nullptr)},
+                ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(nullptr)},
         };
     }
     report["coverage"]["payload_closure"] = payloadClosureMetrics ? json({

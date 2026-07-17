@@ -126,7 +126,16 @@ function isWeAreDevsV1(source) {
 function isLuraphEnvelope(source) {
   const text = String(source || "").replace(/^\uFEFF/, "");
   const firstLine = text.match(/^[ \t]*--[^\r\n]*/)?.[0] || "";
-  return /protected using Luraph Obfuscator(?:\s+v?[0-9]+(?:\.[0-9]+){0,2})?/i.test(firstLine);
+  const classic = /protected using Luraph Obfuscator(?:\s+v?[0-9]+(?:\.[0-9]+){0,2})?/i.test(firstLine);
+  const luaAuthLph = /^\s*la_code\s*=\s*\d+\s*;\s*la_script_id\s*=\s*['"][A-Za-z0-9_-]+['"]/i.test(text)
+    && /luaauth\.com/i.test(text.slice(0, 2000))
+    && /return\s*\(\s*\{/.test(text)
+    && /LPH\$/.test(text);
+  return classic || luaAuthLph;
+}
+
+function isNativeLuraphAdapter(adapter) {
+  return String(adapter || "").startsWith("luraph-");
 }
 
 function readJsonFile(file, fallback, limit = RESPONSE_LIMIT) {
@@ -558,7 +567,7 @@ async function verifyNativeCandidate({ runtime, inputPath, candidatePath, tempor
       "--no-normalize-pcall-errors",
       "--no-capture-string-hooks",
     ];
-    if (adapter === "luraph-v14.7" && label === "original") {
+    if (isNativeLuraphAdapter(adapter) && label === "original") {
       runtimeArguments.push(
         "--memory-limit-mb", "768",
         "--unsupported", "trace-nil",
@@ -582,7 +591,7 @@ async function verifyNativeCandidate({ runtime, inputPath, candidatePath, tempor
     const candidate = await execute(candidatePath, "candidate");
     if (!original.report || !candidate.report) return { attempted: true, equivalent: false, reason: "runtime_report_missing" };
     const paths = [inputPath, candidatePath];
-    const payloadScopedLuraph = adapter === "luraph-v14.7";
+    const payloadScopedLuraph = isNativeLuraphAdapter(adapter);
     const originalProjection = payloadScopedLuraph
       ? luraphPayloadProjection(original.report, paths)
       : runtimeProjection(original.report, paths);
@@ -972,7 +981,7 @@ async function runNativeDeobfuscator({ source, mode, temporary, inputPath, outpu
   let report = readJsonFile(reportPath, {});
   const traceProbe = path.join(outputPath, "trace_probe.luau");
   for (let probePass = 0; probePass < 2 && report.status === "blocked" && fs.existsSync(traceProbe) && fs.existsSync(runtime); probePass += 1) {
-    const luraphProbe = report.adapter === "luraph-v14.7";
+    const luraphProbe = isNativeLuraphAdapter(report.adapter);
     await onProgress?.({
       stage: "lift",
       status: "running",
@@ -1101,7 +1110,7 @@ async function runNativeDeobfuscator({ source, mode, temporary, inputPath, outpu
       });
     }
   }
-  if (report.status === "reconstructed" && report.adapter === "luraph-v14.7") {
+  if (report.status === "reconstructed" && isNativeLuraphAdapter(report.adapter)) {
     const reconstructedPath = path.join(outputPath, "reconstructed.luau");
     await onProgress?.({
       stage: "verify",
@@ -1151,7 +1160,7 @@ async function runNativeDeobfuscator({ source, mode, temporary, inputPath, outpu
     ? report.artifacts.candidate
     : null;
   const observedCandidatePath = observedCandidateName ? path.join(outputPath, observedCandidateName) : null;
-  if (report.status === "blocked" && report.adapter === "luraph-v14.7" && observedCandidatePath && fs.existsSync(observedCandidatePath)) {
+  if (report.status === "blocked" && isNativeLuraphAdapter(report.adapter) && observedCandidatePath && fs.existsSync(observedCandidatePath)) {
     await onProgress?.({
       stage: "verify",
       status: "running",
@@ -1267,7 +1276,7 @@ async function runNativeDeobfuscator({ source, mode, temporary, inputPath, outpu
   if (!sourceResult && mode !== "disassemble") {
     const liftPass = (report.passes || []).find((pass) => pass.stage === "lift") || {};
     const guardHotspot = report.coverage?.guard_hotspot;
-    if (report.adapter === "luraph-v14.7" && guardHotspot?.available === true) {
+    if (isNativeLuraphAdapter(report.adapter) && guardHotspot?.available === true) {
       await onProgress?.({
         stage: "guard_hotspot",
         status: "failed",
@@ -1278,7 +1287,7 @@ async function runNativeDeobfuscator({ source, mode, temporary, inputPath, outpu
       await onProgress?.({
         stage: "lift",
         status: "failed",
-        message: report.adapter === "luraph-v14.7"
+        message: isNativeLuraphAdapter(report.adapter)
           ? "The Luraph payload was decoded, but reachable semantic operations remain unresolved"
           : "Reachable operations remain unresolved after bounded tracing",
         metrics: liftPass,
@@ -1439,6 +1448,7 @@ module.exports = async function deobfuscate(req, res) {
     });
     const result = await runTool(toolProgram, [...toolArgs,
       inputPath, "--output-dir", outputPath, "--runtime", runtime, "--alexfuscator", compiler,
+      "--deobfuscator", NATIVE_DEOBFUSCATOR,
       "--mode", mode, "--profile", profile, "--adapter", "auto", "--max-passes", String(passes),
       "--wall-timeout", String(wallTimeout), "--instruction-budget", String(instructionBudget),
       "--network", "offline", "--no-progress",

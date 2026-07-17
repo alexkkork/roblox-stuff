@@ -76,6 +76,8 @@ test("routes bannerless WeAreDevs v1 envelopes to the native adapter", () => {
 test("routes a leading Luraph protection envelope to the native adapter", () => {
   assert.equal(isLuraphEnvelope("-- This file was protected using Luraph Obfuscator v14.7 [https://lura.ph/]\nreturn({}):P()(...);"), true);
   assert.equal(isLuraphEnvelope("\uFEFF  -- protected using luraph obfuscator v15.0\nreturn({})"), true);
+  assert.equal(isLuraphEnvelope("la_code=123;la_script_id='sanitized'\n-- luaauth.com\nreturn({payload='LPH$abc'}):O()()"), true);
+  assert.equal(isLuraphEnvelope("la_code=123;la_script_id='sanitized'\nreturn({payload='LPH$abc'})"), false);
   assert.equal(isLuraphEnvelope("print('Luraph Obfuscator')"), false);
   assert.equal(isLuraphEnvelope("-- unrelated\n-- protected using Luraph Obfuscator v14.7"), false);
 });

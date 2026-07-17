@@ -569,6 +569,10 @@ class AutoDeobfuscator:
 
         selected: Candidate | None = None
         status = "blocked"
+        native_adapter_status = next(
+            (run.get("native_status") for run in reversed(self.adapter_runs) if run.get("native_status")),
+            None,
+        )
         if self.args.mode == "disassemble":
             status = "disassembled"
         elif self.args.mode in {"auto", "exact"} and exact_candidates:
@@ -577,6 +581,8 @@ class AutoDeobfuscator:
         elif self.args.mode in {"auto", "reconstruct"} and reconstructed_candidates:
             selected = reconstructed_candidates[0]
             status = "reconstructed"
+        elif native_adapter_status == "blocked":
+            status = "blocked"
         elif self.args.mode != "exact" and self.graph.nodes:
             status = "disassembled"
 
