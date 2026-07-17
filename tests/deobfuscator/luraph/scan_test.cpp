@@ -650,6 +650,7 @@ int main()
                 "LPH$ prototype subrecords are incorrect");
             ok &= require(parsed.prototypes[0].descriptors[0].kind == 0 &&
                               parsed.prototypes[0].descriptors[0].referenced_index == 1 &&
+                              parsed.prototypes[0].descriptors[0].capture_semantics_verified &&
                               parsed.prototypes[0].descriptors[0].capture_kind_code == 0 &&
                               parsed.prototypes[0].descriptors[0].capture_source_index == 1 &&
                               parsed.prototypes[0].descriptors[0].parent_prototype_index == std::optional<size_t>(1) &&
@@ -711,15 +712,9 @@ int main()
     const luraph::EnvelopeAnalysis invalidReference = luraph::analyzeEnvelope(
         luaAuthStructuralSchemaFixture(longCarrierLiteral(invalidReferenceFixture.carrier)));
     ok &= require(invalidReference.containers.size() == 1 &&
-                      invalidReference.containers.front().parse_status == luraph::ContainerParseStatus::StructuralMetadataRecovered,
-        "LPH$ framing rejected a structurally valid container with an invalid prototype edge");
-    if (!invalidReference.containers.empty())
-    {
-        const luraph::ContainerAnalysis& parsed = invalidReference.containers.front();
-        ok &= require(parsed.invalid_prototype_reference_count == 1 && !parsed.prototype_graph_complete &&
-                          !parsed.root_selector_graph_validated && parsed.invalid_capture_descriptor_count == 0,
-            "LPH$ invalid prototype edge was presented as a complete root graph");
-    }
+                      invalidReference.containers.front().parse_status == luraph::ContainerParseStatus::UnsupportedSchema &&
+                      invalidReference.container_metrics.structural_count == 0,
+        "LPH$ framing accepted an invalid prototype graph as structural recovery");
 
     const luraph::EnvelopeAnalysis container = luraph::analyzeEnvelope(wrapperFixture(longCarrierLiteral(containerFixture.carrier)));
     ok &= require(container.static_decode.complete, "valid LPH& container decoding should complete");
@@ -824,6 +819,9 @@ int main()
                     "first descriptor split is incorrect");
                 ok &= require(prototype.descriptors[1].kind == 3 && prototype.descriptors[1].referenced_index == 3,
                     "second descriptor split is incorrect");
+                ok &= require(!prototype.descriptors[0].capture_semantics_verified &&
+                                  !prototype.descriptors[1].capture_semantics_verified,
+                    "generic LPH& descriptors inherited unproven LPH$ capture semantics");
             }
         }
         ok &= require(parsed.root_selector == 20, "root selector metadata is incorrect");

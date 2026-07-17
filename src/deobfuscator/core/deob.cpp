@@ -7466,7 +7466,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
                 return fail("guard_condition_offset_invalid");
             insertions.push_back({end, 0, ")"});
             insertions.push_back({begin, 0,
-                "__alex_lph_guard_eval(" + std::to_string(begin) + "," + std::to_string(end) + ","});
+                " __alex_lph_guard_eval(" + std::to_string(begin) + "," + std::to_string(end) + ","});
         }
     }
     insertions.push_back({fetchEnd, 0, std::move(instrumentation)});

@@ -1396,6 +1396,48 @@ return observable(true)
         self.assertIn("observe(pc)", artifact["source"])
         self.assertIn("local pc = 1", artifact["source"])
 
+    def test_unobserved_top_level_pc_write_before_branch_terminator_is_removed(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function overwritten_before_branch(flag)
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(18, pc)
+    if pc == 1 then
+      pc = (8) + 1;
+      if flag then
+      else
+      end
+      if flag then
+        pc = 2
+      else
+        pc = 3
+      end
+    elseif pc == 2 then
+      return "yes"
+    elseif pc == 3 then
+      return "no"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return overwritten_before_branch
+"""
+        )
+
+        rewritten = artifact["source"]
+        self.assertEqual(artifact["metrics"]["regions_structured"], 1)
+        self.assertEqual(artifact["metrics"]["dead_assignments_removed"], 1)
+        self.assertNotIn("pc =", rewritten)
+        self.assertIn("if flag then", rewritten)
+        self.assertIn('return "yes"', rewritten)
+        self.assertIn('return "no"', rewritten)
+
     def test_natural_loop_with_three_exits_uses_a_structured_selector(self) -> None:
         artifact = self.rewrite(
             """local function semantic_step(_, _)

@@ -453,7 +453,7 @@ size_t removeUnobservedOverwrittenPcWrites(std::vector<SourceLine>& body)
     for (size_t index = body.size(); index > 0; --index)
     {
         SourceLine& candidate = body[index - 1];
-        if (indentation(candidate.text) == 0 || !parsePcTarget(candidate.text))
+        if (!parsePcTarget(candidate.text))
             continue;
 
         bool unobservedBeforeOverwrite = true;

@@ -2364,8 +2364,6 @@ bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnaly
             metadata.raw_value = raw.value;
             metadata.kind = static_cast<unsigned int>(raw.value % 4u);
             metadata.referenced_index = raw.value / 4u;
-            metadata.capture_kind_code = metadata.kind;
-            metadata.capture_source_index = metadata.referenced_index;
             metadata.span = raw.span;
             prototype.descriptors.push_back(std::move(metadata));
         }
@@ -2454,6 +2452,7 @@ bool parseLphDollarPrototypeSection(
                 metadata.raw_value = raw.value;
                 metadata.kind = static_cast<unsigned int>(raw.value % 4u);
                 metadata.referenced_index = raw.value / 4u;
+                metadata.capture_semantics_verified = true;
                 metadata.capture_kind_code = metadata.kind;
                 metadata.capture_source_index = metadata.referenced_index;
                 metadata.span = raw.span;
@@ -2624,6 +2623,9 @@ bool parseLphDollarStructure(
                     if (!parseLphDollarPrototypeSection(bytes, sectionBegin, biases[prototypeBiasIndex], biases[instructionBiasIndex],
                             retained, limits, true))
                         return false;
+                    finalizeLphDollarPrototypeGraph(retained);
+                    if (!retained.prototype_graph_complete || !retained.root_selector_graph_validated)
+                        continue;
                     analysis.constant_count = constantCount;
                     analysis.constant_count_span = rawConstantCount.span;
                     analysis.constant_pool_mode = poolMode;

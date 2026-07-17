@@ -309,12 +309,11 @@ struct DescriptorMetadata
 {
     size_t index = 0;
     uint64_t raw_value = 0;
-    // LPH capture descriptors pack a two-bit source-kind code in the low
-    // bits and a source index in the remaining bits.  The randomized wrapper
-    // does not expose stable names for the four kind codes, so the scanner
-    // intentionally preserves the numeric code instead of guessing labels.
     unsigned int kind = 0;
     uint64_t referenced_index = 0;
+    // The verified LuaAuth LPH$ schema proves that descriptors are closure
+    // captures. Other container families retain only the generic split above.
+    bool capture_semantics_verified = false;
     unsigned int capture_kind_code = 0;
     uint64_t capture_source_index = 0;
     std::optional<size_t> parent_prototype_index;
