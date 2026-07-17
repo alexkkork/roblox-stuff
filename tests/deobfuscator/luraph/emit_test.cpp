@@ -868,12 +868,32 @@ bool testCallArgumentIdentityPropagatesInheritedCell()
 
 bool testNullTargetDescriptorStaysUnresolved()
 {
-    json incomplete = {{"complete", false}, {"target_prototype", nullptr}, {"destination_register", 2},
+    json incomplete = {{"complete", false}, {"target_prototype", nullptr}, {"destination_register", nullptr},
         {"captures", json::array()}};
     const SemanticCandidate candidate = emitWithTarget(json::array({closureInstruction(1, incomplete)}), 1);
     return require(!candidate.source.empty(), "null target descriptor aborted semantic emission") &&
         require(candidate.unresolved_closure_descriptors == 1,
             "null target descriptor was not retained as an unresolved descriptor");
+}
+
+bool testNullCaptureFieldsStayUnresolved()
+{
+    json incomplete = {{"complete", true}, {"target_prototype", 3}, {"destination_register", 2},
+        {"captures", json::array({{
+            {"capture_index", nullptr}, {"capture_kind", nullptr}, {"slot", nullptr},
+        }})}};
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({closureInstruction(1, incomplete)}), 1, 1,
+        json::array({prototype(3, json::array({
+            {{"pc", 1}, {"opcode", 31}, {"semantic_operation", {
+                {"kind", "return"}, {"values", json::array()},
+            }}},
+        }))}), json::array({cfgPrototype(3, 1)}));
+    return require(!candidate.source.empty(), "null capture fields aborted semantic emission") &&
+        require(candidate.unresolved_closure_descriptors == 1,
+            "null capture fields were not retained as unresolved evidence") &&
+        require(candidate.source.find("capture metadata is invalid or duplicated") != std::string::npos,
+            "null capture fields were silently accepted");
 }
 
 bool testNilPreservingResultPackHelper()
@@ -2063,6 +2083,7 @@ int main()
     ok &= testCallArgumentIdentityRejectsIncompleteDomain();
     ok &= testCallArgumentIdentityPropagatesInheritedCell();
     ok &= testNullTargetDescriptorStaysUnresolved();
+    ok &= testNullCaptureFieldsStayUnresolved();
     ok &= testNilPreservingResultPackHelper();
     ok &= testClosureConstructionEmitsDirectCallback();
     ok &= testActivationScopedTransitionReplay();

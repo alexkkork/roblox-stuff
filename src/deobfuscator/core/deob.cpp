@@ -10221,6 +10221,7 @@ json applyLuraphStaticClosureCorrespondence(
         {"available", false},
         {"runtime_targets_resolved", 0},
         {"static_only_targets_resolved", 0},
+        {"parent_wrapper_targets_resolved", 0},
         {"unresolved_sites", trace.closure_descriptors.size()},
     };
     if (!correspondence.value("complete", false) ||
@@ -10255,41 +10256,84 @@ json applyLuraphStaticClosureCorrespondence(
     }
 
     std::map<std::pair<size_t, size_t>, std::vector<const json*>> targetsByParentSite;
+    std::map<std::pair<size_t, size_t>, std::vector<const json*>> targetsByParentWrapper;
     for (const json& prototype : (*container)["static_prototypes"])
     {
         if (!prototype.is_object() || !prototype.contains("parent_metadata_index") ||
-            !prototype["parent_metadata_index"].is_number_unsigned() ||
-            !prototype.contains("parent_closure_pc") || !prototype["parent_closure_pc"].is_number_unsigned())
+            !prototype["parent_metadata_index"].is_number_unsigned())
             continue;
-        targetsByParentSite[{
-            prototype["parent_metadata_index"].get<size_t>(),
-            prototype["parent_closure_pc"].get<size_t>(),
-        }].push_back(&prototype);
+        const size_t parent = prototype["parent_metadata_index"].get<size_t>();
+        if (prototype.contains("parent_closure_pc") && prototype["parent_closure_pc"].is_number_unsigned())
+            targetsByParentSite[{parent, prototype["parent_closure_pc"].get<size_t>()}].push_back(&prototype);
+        if (prototype.contains("wrapper_index") && prototype["wrapper_index"].is_number_unsigned())
+            targetsByParentWrapper[{parent, prototype["wrapper_index"].get<size_t>()}].push_back(&prototype);
+    }
+
+    std::map<std::pair<uint64_t, size_t>, std::set<int64_t>> observedEffectiveOpcodes;
+    for (const json& step : trace.steps)
+    {
+        const uint64_t activation = step.value("activation", uint64_t(0));
+        const int64_t pc = step.value("pc", int64_t(-1));
+        const int64_t opcode = step.value("opcode", int64_t(-1));
+        const auto activationRow = trace.activations.find(activation);
+        if (activationRow == trace.activations.end() || pc <= 0 || opcode < 0)
+            continue;
+        const uint64_t prototype = activationRow->second.value("prototype", uint64_t(0));
+        if (prototype > 0)
+            observedEffectiveOpcodes[{prototype, static_cast<size_t>(pc)}].insert(opcode);
     }
 
     size_t runtimeResolved = 0;
     size_t staticOnlyResolved = 0;
+    size_t parentWrapperResolved = 0;
     for (auto& [site, descriptor] : trace.closure_descriptors)
     {
         const auto parent = staticParentByRuntime.find(site.first);
         if (parent == staticParentByRuntime.end())
             continue;
-        const auto targets = targetsByParentSite.find({parent->second, site.second});
-        if (targets == targetsByParentSite.end() || targets->second.size() != 1)
+        const json* target = nullptr;
+        std::string targetEvidence = "verified_static_parent_pc_correspondence";
+        bool parentWrapperEvidence = false;
+        if (const auto targets = targetsByParentSite.find({parent->second, site.second});
+            targets != targetsByParentSite.end() && targets->second.size() == 1)
+            target = targets->second.front();
+        else if (const auto observed = observedEffectiveOpcodes.find(site);
+            observed != observedEffectiveOpcodes.end() && observed->second == std::set<int64_t>{112})
+        {
+            const auto runtimeParent = trace.prototypes.find(site.first);
+            if (runtimeParent != trace.prototypes.end())
+            {
+                const auto instruction = runtimeParent->second.instructions.find(site.second);
+                if (instruction != runtimeParent->second.instructions.end())
+                if (const std::optional<int64_t> wrapper = luraphRuntimeNumericLane(instruction->second, "S");
+                    wrapper && *wrapper > 0)
+                    if (const auto targets = targetsByParentWrapper.find({
+                            parent->second, static_cast<size_t>(*wrapper)});
+                        targets != targetsByParentWrapper.end() && targets->second.size() == 1)
+                    {
+                        target = targets->second.front();
+                        targetEvidence = "runtime_validated_opcode112_parent_wrapper_operand";
+                        parentWrapperEvidence = true;
+                    }
+            }
+        }
+        if (!target)
             continue;
-        const json& target = *targets->second.front();
-        if (!target.contains("metadata_index") || !target["metadata_index"].is_number_unsigned() ||
-            !target.contains("wrapper_index") || !target["wrapper_index"].is_number_unsigned() ||
-            !target.value("captures_complete", false) || !target.contains("captures") ||
-            !target["captures"].is_array())
+        const json& targetRow = *target;
+        if (!targetRow.contains("metadata_index") || !targetRow["metadata_index"].is_number_unsigned() ||
+            !targetRow.contains("wrapper_index") || !targetRow["wrapper_index"].is_number_unsigned() ||
+            !targetRow.value("captures_complete", false) || !targetRow.contains("captures") ||
+            !targetRow["captures"].is_array())
             continue;
-        const size_t wrapper = target["wrapper_index"].get<size_t>();
-        descriptor["static_target_metadata_index"] = target["metadata_index"];
+        const size_t wrapper = targetRow["wrapper_index"].get<size_t>();
+        descriptor["static_target_metadata_index"] = targetRow["metadata_index"];
         descriptor["static_target_wrapper_index"] = wrapper;
-        descriptor["static_target_instruction_count"] = target.value("instruction_count", size_t(0));
-        descriptor["captures"] = target["captures"];
+        descriptor["static_target_instruction_count"] = targetRow.value("instruction_count", size_t(0));
+        descriptor["captures"] = targetRow["captures"];
         descriptor["capture_evidence"] = "verified_static_prototype_descriptor";
-        descriptor["target_evidence"] = "verified_static_parent_pc_correspondence";
+        descriptor["target_evidence"] = targetEvidence;
+        if (parentWrapperEvidence)
+            ++parentWrapperResolved;
         const auto runtimeTarget = runtimeByStaticWrapper.find(wrapper);
         if (runtimeTarget == runtimeByStaticWrapper.end())
         {
@@ -10307,6 +10351,7 @@ json applyLuraphStaticClosureCorrespondence(
     metrics["available"] = true;
     metrics["runtime_targets_resolved"] = runtimeResolved;
     metrics["static_only_targets_resolved"] = staticOnlyResolved;
+    metrics["parent_wrapper_targets_resolved"] = parentWrapperResolved;
     metrics["unresolved_sites"] = trace.closure_descriptors.size() - runtimeResolved - staticOnlyResolved;
     return metrics;
 }
@@ -15736,6 +15781,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 "runtime_targets_resolved", size_t(0))},
             {"static_only_targets_resolved", runtimeClosureCorrespondence.value(
                 "static_only_targets_resolved", size_t(0))},
+            {"parent_wrapper_targets_resolved", runtimeClosureCorrespondence.value(
+                "parent_wrapper_targets_resolved", size_t(0))},
             {"unresolved_sites", runtimeClosureCorrespondence.value("unresolved_sites", size_t(0))},
         });
         if (!prototypeCorrespondenceDocument->value("complete", false))
