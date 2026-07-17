@@ -3303,10 +3303,22 @@ private:
                 {"kind", "register_read"},
                 {"index", {{"kind", "constant"}, {"value", index}}},
             });
+        json callee = value["callee"];
+        if (callee.value("kind", "") == "register_read")
+        {
+            const std::optional<int64_t> registerIndex = provenRegisterIndex(callee, "index");
+            if (!registerIndex || *registerIndex < 0)
+                return fail("opcode-8 callee register is not a proven nonnegative index");
+            callee["index"] = {
+                {"kind", "constant"},
+                {"value", *registerIndex},
+            };
+        }
+
         json call = {
             {"kind", "call"},
             {"method", false},
-            {"function", value["callee"]},
+            {"function", std::move(callee)},
             {"arguments", std::move(arguments)},
         };
         const std::string invocation = expression(call, context);

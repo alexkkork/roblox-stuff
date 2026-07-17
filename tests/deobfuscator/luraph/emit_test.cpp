@@ -1451,6 +1451,68 @@ bool testPathSpecificWritesCallAndReturnRenderCleanly()
     return ok;
 }
 
+json exactOpcode8Call(int functionRegister, int argumentBegin, int argumentEnd,
+    std::string resultMode, int resultBase, int resultEnd = -1)
+{
+    const bool openResults = resultMode == "open";
+    return {
+        {"kind", "call"},
+        {"semantic_family", "call"},
+        {"opcode", 8},
+        {"runtime_validated", true},
+        {"path_specific", true},
+        {"proof", "complete_runtime_guard_path_and_packed_handler_shape"},
+        {"callee", {{"kind", "register_read"}, {"index", functionRegister}}},
+        {"argument_pack", {
+            {"mode", "fixed"},
+            {"count", argumentEnd - argumentBegin},
+            {"registers", {
+                {"begin", argumentBegin},
+                {"end_exclusive", argumentEnd},
+                {"dynamic_end", false},
+            }},
+        }},
+        {"result_base_register", resultBase},
+        {"result_placement", {
+            {"mode", resultMode},
+            {"assignment_count", openResults ? json(nullptr) : json(resultEnd - resultBase)},
+            {"assignment_registers", {
+                {"begin", resultBase},
+                {"end_exclusive", openResults ? json(nullptr) : json(resultEnd)},
+                {"dynamic_end", openResults},
+            }},
+            {"top_after", openResults ? json(nullptr) : json(resultEnd)},
+        }},
+    };
+}
+
+bool testExactOpcode8CallsPreserveFixedAndOpenResults()
+{
+    const SemanticCandidate fixed = emitWithTarget(json::array({
+        pathSpecificInstruction(1, exactOpcode8Call(3, 4, 6, "fixed", 3, 5)),
+    }), 0);
+    const SemanticCandidate open = emitWithTarget(json::array({
+        pathSpecificInstruction(1, exactOpcode8Call(6, 7, 8, "open", 6)),
+    }), 0);
+
+    bool ok = true;
+    ok &= require(fixed.source.find(
+            "registers[3], registers[4] = (registers[3])(registers[4], registers[5])") !=
+            std::string::npos && fixed.source.find("top = 5") != std::string::npos,
+        "fixed opcode-8 call did not preserve register arguments, multireturn placement, and top");
+    ok &= require(fixed.fixed_register_calls == 1 && fixed.open_register_calls == 0 &&
+            fixed.unsupported_operations == 0,
+        "fixed opcode-8 call was not counted as a complete lowering");
+    ok &= require(open.source.find("pack_values((registers[6])(registers[7]))") != std::string::npos &&
+            open.source.find("registers[6 + result_index - 1]") != std::string::npos &&
+            open.source.find("top = 6 + recovered_call_results") != std::string::npos,
+        "open opcode-8 call did not preserve nil-bearing variadic results and dynamic top");
+    ok &= require(open.fixed_register_calls == 0 && open.open_register_calls == 1 &&
+            open.unsupported_operations == 0,
+        "open opcode-8 call was not counted as a complete lowering");
+    return ok;
+}
+
 bool testFixedArgumentLoadUsesProvenRegisterDestinations()
 {
     const json bindings = json::array({
@@ -1975,6 +2037,7 @@ int main()
     ok &= testSharedRootArgumentTableSpecializesChildPrototype();
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
+    ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
     ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
     ok &= testProvenRegisterClearRangeEmitsInclusiveLuau();
