@@ -1513,6 +1513,47 @@ bool testExactOpcode8CallsPreserveFixedAndOpenResults()
     return ok;
 }
 
+bool testObservedGlobalIdentitySpecializesCallArgument()
+{
+    json ir = {
+        {"payload_root", {{"payload_prototype", 2}, {"closure_descriptor", rootDescriptor()}}},
+        {"prototype_call_edges", json::array({{
+            {"caller_prototype", 2},
+            {"caller_pc", 1},
+            {"callee_prototype", 3},
+            {"observed_activations", 1},
+            {"observed_argument_count_complete", true},
+            {"observed_argument_count", 2},
+            {"observed_argument_identities", json::array({
+                {{"argument_index", 1},
+                    {"identity", {{"type", "global_reference"}, {"path", "string"}}},
+                    {"observed_activations", 1}},
+                {{"argument_index", 2},
+                    {"identity", {{"type", "nil"}, {"value", nullptr}}},
+                    {"observed_activations", 1}},
+            })},
+        }})},
+        {"observed_transition_sequences", json::array()},
+        {"observed_lane_sequences", json::array()},
+        {"observed_capture_domains", json::array()},
+        {"closure_descriptors", json::array()},
+        {"prototypes", json::array({
+            prototype(2, json::array({
+                pathSpecificInstruction(1, exactOpcode8Call(3, 4, 6, "fixed", 3, 4)),
+            })),
+            prototype(3, json::array({registerAliasInstruction(1, 1, 1)})),
+        })},
+    };
+    const json cfg = {{"prototypes", json::array({cfgPrototype(2, 1), cfgPrototype(3, 1)})}};
+    const SemanticCandidate candidate = emitSemanticCandidate(ir, cfg);
+    return require(candidate.source.find(
+            "call_recovered(registers[3], recovered_routine_3, captured_values, environment[\"string\"], registers[5])") !=
+            std::string::npos,
+            "stable observed global identity did not replace an unresolved call argument") &&
+        require(candidate.observed_global_call_arguments == 1,
+            "observed global call-argument specialization was not counted exactly once");
+}
+
 bool testFixedArgumentLoadUsesProvenRegisterDestinations()
 {
     const json bindings = json::array({
@@ -2038,6 +2079,7 @@ int main()
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
+    ok &= testObservedGlobalIdentitySpecializesCallArgument();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
     ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
     ok &= testProvenRegisterClearRangeEmitsInclusiveLuau();

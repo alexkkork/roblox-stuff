@@ -29,6 +29,7 @@ struct SemanticCandidate
     size_t direct_prototype_calls = 0;
     size_t fixed_register_calls = 0;
     size_t open_register_calls = 0;
+    size_t observed_global_call_arguments = 0;
     size_t inferred_root_slots = 0;
     size_t root_argument_shared_prototypes = 0;
     size_t root_argument_references_specialized = 0;

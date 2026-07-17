@@ -872,7 +872,7 @@ private:
                                 identityObservations != observations || !row.contains("identity"))
                                 continue;
                             const std::optional<ObservedValueIdentity> identity = observedValueIdentity(row["identity"]);
-                            if (!identity || !identity->callable || ambiguousArguments.contains(argumentIndex))
+                            if (!identity || ambiguousArguments.contains(argumentIndex))
                                 continue;
                             const auto existing = frame.argument_identities.find(argumentIndex);
                             if (existing != frame.argument_identities.end() &&
@@ -2652,6 +2652,26 @@ private:
             std::to_string(context.pc) + ", " + quoteLuau(kind) + ", " + quoteLuau(reason) + ")";
     }
 
+    std::optional<std::string> observedGlobalCallArgument(
+        const Context& context, size_t argumentIndex)
+    {
+        if (!context.callee || argumentIndex == 0)
+            return std::nullopt;
+        const auto frame = observedCallFrames.find(
+            {context.prototype, context.pc, *context.callee});
+        if (frame == observedCallFrames.end())
+            return std::nullopt;
+        const auto identity = frame->second.argument_identities.find(argumentIndex);
+        if (identity == frame->second.argument_identities.end() ||
+            identity->second.identity.value.value("type", "") != "global_reference")
+            return std::nullopt;
+        const std::optional<std::string> source = observedBootstrapExpression(
+            identity->second.identity.value);
+        if (source)
+            ++result.observed_global_call_arguments;
+        return source;
+    }
+
     std::string expression(const json& value, Context& context, size_t depth = 0)
     {
         if (depth > 64 || !value.is_object())
@@ -2806,8 +2826,16 @@ private:
         if (kind == "call")
         {
             std::vector<std::string> arguments;
+            size_t argumentIndex = 0;
             for (const json& argument : value.value("arguments", json::array()))
-                arguments.push_back(expression(argument, context, depth + 1));
+            {
+                ++argumentIndex;
+                if (const std::optional<std::string> observed =
+                        observedGlobalCallArgument(context, argumentIndex))
+                    arguments.push_back(*observed);
+                else
+                    arguments.push_back(expression(argument, context, depth + 1));
+            }
             std::string joined;
             for (size_t index = 0; index < arguments.size(); ++index)
             {
