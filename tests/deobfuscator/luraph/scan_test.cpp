@@ -652,6 +652,8 @@ int main()
                               parsed.prototypes[0].descriptors[0].referenced_index == 1 &&
                               parsed.prototypes[0].descriptors[0].capture_semantics_verified &&
                               parsed.prototypes[0].descriptors[0].capture_kind_code == 0 &&
+                              parsed.prototypes[0].descriptors[0].capture_source_kind ==
+                                  luraph::CaptureSourceKind::MutableParentRegisterCell &&
                               parsed.prototypes[0].descriptors[0].capture_source_index == 1 &&
                               parsed.prototypes[0].descriptors[0].parent_prototype_index == std::optional<size_t>(1) &&
                               parsed.prototypes[0].descriptors[0].source_index_validated &&
@@ -820,7 +822,9 @@ int main()
                 ok &= require(prototype.descriptors[1].kind == 3 && prototype.descriptors[1].referenced_index == 3,
                     "second descriptor split is incorrect");
                 ok &= require(!prototype.descriptors[0].capture_semantics_verified &&
-                                  !prototype.descriptors[1].capture_semantics_verified,
+                                  !prototype.descriptors[1].capture_semantics_verified &&
+                                  prototype.descriptors[0].capture_source_kind == luraph::CaptureSourceKind::Unverified &&
+                                  prototype.descriptors[1].capture_source_kind == luraph::CaptureSourceKind::Unverified,
                     "generic LPH& descriptors inherited unproven LPH$ capture semantics");
             }
         }

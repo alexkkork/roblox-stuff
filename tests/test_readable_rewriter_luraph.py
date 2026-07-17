@@ -1501,6 +1501,38 @@ return three_exit_loop
         self.assertIn('output = "one"', rewritten)
         self.assertIn('output = "two"', rewritten)
 
+    def test_parenthesized_index_lvalue_becomes_valid_plain_luau(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function indexed_write(captured_values, registers)
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(19, pc)
+    if pc == 1 then
+      (captured_values[0.0][3.0])[captured_values[0.0][2.0]] = registers[1];
+      pc = 2
+    elseif pc == 2 then
+      return registers[1]
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return indexed_write
+"""
+        )
+
+        rewritten = artifact["source"]
+        self.assertEqual(artifact["metrics"]["regions_structured"], 1)
+        self.assertGreater(artifact["metrics"]["redundant_parentheses_removed"], 0)
+        self.assertNotIn(";(captured_values", rewritten)
+        self.assertNotIn("(captured_values[0][3])[", rewritten)
+        self.assertIn("captured_values[0][3][captured_values[0][2]] = registers[1]", rewritten)
+
 
 if __name__ == "__main__":
     unittest.main()

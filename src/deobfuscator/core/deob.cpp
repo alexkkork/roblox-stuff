@@ -9086,6 +9086,221 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     }
 }
 
+using LuraphGuardDecisionKey = std::pair<size_t, size_t>;
+
+Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
+    Luau::AstStat* statement,
+    Luau::AstLocal* opcodeLocal,
+    int64_t opcode,
+    const std::map<Luau::AstLocal*, double>& bindings,
+    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
+    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
+    const SourceView& view,
+    size_t& decisionsUsed);
+
+Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
+    Luau::AstStatBlock* block,
+    Luau::AstLocal* opcodeLocal,
+    int64_t opcode,
+    const std::map<Luau::AstLocal*, double>& bindings,
+    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
+    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
+    const SourceView& view,
+    size_t& decisionsUsed)
+{
+    if (!block || block->body.size == 0)
+        return block;
+    for (Luau::AstStat* statement : block->body)
+    {
+        auto conditional = statement->as<Luau::AstStatIf>();
+        if (!conditional)
+            continue;
+        std::optional<bool> decision = evaluateStateCondition(
+            conditional->condition, opcodeLocal, opcode, &bindings);
+        if (!decision)
+        {
+            const LuraphGuardDecisionKey key{
+                view.offset(conditional->condition->location.begin),
+                view.offset(conditional->condition->location.end),
+            };
+            const auto observed = decisions.find(key);
+            size_t& offset = decisionOffsets[key];
+            if (observed == decisions.end() || offset >= observed->second.size())
+                return nullptr;
+            decision = observed->second[offset++];
+            ++decisionsUsed;
+        }
+        if (*decision)
+            return selectLuraphObservedGuardLeaf(
+                conditional->thenbody, opcodeLocal, opcode, bindings,
+                decisions, decisionOffsets, view, decisionsUsed);
+        if (conditional->elsebody)
+            return selectLuraphObservedGuardLeaf(
+                conditional->elsebody, opcodeLocal, opcode, bindings,
+                decisions, decisionOffsets, view, decisionsUsed);
+    }
+    return block;
+}
+
+Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
+    Luau::AstStat* statement,
+    Luau::AstLocal* opcodeLocal,
+    int64_t opcode,
+    const std::map<Luau::AstLocal*, double>& bindings,
+    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
+    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
+    const SourceView& view,
+    size_t& decisionsUsed)
+{
+    if (!statement)
+        return nullptr;
+    if (auto block = statement->as<Luau::AstStatBlock>())
+        return selectLuraphObservedGuardLeaf(
+            block, opcodeLocal, opcode, bindings, decisions, decisionOffsets, view, decisionsUsed);
+    auto conditional = statement->as<Luau::AstStatIf>();
+    if (!conditional)
+        return nullptr;
+    std::optional<bool> decision = evaluateStateCondition(
+        conditional->condition, opcodeLocal, opcode, &bindings);
+    if (!decision)
+    {
+        const LuraphGuardDecisionKey key{
+            view.offset(conditional->condition->location.begin),
+            view.offset(conditional->condition->location.end),
+        };
+        const auto observed = decisions.find(key);
+        size_t& offset = decisionOffsets[key];
+        if (observed == decisions.end() || offset >= observed->second.size())
+            return nullptr;
+        decision = observed->second[offset++];
+        ++decisionsUsed;
+    }
+    return selectLuraphObservedGuardLeaf(
+        *decision ? static_cast<Luau::AstStat*>(conditional->thenbody) : conditional->elsebody,
+        opcodeLocal, opcode, bindings, decisions, decisionOffsets, view, decisionsUsed);
+}
+
+size_t attachLuraphObservedGuardSemantics(
+    std::string_view source,
+    LuraphRuntimeStructureTrace& trace)
+{
+    auto parsed = parseSource(source);
+    if (!parsed->result.errors.empty())
+        return 0;
+    LuraphLoopShapeCollector shapeCollector;
+    parsed->result.root->visit(&shapeCollector);
+    auto shape = std::max_element(
+        shapeCollector.shapes.begin(), shapeCollector.shapes.end(),
+        [](const LuraphLoopShape& left, const LuraphLoopShape& right) {
+            return left.conditionals < right.conditionals;
+        });
+    if (shape == shapeCollector.shapes.end() || !shape->opcode || !shape->body || !shape->pc)
+        return 0;
+    LuraphOpcodeDispatcherCollector dispatcherCollector(shape->opcode);
+    shape->body->visit(&dispatcherCollector);
+    auto dispatcherCandidate = std::max_element(
+        dispatcherCollector.candidates.begin(), dispatcherCollector.candidates.end(),
+        [](const auto& left, const auto& right) { return left.conditionals < right.conditionals; });
+    if (dispatcherCandidate == dispatcherCollector.candidates.end())
+        return 0;
+    Luau::AstStatIf* dispatcher = dispatcherCandidate->node;
+    SourceView view(source);
+    const std::map<Luau::AstLocal*, double> bindings = proveLuraphGuardBindings(
+        parsed->result.root, dispatcher, shape->opcode, view);
+
+    LuraphRegisterRoleCollector roles(shape->pc);
+    shape->body->visit(&roles);
+    auto registerRole = std::max_element(
+        roles.register_scores.begin(), roles.register_scores.end(),
+        [](const auto& left, const auto& right) { return left.second < right.second; });
+    Luau::AstLocal* registers = registerRole == roles.register_scores.end() ? nullptr : registerRole->first;
+    if (!registers)
+        return 0;
+    std::set<Luau::AstLocal*> lanes = roles.pc_indexed_tables;
+    lanes.erase(shape->opcode_table);
+    lanes.erase(registers);
+    LuraphTopRoleCollector topRoles(registers);
+    shape->body->visit(&topRoles);
+    auto topRole = std::max_element(
+        topRoles.scores.begin(), topRoles.scores.end(),
+        [](const auto& left, const auto& right) { return left.second < right.second; });
+    LuraphUpvalueRoleCollector upvalueRoles(registers, shape->pc, lanes);
+    shape->body->visit(&upvalueRoles);
+    auto upvalueRole = std::max_element(
+        upvalueRoles.scores.begin(), upvalueRoles.scores.end(),
+        [](const auto& left, const auto& right) { return left.second < right.second; });
+
+    LuraphSemanticRoles semanticRoles;
+    semanticRoles.registers = registers;
+    semanticRoles.pc = shape->pc;
+    semanticRoles.opcode = shape->opcode;
+    semanticRoles.opcode_table = shape->opcode_table;
+    semanticRoles.top = topRole == topRoles.scores.end() ? nullptr : topRole->first;
+    semanticRoles.upvalues = upvalueRole == upvalueRoles.scores.end() ? nullptr : upvalueRole->first;
+    for (Luau::AstLocal* lane : lanes)
+        if (lane && lane->name.value)
+            semanticRoles.lanes[lane] = lane->name.value;
+
+    size_t attached = 0;
+    for (json& step : trace.steps)
+    {
+        const json path = step.value("guard_path", json(nullptr));
+        if (!path.is_object() || !path.value("complete", false) ||
+            !path.contains("decisions") || !path["decisions"].is_array())
+            continue;
+        const int64_t opcode = step.value("opcode", int64_t(-1));
+        if (opcode < 0 || opcode > 255)
+            continue;
+        std::map<LuraphGuardDecisionKey, std::vector<bool>> decisions;
+        bool valid = true;
+        for (const json& row : path["decisions"])
+        {
+            if (!row.is_object() || !row.contains("begin") || !row["begin"].is_number_unsigned() ||
+                !row.contains("end") || !row["end"].is_number_unsigned() ||
+                !row.contains("decision") || !row["decision"].is_boolean())
+            {
+                valid = false;
+                break;
+            }
+            decisions[{row["begin"].get<size_t>(), row["end"].get<size_t>()}].push_back(
+                row["decision"].get<bool>());
+        }
+        if (!valid)
+            continue;
+        std::map<LuraphGuardDecisionKey, size_t> decisionOffsets;
+        size_t decisionsUsed = 0;
+        Luau::AstStatBlock* leaf = selectLuraphObservedGuardLeaf(
+            dispatcher, shape->opcode, opcode, bindings, decisions,
+            decisionOffsets, view, decisionsUsed);
+        if (!leaf)
+            continue;
+        LuraphOpcodeReferenceFinder opcodeReference(shape->opcode);
+        leaf->visit(&opcodeReference);
+        if (opcodeReference.found)
+            continue;
+        const LuraphNormalizedHandler normalized = normalizeLuraphHandler(
+            leaf, semanticRoles, opcode);
+        if (!normalized.semantic_operation.is_object() ||
+            normalized.semantic_operation.value("protector_state", false) ||
+            !normalized.semantic_operation.value("source_semantic", true) ||
+            luraphSemanticContainsUnknownState(normalized.semantic_operation))
+            continue;
+        step["guard_replayed_semantic_operation"] = normalized.semantic_operation;
+        step["guard_replay"] = {
+            {"complete", true},
+            {"decisions_available", path["decisions"].size()},
+            {"decisions_used", decisionsUsed},
+            {"handler_range", {
+                {"begin", view.offset(leaf->location.begin)},
+                {"end", view.offset(leaf->location.end)},
+            }},
+            {"proof", "recorded_condition_decisions_replayed_through_original_ast"},
+        };
+        ++attached;
+    }
+    return attached;
+}
+
 json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, std::string_view sourceHash)
 {
     json prototypes = json::array();
@@ -9335,18 +9550,124 @@ bool luraphObservedValuesEqual(const json& left, const json& right)
     return false;
 }
 
+std::optional<double> luraphObservedExpressionNumber(const json& expression)
+{
+    if (!expression.is_object())
+        return std::nullopt;
+    const std::string kind = expression.value("kind", "");
+    if (kind == "constant" && expression.contains("value") && expression["value"].is_number())
+        return expression["value"].get<double>();
+    if (kind == "immediate" && expression.contains("value") && expression["value"].is_object() &&
+        expression["value"].value("type", "") == "number" &&
+        expression["value"].contains("value") && expression["value"]["value"].is_string())
+    {
+        try
+        {
+            size_t consumed = 0;
+            const std::string encoded = expression["value"]["value"].get<std::string>();
+            const double value = std::stod(encoded, &consumed);
+            return consumed == encoded.size() ? std::optional<double>(value) : std::nullopt;
+        }
+        catch (const std::exception&)
+        {
+            return std::nullopt;
+        }
+    }
+    if (kind != "binary")
+        return std::nullopt;
+    const std::optional<double> left = luraphObservedExpressionNumber(expression.value("left", json(nullptr)));
+    const std::optional<double> right = luraphObservedExpressionNumber(expression.value("right", json(nullptr)));
+    if (!left || !right)
+        return std::nullopt;
+    const std::string operation = expression.value("operator", "");
+    if (operation == "+")
+        return *left + *right;
+    if (operation == "-")
+        return *left - *right;
+    if (operation == "*")
+        return *left * *right;
+    if (operation == "/" && *right != 0.0)
+        return *left / *right;
+    return std::nullopt;
+}
+
+bool luraphObservedExpressionMatches(const json& expression, const json& observed)
+{
+    if (!expression.is_object() || !observed.is_object())
+        return false;
+    const std::string kind = expression.value("kind", "");
+    if (kind == "immediate" && expression.contains("value") && expression["value"].is_object())
+        return luraphObservedValuesEqual(expression["value"], observed);
+    if (kind == "constant" && expression.contains("value"))
+    {
+        const json& value = expression["value"];
+        if (value.is_null())
+            return observed.value("type", "") == "nil";
+        if (value.is_boolean())
+            return observed.value("type", "") == "boolean" &&
+                observed.value("value", "") == (value.get<bool>() ? "true" : "false");
+        if (value.is_string())
+            return observed.value("type", "") == "string" && observed.value("value", "") == value.get<std::string>();
+    }
+    const std::optional<double> expectedNumber = luraphObservedExpressionNumber(expression);
+    if (!expectedNumber || observed.value("type", "") != "number" ||
+        !observed.contains("value") || !observed["value"].is_string())
+        return false;
+    try
+    {
+        size_t consumed = 0;
+        const std::string encoded = observed["value"].get<std::string>();
+        const double actualNumber = std::stod(encoded, &consumed);
+        return consumed == encoded.size() &&
+            (std::isnan(*expectedNumber) ? std::isnan(actualNumber) : actualNumber == *expectedNumber);
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
 std::optional<json> validateLuraphObservedCandidate(
     const json& operation,
     const std::vector<json>& observations,
-    size_t pc)
+    size_t pc,
+    const std::vector<json>* observedReturns)
 {
-    if (!operation.is_object() || observations.empty() ||
+    if (!operation.is_object() ||
         operation.value("protector_state", false) ||
         !operation.value("source_semantic", true) ||
         luraphSemanticContainsUnknownState(operation))
         return std::nullopt;
 
     const std::string kind = operation.value("kind", "");
+    if (kind == "return")
+    {
+        if (!observedReturns || observedReturns->empty() ||
+            !operation.contains("values") || !operation["values"].is_array())
+            return std::nullopt;
+        const json& expectedValues = operation["values"];
+        size_t matchedReturns = 0;
+        for (const json& returned : *observedReturns)
+        {
+            if (!returned.value("complete", false) ||
+                returned.value("arity", std::numeric_limits<size_t>::max()) != expectedValues.size() ||
+                !returned.contains("values") || !returned["values"].is_array() ||
+                returned["values"].size() != expectedValues.size())
+                return std::nullopt;
+            for (size_t index = 0; index < expectedValues.size(); ++index)
+                if (!luraphObservedExpressionMatches(expectedValues[index], returned["values"][index]))
+                    return std::nullopt;
+            ++matchedReturns;
+        }
+        return json{
+            {"proof", "observed_return_arity_and_values"},
+            {"validated_fields", json::array({"arity", "values"})},
+            {"observation_count", matchedReturns},
+        };
+    }
+
+    if (observations.empty())
+        return std::nullopt;
     if (kind == "register_write")
     {
         const std::optional<int64_t> destination = luraphMaterializedRegisterIndex(operation);
@@ -10070,6 +10391,8 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t observationalSemanticLifted = 0;
     size_t guardedCandidatesValidated = 0;
     size_t guardedCandidatesRejected = 0;
+    size_t guardReplaySitesValidated = 0;
+    size_t guardReplaySitesDivergent = 0;
     json observationalOperationCounts = json::object();
 
     json prototypes = json::array();
@@ -10196,7 +10519,51 @@ json luraphRuntimeSemanticDispatchArtifact(
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
             const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
+            if (!semanticAccepted && observedSite != observationsBySite.end())
+            {
+                std::optional<json> replayed;
+                bool completeReplay = !observedSite->second.empty();
+                for (const json& observation : observedSite->second)
+                {
+                    const json operation = observation.value(
+                        "guard_replayed_semantic_operation", json(nullptr));
+                    if (!operation.is_object())
+                    {
+                        completeReplay = false;
+                        break;
+                    }
+                    if (!replayed)
+                        replayed = operation;
+                    else if (*replayed != operation)
+                    {
+                        completeReplay = false;
+                        ++guardReplaySitesDivergent;
+                        break;
+                    }
+                }
+                if (completeReplay && replayed)
+                {
+                    json operation = materializeLuraphSemanticOperation(*replayed, effectiveLanes);
+                    if (!luraphObservedSemanticContradicts(operation, observedSite->second))
+                    {
+                        operation["static_semantic"] = false;
+                        operation["path_specific"] = true;
+                        operation["candidate_proof"] = operation.value("proof", "");
+                        operation["proof"] = "recorded_guard_path_replayed_through_original_ast";
+                        operation["guard_replay_observations"] = observedSite->second.size();
+                        row["observational_semantic_operation"] = std::move(operation);
+                        row["guard_path_replayed"] = true;
+                        ++guardReplaySitesValidated;
+                        ++observationalSemanticLifted;
+                        const std::string family = row["observational_semantic_operation"].value(
+                            "semantic_family", row["observational_semantic_operation"].value("kind", "unknown"));
+                        observationalOperationCounts[family] =
+                            observationalOperationCounts.value(family, size_t(0)) + 1;
+                    }
+                }
+            }
             if (!semanticAccepted && observedSite != observationsBySite.end() &&
+                row["observational_semantic_operation"].is_null() &&
                 handler != handlers.end() &&
                 handler->second.value("selection_status", "") == "ambiguous" &&
                 handler->second.value("vm_state_independent", false) &&
@@ -10206,7 +10573,9 @@ json luraphRuntimeSemanticDispatchArtifact(
                 json candidate = materializeLuraphSemanticOperation(
                     handler->second["candidate_semantic_operation"], effectiveLanes);
                 if (std::optional<json> validation = validateLuraphObservedCandidate(
-                        candidate, observedSite->second, pc))
+                        candidate, observedSite->second, pc,
+                        observedReturnsForSite != returnsBySite.end()
+                            ? &observedReturnsForSite->second : nullptr))
                 {
                     candidate["static_semantic"] = false;
                     candidate["path_specific"] = true;
@@ -10348,6 +10717,8 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"observational_semantic_unresolved", observationalSites.size() - observationalSemanticLifted},
         {"guarded_candidates_validated", guardedCandidatesValidated},
         {"guarded_candidates_rejected", guardedCandidatesRejected},
+        {"guard_replay_sites_validated", guardReplaySitesValidated},
+        {"guard_replay_sites_divergent", guardReplaySitesDivergent},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
         {"structurally_missing_instructions", declaredInstructionCount > effectClassified + unresolved
@@ -10402,6 +10773,9 @@ struct LuraphPayloadRootEvidence
     uint64_t payload_prototype = 0;
     int64_t caller_pc = 0;
     int64_t caller_opcode = 0;
+    uint64_t bootstrap_return_vm_count = 0;
+    uint64_t payload_entry_vm_count = 0;
+    std::string evidence;
 };
 
 bool luraphSemanticIsTerminalCall(const json& operation)
@@ -10428,6 +10802,57 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             continue;
         for (const json& instruction : prototype["instructions"])
             semanticBySite[{prototypeId, instruction.value("pc", int64_t(-1))}] = &instruction;
+    }
+
+    // The bootstrap may return a callable/descriptor to the native wrapper, which
+    // invokes the payload as a new top-level VM activation. This is not a child
+    // call: the previous activation must have completed immediately before it.
+    std::vector<std::pair<uint64_t, uint64_t>> topLevelActivations;
+    for (const auto& [activationId, activation] : runtime.activations)
+    {
+        if (!activation.value("caller_activation", json(nullptr)).is_null())
+            continue;
+        const uint64_t entryVmCount = activation.value("entry_vm_count", uint64_t(0));
+        if (entryVmCount > 0)
+            topLevelActivations.emplace_back(entryVmCount, activationId);
+    }
+    std::sort(topLevelActivations.begin(), topLevelActivations.end());
+    for (size_t index = 1; index < topLevelActivations.size(); ++index)
+    {
+        const auto [entryVmCount, activationId] = topLevelActivations[index];
+        const auto [previousEntryVmCount, previousActivationId] = topLevelActivations[index - 1];
+        (void)previousEntryVmCount;
+        auto payloadActivation = runtime.activations.find(activationId);
+        auto bootstrapActivation = runtime.activations.find(previousActivationId);
+        if (payloadActivation == runtime.activations.end() || bootstrapActivation == runtime.activations.end())
+            continue;
+        const json* completedBootstrapReturn = nullptr;
+        for (const json& returned : runtime.returns)
+        {
+            if (returned.value("activation", uint64_t(0)) != previousActivationId ||
+                !returned.value("complete", false) || returned.value("vm_count", uint64_t(0)) + 1 != entryVmCount)
+                continue;
+            completedBootstrapReturn = &returned;
+            break;
+        }
+        if (!completedBootstrapReturn)
+            continue;
+        const uint64_t bootstrapPrototype = bootstrapActivation->second.value("prototype", uint64_t(0));
+        const uint64_t payloadPrototype = payloadActivation->second.value("prototype", uint64_t(0));
+        if (bootstrapPrototype == 0 || payloadPrototype == 0 ||
+            !runtime.prototypes.contains(payloadPrototype))
+            continue;
+        return LuraphPayloadRootEvidence{
+            previousActivationId,
+            bootstrapPrototype,
+            activationId,
+            payloadPrototype,
+            completedBootstrapReturn->value("pc", int64_t(-1)),
+            completedBootstrapReturn->value("opcode", int64_t(-1)),
+            completedBootstrapReturn->value("vm_count", uint64_t(0)),
+            entryVmCount,
+            "sequential_top_level_handoff",
+        };
     }
 
     std::optional<LuraphPayloadRootEvidence> selected;
@@ -10466,6 +10891,9 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             callerPc,
             activation.contains("caller_opcode") && activation["caller_opcode"].is_number_integer()
                 ? activation["caller_opcode"].get<int64_t>() : int64_t(-1),
+            0,
+            activation.value("entry_vm_count", uint64_t(0)),
+            "bootstrap_terminal_return_call",
         };
     }
     return selected;
@@ -10919,7 +11347,11 @@ json luraphPayloadClosureArtifact(
             {"payload_prototype", payloadRoot->payload_prototype},
             {"caller_pc", payloadRoot->caller_pc},
             {"caller_opcode", payloadRoot->caller_opcode},
-            {"evidence", "bootstrap_terminal_return_call"},
+            {"bootstrap_return_vm_count", payloadRoot->bootstrap_return_vm_count > 0
+                ? json(payloadRoot->bootstrap_return_vm_count) : json(nullptr)},
+            {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
+                ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
+            {"evidence", payloadRoot->evidence},
             {"closure_descriptor", nullptr},
         };
         if (auto descriptor = runtime.closure_descriptors.find({
@@ -10952,7 +11384,9 @@ json luraphPayloadClosureArtifact(
         {"kind", "luraph-observed-payload-closure"},
         {"scope", !dynamic.calls.empty()
             ? "confirmed-call-roots-and-descendant-activations"
-            : "bootstrap-terminal-call-root-and-descendant-activations"},
+            : payloadRoot && payloadRoot->evidence == "sequential_top_level_handoff"
+                ? "sequential-top-level-handoff-and-descendant-activations"
+                : "bootstrap-terminal-call-root-and-descendant-activations"},
         {"payload_root", std::move(payloadRootArtifact)},
         {"source_recovered", false},
         {"static_semantic_complete", metrics.instructions > 0 && metrics.statically_lifted == metrics.instructions},
@@ -13071,6 +13505,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         {
             parsedStructure = parseLuraphRuntimeStructureTrace(
                 *options.trace, opcodeCatalog, structureSeed ? &*structureSeed : nullptr);
+            if (!parsedStructure.steps.empty())
+                attachLuraphObservedGuardSemantics(protectedSource, parsedStructure);
         }
         catch (const std::exception& error)
         {
@@ -13236,13 +13672,17 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             report["passes"].push_back({
                 {"stage", "payload_root"},
                 {"ok", true},
-                {"evidence", "bootstrap_terminal_return_call"},
+                {"evidence", payloadRoot->evidence},
                 {"bootstrap_activation", payloadRoot->bootstrap_activation},
                 {"bootstrap_prototype", payloadRoot->bootstrap_prototype},
                 {"payload_activation", payloadRoot->payload_activation},
                 {"payload_prototype", payloadRoot->payload_prototype},
                 {"caller_pc", payloadRoot->caller_pc},
                 {"caller_opcode", payloadRoot->caller_opcode},
+                {"bootstrap_return_vm_count", payloadRoot->bootstrap_return_vm_count > 0
+                    ? json(payloadRoot->bootstrap_return_vm_count) : json(nullptr)},
+                {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
+                    ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
             });
         }
     }
@@ -14720,13 +15160,17 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     }) : json({{"available", false}});
     report["coverage"]["payload_root"] = payloadRoot ? json({
         {"available", true},
-        {"evidence", "bootstrap_terminal_return_call"},
+        {"evidence", payloadRoot->evidence},
         {"bootstrap_activation", payloadRoot->bootstrap_activation},
         {"bootstrap_prototype", payloadRoot->bootstrap_prototype},
         {"payload_activation", payloadRoot->payload_activation},
         {"payload_prototype", payloadRoot->payload_prototype},
         {"caller_pc", payloadRoot->caller_pc},
         {"caller_opcode", payloadRoot->caller_opcode},
+        {"bootstrap_return_vm_count", payloadRoot->bootstrap_return_vm_count > 0
+            ? json(payloadRoot->bootstrap_return_vm_count) : json(nullptr)},
+        {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
+            ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
     }) : json({{"available", false}});
     report["coverage"]["payload_cfg"] = payloadCfgDocument ? json({
         {"available", true},

@@ -6950,6 +6950,8 @@ size_t removeEmbeddedExpressionSemicolons(std::vector<OutputLine>& lines)
 
 size_t removeRedundantIdentifierIndexGroupings(std::vector<OutputLine>& lines)
 {
+    static const std::regex IndexPath(
+        R"(^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+(?:\.0+)?\]))*$)");
     size_t removed = 0;
     for (OutputLine& output : lines)
     {
@@ -6995,7 +6997,7 @@ size_t removeRedundantIdentifierIndexGroupings(std::vector<OutputLine>& lines)
                 if (close == std::string::npos)
                     break;
                 const std::string_view grouped = trimView(std::string_view(line).substr(open + 1, close - open - 1));
-                if (!plainIdentifier(grouped))
+                if (!std::regex_match(grouped.begin(), grouped.end(), IndexPath))
                     continue;
                 size_t next = close + 1;
                 while (next < line.size() && std::isspace(static_cast<unsigned char>(line[next])))
@@ -7107,7 +7109,7 @@ size_t removeRedundantExpressionParentheses(std::vector<OutputLine>& lines)
         }
 
         static const std::regex Atomic(
-            R"(^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*$)");
+            R"(^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+(?:\.0+)?\]))*$)");
         progress = true;
         while (progress)
         {

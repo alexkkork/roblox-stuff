@@ -163,6 +163,15 @@ enum class ConstantKind
     Nil,
 };
 
+enum class CaptureSourceKind
+{
+    Unverified,
+    MutableParentRegisterCell,
+    ParentRegisterValue,
+    InheritedParentCaptureKind2,
+    InheritedParentCaptureKind3,
+};
+
 enum class StageKind
 {
     ProtectionBanner,
@@ -315,6 +324,7 @@ struct DescriptorMetadata
     // captures. Other container families retain only the generic split above.
     bool capture_semantics_verified = false;
     unsigned int capture_kind_code = 0;
+    CaptureSourceKind capture_source_kind = CaptureSourceKind::Unverified;
     uint64_t capture_source_index = 0;
     std::optional<size_t> parent_prototype_index;
     bool source_index_validated = false;

@@ -2454,6 +2454,13 @@ bool parseLphDollarPrototypeSection(
                 metadata.referenced_index = raw.value / 4u;
                 metadata.capture_semantics_verified = true;
                 metadata.capture_kind_code = metadata.kind;
+                switch (metadata.capture_kind_code)
+                {
+                case 0: metadata.capture_source_kind = CaptureSourceKind::MutableParentRegisterCell; break;
+                case 1: metadata.capture_source_kind = CaptureSourceKind::ParentRegisterValue; break;
+                case 2: metadata.capture_source_kind = CaptureSourceKind::InheritedParentCaptureKind2; break;
+                case 3: metadata.capture_source_kind = CaptureSourceKind::InheritedParentCaptureKind3; break;
+                }
                 metadata.capture_source_index = metadata.referenced_index;
                 metadata.span = raw.span;
                 prototype.descriptors.push_back(std::move(metadata));
