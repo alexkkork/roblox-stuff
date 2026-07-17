@@ -386,6 +386,9 @@ public:
         append("local unpack_values = unpack or table.unpack\n");
         append("local select_value = select\n");
         append("local function unresolved_helper(...) return nil end\n");
+        append("local function unsupported_semantic_operation(prototype, pc, kind, reason)\n");
+        append("  error(\"unsupported recovered semantic operation at prototype \" .. tostring(prototype) .. \" pc \" .. tostring(pc) .. \" (\" .. tostring(kind) .. \"): \" .. tostring(reason), 0)\n");
+        append("end\n");
         append("local function resolve_named_function(name)\n");
         append("  return environment[name]\n");
         append("    or (environment.string and environment.string[name])\n");
@@ -628,6 +631,7 @@ private:
         std::string runtime_lanes_variable;
         std::set<std::string> runtime_lane_names;
         std::map<std::string, std::string> stable_lane_literals;
+        bool path_specific = false;
     };
 
     struct CaptureDomain

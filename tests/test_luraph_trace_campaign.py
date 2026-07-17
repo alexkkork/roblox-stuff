@@ -107,6 +107,12 @@ def main() -> int:
         require(report["guards"]["available"] is False, "old trace unexpectedly reported guard evidence")
         require(report["guards"]["records"] == 0, "empty guard summary is not backward compatible")
         require(report["guards"]["conflicts"]["count"] == 0, "empty guard summary reported conflicts")
+        require(report["guard_paths"]["available"] is False, "old trace unexpectedly reported guard paths")
+        require(report["guard_paths"]["records"] == 0, "empty guard-path summary is not backward compatible")
+        require(
+            report["guard_paths"]["conflicts"]["count"] == 0,
+            "empty guard-path summary reported conflicts",
+        )
         require(len(report["vm_windows"]["windows"]) == 2, "VM window count drifted")
         first_window = report["vm_windows"]["windows"][0]
         require(first_window["start"] == 1 and first_window["end"] == 2, "window alignment drifted")
@@ -319,6 +325,177 @@ def main() -> int:
             "conflict examples are not deterministically ordered",
         )
 
+        guard_path_first = temp / "guard-path-first.log"
+        guard_path_second = temp / "guard-path-second.jsonl"
+        guard_path_merged = temp / "guard-path-merged.log"
+        guard_path_report_path = temp / "guard-path-report.json"
+        first_guard_path = marker(
+            "@@LPH_GUARD_PATH_V1@@",
+            20,
+            4,
+            70,
+            117,
+            2,
+            0,
+            "100:120:1|130:140:0",
+        )
+        guard_path_first.write_text(
+            "\n".join(
+                [
+                    marker("@@LPH_STEP_V1@@", 20, 4, 70, 117, 71, 0, "", "D=n:1"),
+                    marker("@@LPH_STEP_V1@@", 21, 4, 71, 118, 72, 0, "", "D=n:1"),
+                    first_guard_path,
+                    first_guard_path,
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        guard_path_second_records = [
+            {"line": first_guard_path},
+            {
+                "marker": "@@LPH_GUARD_PATH_V1@@",
+                "fields": [20, 4, 70, 117, 2, 0, "100:120:0|130:140:0"],
+            },
+            {
+                "marker": "@@LPH_GUARD_PATH_V1@@",
+                "fields": [20, 4, 70, 118, 2, 0, "100:120:1|130:140:0"],
+            },
+            {
+                "marker": "@@LPH_GUARD_PATH_V1@@",
+                "fields": [20, 4, 70, 117, 2, 0, "130:140:0|100:120:1"],
+            },
+            {
+                "marker": "@@LPH_GUARD_PATH_V1@@",
+                "fields": [21, 4, 71, 118, 1, 1, "200:220:1"],
+            },
+            {
+                "marker": "@@LPH_GUARD_PATH_V1@@",
+                "fields": [22, 5, 1, 72, 0, 0, ""],
+            },
+        ]
+        guard_path_second.write_text(
+            "\n".join(json.dumps(record, separators=(",", ":")) for record in guard_path_second_records)
+            + "\n",
+            encoding="utf-8",
+        )
+        guard_path_report = run_campaign(
+            [guard_path_first, guard_path_second],
+            guard_path_merged,
+            guard_path_report_path,
+            window_size=10,
+        )
+        guard_path_lines = [
+            line
+            for line in guard_path_merged.read_text(encoding="utf-8").splitlines()
+            if line.startswith("@@LPH_GUARD_PATH_V1@@")
+        ]
+        guard_paths = guard_path_report["guard_paths"]
+        require(len(guard_path_lines) == 6, "guard-path dedupe discarded evidence or retained duplicates")
+        require(guard_path_lines[0] == first_guard_path, "first guard-path row was not preserved verbatim")
+        require(
+            any(line.endswith("130:140:0|100:120:1") for line in guard_path_lines),
+            "ordered guard-path decisions were incorrectly normalized as a set",
+        )
+        require(guard_paths["available"] is True, "guard-path evidence was not reported")
+        require(guard_paths["input_records"] == 8, "guard-path input count drifted")
+        require(guard_paths["unique_records"] == 6, "guard-path canonical dedupe drifted")
+        require(guard_paths["duplicates_removed"] == 2, "guard-path duplicate count drifted")
+        require(
+            guard_path_report["merge"]["guard_path_duplicates_removed"] == 2,
+            "merge guard-path duplicate count drifted",
+        )
+        require(guard_paths["decision_observations"] == 9, "guard-path decision count drifted")
+        require(guard_paths["unique_events"] == 3, "guard-path event coverage drifted")
+        require(guard_paths["unique_vm_counts"] == 3, "guard-path VM-count coverage drifted")
+        require(guard_paths["unique_sites"] == 4, "guard-path site coverage drifted")
+        require(guard_paths["unique_opcodes"] == 3, "guard-path opcode coverage drifted")
+        require(guard_paths["complete_paths"] == 5, "complete guard-path count drifted")
+        require(guard_paths["overflow_paths"] == 1, "overflow guard-path count drifted")
+        require(guard_paths["complete_path_ratio"] == 0.833333, "guard-path completion ratio drifted")
+        require(guard_paths["unique_conditions"] == 3, "guard-path condition coverage drifted")
+        require(
+            guard_paths["conditions_with_both_outcomes"] == 1,
+            "guard-path outcome diversity drifted",
+        )
+        require(guard_paths["execution_vm_counts"] == 2, "guard paths inflated execution coverage")
+        require(
+            guard_paths["execution_vm_counts_with_guard_paths"] == 2,
+            "guard-path/execution overlap drifted",
+        )
+        require(
+            guard_paths["execution_vm_count_coverage_ratio"] == 1.0,
+            "guard-path execution coverage ratio drifted",
+        )
+        require(guard_paths["conflicts"]["path_conflicts"] == 1, "path conflict was not reported")
+        require(guard_paths["conflicts"]["opcode_conflicts"] == 1, "path opcode conflict was not reported")
+        require(guard_paths["conflicts"]["count"] == 2, "guard-path conflict total drifted")
+        require(
+            [
+                window["guard_paths"]["records"]
+                for window in guard_path_report["vm_windows"]["windows"]
+            ]
+            == [4, 2],
+            "window guard-path count drifted",
+        )
+        require(
+            guard_path_report["vm_windows"]["windows"][0]["execution_vm_counts"] == 2,
+            "guard paths inflated window execution coverage",
+        )
+
+        guard_path_jsonl = temp / "guard-path-merged.jsonl"
+        run_campaign(
+            [guard_path_first, guard_path_second],
+            guard_path_jsonl,
+            temp / "guard-path-jsonl-report.json",
+            output_format="jsonl",
+        )
+        decoded_guard_paths = [
+            row
+            for line in guard_path_jsonl.read_text(encoding="utf-8").splitlines()
+            if (row := json.loads(line))["marker"] == "@@LPH_GUARD_PATH_V1@@"
+        ]
+        require(len(decoded_guard_paths) == 6, "JSONL guard-path output disagrees with TSV output")
+        require(
+            decoded_guard_paths[0]["fields"][-1] == "100:120:1|130:140:0",
+            "JSONL changed ordered guard-path decisions",
+        )
+        require(decoded_guard_paths[-1]["fields"][-1] == "", "JSONL lost the empty zero-decision path")
+
+        invalid_guard_paths = {
+            "missing field": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 0),
+            "extra field": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 0, "", "extra"),
+            "zero vm count": marker("@@LPH_GUARD_PATH_V1@@", 0, 1, 1, 1, 0, 0, ""),
+            "zero activation": marker("@@LPH_GUARD_PATH_V1@@", 1, 0, 1, 1, 0, 0, ""),
+            "zero pc": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 0, 1, 0, 0, ""),
+            "opcode range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 256, 0, 0, ""),
+            "decision limit": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 4097, 0, ""),
+            "overflow range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 2, ""),
+            "count mismatch": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 2, 0, "1:2:1"),
+            "zero with entry": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 0, "1:2:1"),
+            "nonzero empty": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, ""),
+            "empty entry": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 2, 0, "1:2:1|"),
+            "entry shape": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "1:2"),
+            "empty range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "2:2:1"),
+            "reversed range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "3:2:1"),
+            "decision range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "1:2:2"),
+            "negative integer": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "-1:2:1"),
+            "noncanonical integer": marker("@@LPH_GUARD_PATH_V1@@", "01", 1, 1, 1, 0, 0, ""),
+        }
+        for case, invalid_guard_path in invalid_guard_paths.items():
+            invalid_path = temp / f"invalid-guard-path-{case.replace(' ', '-')}.log"
+            invalid_path.write_text(invalid_guard_path + "\n", encoding="utf-8")
+            try:
+                run_campaign(
+                    [invalid_path],
+                    temp / f"invalid-guard-path-{case.replace(' ', '-')}-merged.log",
+                    temp / f"invalid-guard-path-{case.replace(' ', '-')}-report.json",
+                )
+            except CampaignError:
+                pass
+            else:
+                raise AssertionError(f"invalid guard-path row was accepted: {case}")
+
         help_result = subprocess.run(
             [sys.executable, str(TOOL), "--help"],
             cwd=ROOT,
@@ -330,7 +507,10 @@ def main() -> int:
         require(help_result.returncode == 0, "CLI help failed")
         require("VM-count window" in help_result.stdout, "CLI help is missing its purpose")
 
-    print("Luraph trace campaign OK: merge, hashes, windows, guards, JSONL, and conflict checks passed")
+    print(
+        "Luraph trace campaign OK: merge, hashes, windows, guards, guard paths, JSONL, "
+        "and conflict checks passed"
+    )
     return 0
 
 

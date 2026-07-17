@@ -44,6 +44,14 @@ struct SemanticCandidate
     size_t replayed_dynamic_lane_values = 0;
     size_t specialized_stable_lanes = 0;
     size_t specialized_stable_lane_values = 0;
+    size_t path_specific_operations = 0;
+    size_t path_specific_register_writes = 0;
+    size_t path_specific_table_writes = 0;
+    size_t path_specific_control_flow = 0;
+    size_t path_specific_calls = 0;
+    size_t path_specific_returns = 0;
+    size_t path_specific_closures = 0;
+    size_t unsupported_path_specific_operations = 0;
 
     bool fully_rendered() const
     {

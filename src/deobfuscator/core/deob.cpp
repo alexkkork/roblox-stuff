@@ -7046,7 +7046,7 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             {"resolved", resolved},
             {"opcode_local_reused", opcodeLocalReused},
             {"selection_status", resolved ? "exact" : leaf ? "ambiguous" : "missing"},
-            {"unresolved_guard_path", selectionAmbiguous},
+            {"unresolved_guard_path", selectionAmbiguous || opcodeLocalReused},
         };
         if (leaf)
         {
@@ -13493,6 +13493,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeObservationalUnresolved = 0;
     size_t runtimeGuardedCandidatesValidated = 0;
     size_t runtimeGuardedCandidatesRejected = 0;
+    size_t runtimeGuardReplaySitesValidated = 0;
+    size_t runtimeGuardReplaySitesDivergent = 0;
     size_t runtimeUnobservedInstructions = 0;
     json runtimeObservationalOperationCounts = json::object();
     json runtimeWriteOriginEvidence = json::object();
@@ -13531,6 +13533,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "guarded_candidates_validated", size_t(0));
                     runtimeGuardedCandidatesRejected = runtimeSemanticDocument->value(
                         "guarded_candidates_rejected", size_t(0));
+                    runtimeGuardReplaySitesValidated = runtimeSemanticDocument->value(
+                        "guard_replay_sites_validated", size_t(0));
+                    runtimeGuardReplaySitesDivergent = runtimeSemanticDocument->value(
+                        "guard_replay_sites_divergent", size_t(0));
                     runtimeUnobservedInstructions = runtimeSemanticDocument->value("unobserved_instructions", size_t(0));
                     runtimeObservationalOperationCounts = runtimeSemanticDocument->value(
                         "observational_operation_counts", json::object());
@@ -13577,6 +13583,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"observational_semantic_unresolved", runtimeObservationalUnresolved},
                 {"guarded_candidates_validated", runtimeGuardedCandidatesValidated},
                 {"guarded_candidates_rejected", runtimeGuardedCandidatesRejected},
+                {"guard_replay_sites_validated", runtimeGuardReplaySitesValidated},
+                {"guard_replay_sites_divergent", runtimeGuardReplaySitesDivergent},
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
@@ -13794,6 +13802,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         (*guardHotspotDocument)["observational_semantic_unresolved"] = runtimeObservationalUnresolved;
         (*guardHotspotDocument)["guarded_candidates_validated"] = runtimeGuardedCandidatesValidated;
         (*guardHotspotDocument)["guarded_candidates_rejected"] = runtimeGuardedCandidatesRejected;
+        (*guardHotspotDocument)["guard_replay_sites_validated"] = runtimeGuardReplaySitesValidated;
+        (*guardHotspotDocument)["guard_replay_sites_divergent"] = runtimeGuardReplaySitesDivergent;
         (*guardHotspotDocument)["unobserved_instructions"] = runtimeUnobservedInstructions;
         (*guardHotspotDocument)["observational_operation_counts"] = runtimeObservationalOperationCounts;
         (*guardHotspotDocument)["observational_path_specific"] = true;
@@ -13812,6 +13822,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"observational_semantic_unresolved", runtimeObservationalUnresolved},
             {"guarded_candidates_validated", runtimeGuardedCandidatesValidated},
             {"guarded_candidates_rejected", runtimeGuardedCandidatesRejected},
+            {"guard_replay_sites_validated", runtimeGuardReplaySitesValidated},
+            {"guard_replay_sites_divergent", runtimeGuardReplaySitesDivergent},
             {"unobserved_instructions", runtimeUnobservedInstructions},
             {"observational_operation_counts", runtimeObservationalOperationCounts},
             {"observational_path_specific", true},
