@@ -54,6 +54,12 @@ function normalizeGameId(value) {
   return gameId.toString();
 }
 
+function resolveInputLanguage(language, filename) {
+  const selected = choice(language, LANGUAGES, "auto", "language");
+  if (selected !== "auto") return selected;
+  return String(filename || "script.luau").toLowerCase().endsWith(".alex") ? "alex" : "luau";
+}
+
 function normalizeIntent(input = {}) {
   const profile = choice(input.profile, PROFILES, "maximum", "profile");
   const runtime = choice(input.runtime, RUNTIMES, "universal", "runtime");
@@ -118,4 +124,4 @@ function issueToken(req, input) {
   };
 }
 
-module.exports = { decodeToken, encodeToken, issueToken, normalizeGameId, normalizeIntent, workerUrl };
+module.exports = { decodeToken, encodeToken, issueToken, normalizeGameId, normalizeIntent, resolveInputLanguage, workerUrl };

@@ -4,7 +4,7 @@ const http = require("http");
 const path = require("path");
 const { Readable } = require("stream");
 const { spawn } = require("child_process");
-const { decodeToken, normalizeIntent } = require("../lib/compile-token");
+const { decodeToken, normalizeIntent, resolveInputLanguage } = require("../lib/compile-token");
 const { decodeAdminToken } = require("../lib/admin-auth");
 
 const SOURCE_LIMIT = 1.5 * 1024 * 1024;
@@ -85,6 +85,7 @@ function allowedOrigin(req, res) {
       "X-Alex-Backend",
       "X-Alex-VM-Version",
       "X-Alex-IR-Version",
+      "X-Alex-Language",
     ].join(","),
   );
   return true;
@@ -297,7 +298,7 @@ function validateCompilePayload(input, token) {
   if (seed !== "auto" && !/^[0-9]+$/.test(seed)) throw Object.assign(new Error("seed must be auto or an unsigned integer"), { code: "invalid_request", status: 400 });
   const filename = String(input.filename || "script.luau");
   if (filename.length > 255 || /[\\/\0]/.test(filename)) throw Object.assign(new Error("filename must be a simple file name"), { code: "invalid_request", status: 400 });
-  const effectiveLanguage = intent.language === "auto" && filename.toLowerCase().endsWith(".alex") ? "alex" : intent.language === "auto" ? "luau" : intent.language;
+  const effectiveLanguage = resolveInputLanguage(intent.language, filename);
   return { source, seed, filename, effective_language: effectiveLanguage, ...intent };
 }
 
@@ -345,7 +346,7 @@ function compile(binary, request, token) {
       if (code !== 0) {
         let diagnostic = { code: "compile_failed", message: "native compiler rejected the input" };
         try { diagnostic = JSON.parse(stderr.trim()).error || diagnostic; } catch {}
-        return finish(Object.assign(new Error(diagnostic.message), { code: diagnostic.code || "compile_failed", status: 422 }));
+        return finish(Object.assign(new Error(diagnostic.message), { code: diagnostic.code || "compile_failed", status: 422, diagnostic }));
       }
       let report = {};
       try { report = JSON.parse(reportText); } catch {}
@@ -426,7 +427,19 @@ async function handler(req, res) {
   }
   if (req.method === "POST" && pathname === "/v2/compile") {
     try { return await handleCompile(req, res); }
-    catch (error) { return json(res, error.status || 500, { ok: false, error: { code: error.code || "worker_error", message: error.message || "worker error" } }); }
+    catch (error) {
+      const diagnostic = error.diagnostic || {};
+      return json(res, error.status || 500, { ok: false, error: {
+        code: error.code || "worker_error",
+        message: error.message || "worker error",
+        ...(diagnostic.stage ? { stage: diagnostic.stage } : {}),
+        ...(diagnostic.language ? { language: diagnostic.language } : {}),
+        ...(diagnostic.kind ? { kind: diagnostic.kind } : {}),
+        ...(diagnostic.location ? { location: diagnostic.location } : {}),
+        ...(diagnostic.prototype ? { prototype: diagnostic.prototype } : {}),
+        ...(diagnostic.instruction !== undefined ? { instruction: diagnostic.instruction } : {})
+      } });
+    }
   }
   return json(res, 404, { ok: false, error: { code: "not_found" } });
 }

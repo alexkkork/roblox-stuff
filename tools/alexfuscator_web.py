@@ -235,13 +235,14 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict:
 
 def safe_stem(value: str) -> str:
     name = Path(value or "pasted_script.luau").name
-    if not name.endswith((".lua", ".luau", ".txt")):
+    if not name.endswith((".lua", ".luau", ".alex", ".txt")):
         name += ".luau"
+    suffix = ".alex" if name.endswith(".alex") else ".luau"
     keep = []
     for ch in Path(name).stem:
         keep.append(ch if ch.isalnum() or ch in ("-", "_") else "_")
     stem = "".join(keep).strip("_") or "pasted_script"
-    return stem + ".luau"
+    return stem + suffix
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -332,6 +333,10 @@ class Handler(BaseHTTPRequestHandler):
             if owner_lock not in {"off", "sign", "sign-and-lock"}:
                 owner_lock = "off"
             owner_private_key = str(payload.get("ownerPrivateKey", "")).strip()
+            language = str(payload.get("language", "auto")).lower()
+            if language not in {"auto", "luau", "alex"}:
+                json_response(self, 400, {"ok": False, "error": "bad language"})
+                return
 
             request_id = time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}_{time.time_ns() % 1_000_000_000:09d}"
             request_dir = REQUEST_ROOT / request_id
@@ -357,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 "roblox-luau",
                 "--report",
                 str(debug_path),
+                "--language",
+                language,
             ]
             if analysis_notice:
                 cmd.extend(["--analysis-notice", analysis_notice])

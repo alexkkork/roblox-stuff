@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -1518,6 +1519,10 @@ struct V6Program
     size_t opaqueGuardCount = 0;
     size_t substitutionCount = 0;
     size_t superoperatorCount = 0;
+    size_t constantFoldCount = 0;
+    size_t branchFoldCount = 0;
+    size_t unreachableInstructionCount = 0;
+    size_t redundantMoveCount = 0;
     bool registerReuse = false;
 };
 
@@ -1664,6 +1669,46 @@ const V6OpInfo& v6OpInfo(V6Op op)
     return v6InstructionSet()[index];
 }
 
+std::string_view v6OperandRoleName(V6OperandRole role)
+{
+    switch (role)
+    {
+    case V6OperandRole::RegisterDef:
+        return "register_def";
+    case V6OperandRole::RegisterUse:
+        return "register_use";
+    case V6OperandRole::Constant:
+        return "constant";
+    case V6OperandRole::String:
+        return "string";
+    case V6OperandRole::Local:
+        return "local_cell";
+    case V6OperandRole::Prototype:
+        return "prototype";
+    case V6OperandRole::Target:
+        return "block_target";
+    case V6OperandRole::Immediate:
+        return "immediate";
+    case V6OperandRole::None:
+        return "none";
+    }
+    return "none";
+}
+
+std::string_view v6ResultBehaviorName(V6ResultBehavior result)
+{
+    switch (result)
+    {
+    case V6ResultBehavior::None:
+        return "zero";
+    case V6ResultBehavior::Single:
+        return "one";
+    case V6ResultBehavior::Pack:
+        return "variadic";
+    }
+    return "zero";
+}
+
 bool v6IsBinary(V6Op op)
 {
     return op == V6Op::Binary || op == V6Op::BinaryAlt;
@@ -1776,6 +1821,257 @@ std::vector<V6BasicBlock> buildV6Blocks(const std::vector<V6Instruction>& code)
             addSuccessor(block.end);
     }
     return blocks;
+}
+
+std::optional<bool> v6ConstantTruthy(const json& constant)
+{
+    if (!constant.is_array() || constant.empty() || !constant[0].is_number_integer())
+        return std::nullopt;
+    int tag = constant[0].get<int>();
+    if (tag == 0)
+        return false;
+    if (tag == 1 && constant.size() >= 2)
+        return constant[1].get<int>() != 0;
+    if (tag == 2 || tag == 3)
+        return true;
+    return std::nullopt;
+}
+
+std::optional<json> foldV6Unary(V6Unary operation, const json& value, const V6Program& program)
+{
+    if (operation == V6Unary::Not)
+    {
+        if (std::optional<bool> truthy = v6ConstantTruthy(value))
+            return json::array({1, *truthy ? 0 : 1});
+        return std::nullopt;
+    }
+    if (!value.is_array() || value.size() < 2)
+        return std::nullopt;
+    int tag = value[0].get<int>();
+    if (operation == V6Unary::Minus && tag == 2)
+        return json::array({2, -value[1].get<double>()});
+    if (operation == V6Unary::Length && tag == 3)
+    {
+        uint32_t stringId = value[1].get<uint32_t>();
+        if (stringId != 0 && stringId <= program.strings.size())
+            return json::array({2, program.strings[stringId - 1].size()});
+    }
+    return std::nullopt;
+}
+
+std::optional<json> foldV6Binary(V6Binary operation, const json& left, const json& right, const V6Program& program)
+{
+    if (!left.is_array() || !right.is_array() || left.empty() || right.empty())
+        return std::nullopt;
+    int leftTag = left[0].get<int>();
+    int rightTag = right[0].get<int>();
+    auto boolean = [](bool value) { return json::array({1, value ? 1 : 0}); };
+
+    if (operation == V6Binary::Eq || operation == V6Binary::Ne)
+    {
+        bool equal = false;
+        if (leftTag == rightTag)
+        {
+            if (leftTag == 0)
+                equal = true;
+            else if (leftTag == 1)
+                equal = left[1].get<int>() == right[1].get<int>();
+            else if (leftTag == 2)
+                equal = left[1].get<double>() == right[1].get<double>();
+            else if (leftTag == 3)
+                equal = left[1].get<uint32_t>() == right[1].get<uint32_t>();
+            else
+                return std::nullopt;
+        }
+        return boolean(operation == V6Binary::Eq ? equal : !equal);
+    }
+
+    if (leftTag == 2 && rightTag == 2)
+    {
+        double lhs = left[1].get<double>();
+        double rhs = right[1].get<double>();
+        if (operation == V6Binary::Lt)
+            return boolean(lhs < rhs);
+        if (operation == V6Binary::Le)
+            return boolean(lhs <= rhs);
+        if (operation == V6Binary::Gt)
+            return boolean(lhs > rhs);
+        if (operation == V6Binary::Ge)
+            return boolean(lhs >= rhs);
+
+        double result = 0.0;
+        if (operation == V6Binary::Add)
+            result = lhs + rhs;
+        else if (operation == V6Binary::Sub)
+            result = lhs - rhs;
+        else if (operation == V6Binary::Mul)
+            result = lhs * rhs;
+        else if (operation == V6Binary::Div)
+            result = lhs / rhs;
+        else if (operation == V6Binary::FloorDiv)
+            result = std::floor(lhs / rhs);
+        else if (operation == V6Binary::Mod)
+            result = lhs - std::floor(lhs / rhs) * rhs;
+        else if (operation == V6Binary::Pow)
+            result = std::pow(lhs, rhs);
+        else
+            return std::nullopt;
+        if (std::isfinite(result))
+            return json::array({2, result});
+        return std::nullopt;
+    }
+
+    if (leftTag == 3 && rightTag == 3 && left.size() >= 2 && right.size() >= 2)
+    {
+        uint32_t leftId = left[1].get<uint32_t>();
+        uint32_t rightId = right[1].get<uint32_t>();
+        if (leftId == 0 || rightId == 0 || leftId > program.strings.size() || rightId > program.strings.size())
+            return std::nullopt;
+        const std::string& lhs = program.strings[leftId - 1];
+        const std::string& rhs = program.strings[rightId - 1];
+        if (operation == V6Binary::Lt)
+            return boolean(lhs < rhs);
+        if (operation == V6Binary::Le)
+            return boolean(lhs <= rhs);
+        if (operation == V6Binary::Gt)
+            return boolean(lhs > rhs);
+        if (operation == V6Binary::Ge)
+            return boolean(lhs >= rhs);
+    }
+    return std::nullopt;
+}
+
+void pruneV6Prototype(V6Prototype& prototype, V6Program& program)
+{
+    std::vector<V6BasicBlock> blocks = buildV6Blocks(prototype.code);
+    std::vector<bool> reachableBlock(blocks.size(), false);
+    std::vector<size_t> worklist{0};
+    reachableBlock[0] = true;
+    while (!worklist.empty())
+    {
+        size_t block = worklist.back();
+        worklist.pop_back();
+        for (size_t successor : blocks[block].successors)
+        {
+            if (!reachableBlock[successor])
+            {
+                reachableBlock[successor] = true;
+                worklist.push_back(successor);
+            }
+        }
+    }
+
+    std::vector<bool> keep(prototype.code.size(), false);
+    for (const V6BasicBlock& block : blocks)
+    {
+        if (!reachableBlock[block.id])
+            continue;
+        for (size_t pc = block.start; pc < block.end; ++pc)
+            keep[pc] = true;
+    }
+    size_t redundantMoves = 0;
+    for (size_t pc = 0; pc < prototype.code.size(); ++pc)
+    {
+        const V6Instruction& instruction = prototype.code[pc];
+        if (keep[pc] && instruction.op == V6Op::Move && instruction.args[0] == instruction.args[1])
+        {
+            keep[pc] = false;
+            ++redundantMoves;
+        }
+    }
+
+    size_t keptCount = static_cast<size_t>(std::count(keep.begin(), keep.end(), true));
+    program.redundantMoveCount += redundantMoves;
+    program.unreachableInstructionCount += prototype.code.size() - keptCount - redundantMoves;
+    if (keptCount == prototype.code.size())
+        return;
+
+    std::vector<size_t> redirect(prototype.code.size(), keptCount);
+    size_t next = keptCount;
+    for (size_t pc = prototype.code.size(); pc-- > 0;)
+    {
+        if (keep[pc])
+            --next;
+        redirect[pc] = next;
+    }
+    std::vector<V6Instruction> rewritten;
+    rewritten.reserve(keptCount);
+    for (size_t pc = 0; pc < prototype.code.size(); ++pc)
+    {
+        if (!keep[pc])
+            continue;
+        V6Instruction instruction = prototype.code[pc];
+        for (size_t position : v6TargetArgs(instruction.op))
+        {
+            size_t target = instruction.args[position];
+            if (target >= redirect.size() || redirect[target] >= keptCount)
+                throw std::runtime_error("semantic cleanup produced an invalid control-flow target");
+            instruction.args[position] = static_cast<uint32_t>(redirect[target]);
+        }
+        rewritten.push_back(std::move(instruction));
+    }
+    prototype.code = std::move(rewritten);
+}
+
+void runV6SemanticPasses(V6Program& program)
+{
+    for (V6Prototype& prototype : program.prototypes)
+    {
+        for (size_t pc = 0; pc < prototype.code.size(); ++pc)
+        {
+            V6Instruction& instruction = prototype.code[pc];
+            if (instruction.op == V6Op::Unary && pc >= 1)
+            {
+                const V6Instruction& source = prototype.code[pc - 1];
+                if (v6IsLoadConstant(source.op) && source.args[0] == instruction.args[2])
+                {
+                    if (std::optional<json> folded = foldV6Unary(static_cast<V6Unary>(instruction.args[1]), prototype.constants[source.args[1] - 1], program))
+                    {
+                        prototype.constants.push_back(std::move(*folded));
+                        instruction = {V6Op::LoadConstant, {instruction.args[0], static_cast<uint32_t>(prototype.constants.size())}};
+                        ++program.constantFoldCount;
+                    }
+                }
+            }
+            else if (instruction.op == V6Op::Binary && pc >= 2)
+            {
+                const V6Instruction& left = prototype.code[pc - 2];
+                const V6Instruction& right = prototype.code[pc - 1];
+                if (v6IsLoadConstant(left.op) && v6IsLoadConstant(right.op) && left.args[0] == instruction.args[2] && right.args[0] == instruction.args[3])
+                {
+                    if (std::optional<json> folded = foldV6Binary(static_cast<V6Binary>(instruction.args[1]), prototype.constants[left.args[1] - 1],
+                            prototype.constants[right.args[1] - 1], program))
+                    {
+                        prototype.constants.push_back(std::move(*folded));
+                        instruction = {V6Op::LoadConstant, {instruction.args[0], static_cast<uint32_t>(prototype.constants.size())}};
+                        ++program.constantFoldCount;
+                    }
+                }
+            }
+        }
+
+        for (size_t pc = 1; pc < prototype.code.size(); ++pc)
+        {
+            V6Instruction& branch = prototype.code[pc];
+            if (branch.op != V6Op::JumpFalse && branch.op != V6Op::JumpTrue && branch.op != V6Op::JumpNil)
+                continue;
+            const V6Instruction& source = prototype.code[pc - 1];
+            if (!v6IsLoadConstant(source.op) || source.args[0] != branch.args[0])
+                continue;
+            const json& constant = prototype.constants[source.args[1] - 1];
+            bool jump = false;
+            if (branch.op == V6Op::JumpNil)
+                jump = constant.is_array() && !constant.empty() && constant[0].get<int>() == 0;
+            else if (std::optional<bool> truthy = v6ConstantTruthy(constant))
+                jump = branch.op == V6Op::JumpFalse ? !*truthy : *truthy;
+            else
+                continue;
+            uint32_t target = branch.args[1];
+            branch = jump ? V6Instruction{V6Op::Jump, {target}} : V6Instruction{V6Op::Nop, {}};
+            ++program.branchFoldCount;
+        }
+        pruneV6Prototype(prototype, program);
+    }
 }
 
 struct V6ValidationFailure : std::runtime_error
@@ -1979,7 +2275,11 @@ json v6ProgramToJson(const V6Program& program, std::string_view format)
         for (const V6Instruction& instruction : prototype.code)
         {
             const V6OpInfo& info = v6OpInfo(instruction.op);
-            code.push_back({{"op", info.name}, {"args", instruction.args}, {"side_effecting", info.sideEffecting}, {"may_yield", info.mayYield}});
+            json roles = json::array();
+            for (size_t index = 0; index < info.operandCount; ++index)
+                roles.push_back(v6OperandRoleName(info.operands[index]));
+            code.push_back({{"op", info.name}, {"args", instruction.args}, {"operand_roles", std::move(roles)},
+                {"result_arity", v6ResultBehaviorName(info.result)}, {"side_effecting", info.sideEffecting}, {"may_yield", info.mayYield}});
         }
         json blocks = json::array();
         for (const V6BasicBlock& block : prototype.blocks)
@@ -1997,7 +2297,10 @@ json v6ProgramToJson(const V6Program& program, std::string_view format)
         {"prototypes", std::move(prototypes)},
         {"stats", {{"locals", program.localCount}, {"instructions", program.instructionCount}, {"blocks", program.blockCount},
                       {"decoy_prototypes", program.decoyPrototypeCount}, {"opaque_guards", program.opaqueGuardCount},
-                      {"substitutions", program.substitutionCount}, {"superoperators", program.superoperatorCount}, {"register_reuse", program.registerReuse}}},
+                      {"substitutions", program.substitutionCount}, {"superoperators", program.superoperatorCount},
+                      {"constant_folds", program.constantFoldCount}, {"branch_folds", program.branchFoldCount},
+                      {"unreachable_removed", program.unreachableInstructionCount}, {"redundant_moves_removed", program.redundantMoveCount},
+                      {"register_reuse", program.registerReuse}}},
     };
 }
 
@@ -2053,6 +2356,10 @@ V6Program v6ProgramFromJson(const json& value, std::string_view expectedFormat)
     program.opaqueGuardCount = stats.at("opaque_guards").get<size_t>();
     program.substitutionCount = stats.at("substitutions").get<size_t>();
     program.superoperatorCount = stats.at("superoperators").get<size_t>();
+    program.constantFoldCount = stats.at("constant_folds").get<size_t>();
+    program.branchFoldCount = stats.at("branch_folds").get<size_t>();
+    program.unreachableInstructionCount = stats.at("unreachable_removed").get<size_t>();
+    program.redundantMoveCount = stats.at("redundant_moves_removed").get<size_t>();
     program.registerReuse = stats.at("register_reuse").get<bool>();
     return program;
 }
@@ -2088,6 +2395,8 @@ public:
         program.prototypes[0].virtualRegisterCount = static_cast<uint32_t>(current().nextRegister - 1);
         contexts.pop_back();
 
+        program.localCount = nextLocal - 1;
+        runV6SemanticPasses(program);
         validateV6Program(program, "ir_validate", true);
         if (semanticSnapshot)
             *semanticSnapshot = program;
@@ -3257,6 +3566,8 @@ public:
         lexicalScopes.pop_back();
         contexts.pop_back();
 
+        program.localCount = nextLocal - 1;
+        runV6SemanticPasses(program);
         validateV6Program(program, "ir_validate", true);
         if (semanticSnapshot)
             *semanticSnapshot = program;
@@ -4323,6 +4634,10 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
         {"opaque_branch_count", program.opaqueGuardCount},
         {"instruction_substitution_count", program.substitutionCount},
         {"superoperator_instruction_count", program.superoperatorCount},
+        {"constant_fold_count", program.constantFoldCount},
+        {"branch_fold_count", program.branchFoldCount},
+        {"unreachable_instruction_count", program.unreachableInstructionCount},
+        {"redundant_move_count", program.redundantMoveCount},
         {"per_prototype_opcode_maps", true},
         {"per_prototype_operand_codecs", true},
         {"per_prototype_register_numbering", true},
@@ -4344,6 +4659,10 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
             {{"name", "frontend_lowering"}, {"changes", program.instructionCount}},
             {{"name", "ir_validation"}, {"changes", 0}},
             {{"name", "cfg_construction"}, {"changes", program.blockCount}},
+            {{"name", "constant_propagation"}, {"changes", program.constantFoldCount}},
+            {{"name", "branch_folding"}, {"changes", program.branchFoldCount}},
+            {{"name", "unreachable_pruning"}, {"changes", program.unreachableInstructionCount}},
+            {{"name", "redundant_move_cleanup"}, {"changes", program.redundantMoveCount}},
             {{"name", "constant_placement"}, {"changes", movedConstantCount}},
             {{"name", "register_liveness"}, {"changes", reusedRegisterCount}},
             {{"name", "opaque_edges"}, {"changes", program.opaqueGuardCount}},

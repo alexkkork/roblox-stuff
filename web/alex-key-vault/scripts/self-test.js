@@ -1,6 +1,7 @@
 const handler = require("../api/keyset");
 const { deriveResponseKey, makeProof, responseAad } = require("../lib/protocol");
 const { aesGcmDecrypt, decodeKey, randomBase64url } = require("../lib/crypto");
+const { normalizeIntent, resolveInputLanguage } = require("../lib/compile-token");
 
 function callApi(req) {
   return new Promise((resolve) => {
@@ -19,6 +20,11 @@ function callApi(req) {
 }
 
 async function main() {
+  const intent = normalizeIntent({ language: "alex", profile: "compatibility" });
+  if (intent.language !== "alex") throw new Error("Alex language intent was not preserved");
+  if (resolveInputLanguage("auto", "fixture.alex") !== "alex" || resolveInputLanguage("auto", "fixture.luau") !== "luau") {
+    throw new Error("automatic input language resolution failed");
+  }
   const boot = randomBase64url(32);
   process.env.ALEX_CLIENT_ID = "self-client";
   process.env.ALEX_BUILD_ID = "self-build";
