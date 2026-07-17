@@ -10633,6 +10633,144 @@ std::optional<json> validateLuraphObservedCandidate(
     return std::nullopt;
 }
 
+std::optional<size_t> luraphMaterializedNonnegativeSize(const json& expression)
+{
+    const std::optional<double> value = luraphObservedExpressionNumber(expression);
+    if (!value || !std::isfinite(*value) || std::floor(*value) != *value || *value < 0.0 ||
+        *value > static_cast<double>(std::numeric_limits<size_t>::max()))
+        return std::nullopt;
+    return static_cast<size_t>(*value);
+}
+
+std::optional<json> validateLuraphObservedIncompleteCallCandidate(
+    const json& operation,
+    const std::vector<json>& observations,
+    const std::vector<json>& childActivations,
+    size_t pc)
+{
+    if (!operation.is_object() || operation.value("kind", "") != "operation_sequence" ||
+        operation.value("protector_state", false) || luraphSemanticContainsUnknownState(operation) ||
+        observations.empty() || childActivations.size() != observations.size())
+        return std::nullopt;
+    const json& operations = operation.value("operations", json::array());
+    if (!operations.is_array() || operations.empty())
+        return std::nullopt;
+
+    const json* call = nullptr;
+    std::optional<int64_t> resultRegister;
+    std::optional<size_t> currentTop;
+    std::optional<size_t> callTop;
+    size_t topAssignments = 0;
+    for (const json& item : operations)
+    {
+        if (!item.is_object())
+            return std::nullopt;
+        const std::string kind = item.value("kind", "");
+        if (kind == "set_top")
+        {
+            currentTop = luraphMaterializedNonnegativeSize(item.value("value", json(nullptr)));
+            if (!currentTop)
+                return std::nullopt;
+            ++topAssignments;
+            continue;
+        }
+
+        const json* candidateCall = nullptr;
+        if (kind == "expression" && item.contains("value") && item["value"].is_object() &&
+            item["value"].value("kind", "") == "call")
+            candidateCall = &item["value"];
+        else if (kind == "register_write" && item.contains("value") && item["value"].is_object() &&
+            item["value"].value("kind", "") == "call")
+        {
+            resultRegister = luraphMaterializedRegisterIndex(item);
+            if (!resultRegister || *resultRegister < 0)
+                return std::nullopt;
+            candidateCall = &item["value"];
+        }
+        if (!candidateCall || call)
+            return std::nullopt;
+        call = candidateCall;
+        callTop = currentTop;
+    }
+    if (!call || call->value("method", false) || !call->contains("function") ||
+        !(*call)["function"].is_object() || (*call)["function"].value("kind", "") != "register_read" ||
+        !luraphMaterializedNonnegativeSize((*call)["function"].value("index", json(nullptr))) ||
+        !call->contains("arguments") || !(*call)["arguments"].is_array())
+        return std::nullopt;
+
+    size_t argumentCount = 0;
+    const json& arguments = (*call)["arguments"];
+    if (arguments.size() == 1 && arguments.front().is_object() &&
+        arguments.front().value("kind", "") == "register_range")
+    {
+        const json& range = arguments.front();
+        const std::optional<size_t> begin = luraphMaterializedNonnegativeSize(
+            range.value("from", json(nullptr)));
+        std::optional<size_t> end;
+        const json& endExpression = range.value("to", json(nullptr));
+        if (endExpression.is_object() && endExpression.value("kind", "") == "top_register")
+            end = callTop;
+        else
+            end = luraphMaterializedNonnegativeSize(endExpression);
+        if (!begin || !end)
+            return std::nullopt;
+        argumentCount = *end < *begin ? 0 : *end - *begin + 1;
+    }
+    else
+    {
+        for (const json& argument : arguments)
+            if (!argument.is_object() || argument.value("kind", "") != "register_read" ||
+                !luraphMaterializedNonnegativeSize(argument.value("index", json(nullptr))))
+                return std::nullopt;
+        argumentCount = arguments.size();
+    }
+
+    std::set<uint64_t> callees;
+    for (const json& child : childActivations)
+    {
+        if (!child.is_object() || child.value("argument_count", std::numeric_limits<size_t>::max()) != argumentCount)
+            return std::nullopt;
+        const uint64_t prototype = child.value("prototype", uint64_t(0));
+        if (prototype == 0)
+            return std::nullopt;
+        callees.insert(prototype);
+    }
+    if (callees.size() != 1)
+        return std::nullopt;
+
+    for (const json& observation : observations)
+    {
+        if (observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+            static_cast<int64_t>(pc + 1))
+            return std::nullopt;
+        const json& writes = observation.value("register_writes", json::array());
+        if (!writes.is_array())
+            return std::nullopt;
+        if (resultRegister)
+        {
+            if (writes.size() != 1 || !writes.front().is_object() ||
+                writes.front().value("register", std::numeric_limits<int64_t>::min()) != *resultRegister)
+                return std::nullopt;
+        }
+        else if (!writes.empty())
+            return std::nullopt;
+    }
+
+    return json{
+        {"proof", "observed_child_call_frame_and_parent_result"},
+        {"validated_fields", json::array({
+            "callee_prototype", "argument_count", "result_register", "register_writes", "next_pc",
+        })},
+        {"observation_count", observations.size()},
+        {"callee_prototype", *callees.begin()},
+        {"argument_count", argumentCount},
+        {"result_register", resultRegister ? json(*resultRegister) : json(nullptr)},
+        {"top_assignments", topAssignments},
+        {"incomplete_handler_path", true},
+        {"source_claim", false},
+    };
+}
+
 std::optional<int64_t> luraphObservedInteger(const json& value)
 {
     if (!value.is_object() || value.value("type", "") != "number" ||
@@ -12039,20 +12177,32 @@ json luraphRuntimeSemanticDispatchArtifact(
                 std::optional<json> validation;
                 const bool completePath = handler->second.value("executed_path_complete", false) &&
                     handler->second.value("full_effect_normalization", false);
+                bool incompleteCallCandidate = false;
                 if (completePath)
                     validation = validateLuraphObservedCandidate(
                         candidate, observedSite->second, pc,
                         observedReturnsForSite != returnsBySite.end()
                             ? &observedReturnsForSite->second : nullptr);
+                else if (childActivationsForSite != childActivationsBySite.end())
+                {
+                    validation = validateLuraphObservedIncompleteCallCandidate(
+                        candidate, observedSite->second, childActivationsForSite->second, pc);
+                    incompleteCallCandidate = validation.has_value();
+                }
                 if (validation)
                 {
                     candidate["static_semantic"] = false;
                     candidate["path_specific"] = true;
                     candidate["candidate_proof"] = candidate.value("proof", "");
-                    candidate["proof"] = "runtime_validated_ambiguous_handler_candidate";
+                    candidate["proof"] = incompleteCallCandidate
+                        ? "runtime_validated_incomplete_call_handler_candidate"
+                        : "runtime_validated_ambiguous_handler_candidate";
                     candidate["runtime_validation"] = *validation;
+                    candidate["full_effect_validation"] = completePath;
+                    candidate["source_claim"] = false;
                     row["observational_semantic_operation"] = std::move(candidate);
                     row["guarded_candidate_validation"] = *validation;
+                    row["incomplete_call_candidate_validated"] = incompleteCallCandidate;
                     ++guardedCandidatesValidated;
                     ++observationalSemanticLifted;
                     const std::string family = row["observational_semantic_operation"].value(
