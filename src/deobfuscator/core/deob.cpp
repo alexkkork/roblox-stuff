@@ -10740,9 +10740,22 @@ std::optional<json> validateLuraphObservedCandidate(
                 const json origins = observation.value("write_origins", json::object());
                 const auto origin = origins.is_object()
                     ? origins.find(std::to_string(*destination)) : origins.end();
-                if (origin == origins.end() || !origin->is_array() || origin->size() != 1 ||
-                    !(*origin)[0].is_object() || (*origin)[0].value("kind", "") != "register" ||
-                    (*origin)[0].value("index", std::numeric_limits<int64_t>::min()) != *expectedRegisterOrigin)
+                if (origin == origins.end() || !origin->is_array() || origin->empty())
+                    return std::nullopt;
+
+                bool matchedRegisterOrigin = false;
+                for (const json& source : *origin)
+                {
+                    if (!source.is_object() ||
+                        source.value("index", std::numeric_limits<int64_t>::min()) != *expectedRegisterOrigin)
+                        return std::nullopt;
+                    const std::string sourceKind = source.value("kind", "");
+                    if (sourceKind == "register")
+                        matchedRegisterOrigin = true;
+                    else if (sourceKind != "argument")
+                        return std::nullopt;
+                }
+                if (!matchedRegisterOrigin)
                     return std::nullopt;
             }
             ++matchedWrites;
@@ -12812,6 +12825,18 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"recognition_status_counts", std::move(opcode89RecognitionStatusCounts)},
             {"runtime_evidence_is_path_specific", true},
             {"inclusive_nil_clear_preserved", true},
+        }},
+        {"opcode193_empty_table_coverage", {
+            {"available", opcode193SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-193-handler-and-runtime-observations"},
+            {"sites_total", opcode193SitesTotal},
+            {"runtime_observational_sites", opcode193SitesObservational},
+            {"unresolved_sites", opcode193SitesTotal - opcode193SitesObservational},
+            {"rejected_sites", opcode193SitesRejected},
+            {"validated_runtime_executions", opcode193ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode193RecognitionStatusCounts)},
+            {"runtime_evidence_is_path_specific", true},
+            {"fresh_empty_table_semantics_preserved", true},
         }},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
@@ -15721,6 +15746,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeOpcode8CallCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode89RangeClearCoverage = json{{"available", false}};
+    json runtimeOpcode193EmptyTableCoverage = json{{"available", false}};
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -15775,6 +15801,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode28_index_read_coverage", json{{"available", false}});
                     runtimeOpcode89RangeClearCoverage = runtimeSemanticDocument->value(
                         "opcode89_range_clear_coverage", json{{"available", false}});
+                    runtimeOpcode193EmptyTableCoverage = runtimeSemanticDocument->value(
+                        "opcode193_empty_table_coverage", json{{"available", false}});
                 }
                 catch (const std::exception& error)
                 {
@@ -15825,6 +15853,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"opcode8_call_coverage", runtimeOpcode8CallCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode89_range_clear_coverage", runtimeOpcode89RangeClearCoverage},
+                {"opcode193_empty_table_coverage", runtimeOpcode193EmptyTableCoverage},
                 {"trace_specialized_is_path_specific", true},
                 {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved_instructions", runtimeUnresolved},
@@ -17493,6 +17522,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["opcode8_calls"] = runtimeOpcode8CallCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode89_range_clears"] = runtimeOpcode89RangeClearCoverage;
+    report["coverage"]["opcode193_empty_tables"] = runtimeOpcode193EmptyTableCoverage;
     const bool staticContainerCountsAvailable = decodedContainer &&
         (analysis.container_metrics.prototype_count > 0 || analysis.container_metrics.instruction_count > 0 ||
             analysis.container_metrics.constant_count > 0 || analysis.container_metrics.descriptor_count > 0);
