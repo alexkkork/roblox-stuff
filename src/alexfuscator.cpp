@@ -1558,6 +1558,112 @@ size_t v6OpIndex(V6Op op)
     return static_cast<size_t>(op);
 }
 
+enum class V6OperandRole : uint8_t
+{
+    None,
+    RegisterDef,
+    RegisterUse,
+    Constant,
+    String,
+    Local,
+    Prototype,
+    Target,
+    Immediate,
+};
+
+enum class V6ResultBehavior : uint8_t
+{
+    None,
+    Single,
+    Pack,
+};
+
+struct V6OpInfo
+{
+    const char* name = "invalid";
+    std::array<V6OperandRole, 5> operands{};
+    uint8_t operandCount = 0;
+    V6ResultBehavior result = V6ResultBehavior::None;
+    bool terminator = false;
+    bool sideEffecting = false;
+    bool mayYield = false;
+};
+
+V6OpInfo makeV6OpInfo(const char* name, std::initializer_list<V6OperandRole> operands, V6ResultBehavior result = V6ResultBehavior::None,
+    bool terminator = false, bool sideEffecting = false, bool mayYield = false)
+{
+    if (operands.size() > 5)
+        throw std::runtime_error("internal error: AlexVM opcode has too many operands");
+    V6OpInfo info;
+    info.name = name;
+    info.operandCount = static_cast<uint8_t>(operands.size());
+    info.result = result;
+    info.terminator = terminator;
+    info.sideEffecting = sideEffecting;
+    info.mayYield = mayYield;
+    std::copy(operands.begin(), operands.end(), info.operands.begin());
+    return info;
+}
+
+const std::array<V6OpInfo, static_cast<size_t>(V6Op::Count)>& v6InstructionSet()
+{
+    using R = V6OperandRole;
+    using B = V6ResultBehavior;
+    static const std::array<V6OpInfo, static_cast<size_t>(V6Op::Count)> instructions = {
+        makeV6OpInfo("nop", {}),
+        makeV6OpInfo("load_constant", {R::RegisterDef, R::Constant}, B::Single),
+        makeV6OpInfo("load_constant_alt", {R::RegisterDef, R::Constant}, B::Single),
+        makeV6OpInfo("move", {R::RegisterDef, R::RegisterUse}, B::Single),
+        makeV6OpInfo("get_local", {R::RegisterDef, R::Local}, B::Single),
+        makeV6OpInfo("get_local_alt", {R::RegisterDef, R::Local}, B::Single),
+        makeV6OpInfo("declare_local", {R::Local, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("set_local", {R::Local, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("get_global", {R::RegisterDef, R::String}, B::Single, false, true),
+        makeV6OpInfo("set_global", {R::String, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("get_index", {R::RegisterDef, R::RegisterUse, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("get_index_k", {R::RegisterDef, R::RegisterUse, R::String}, B::Single, false, true),
+        makeV6OpInfo("set_index", {R::RegisterUse, R::RegisterUse, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("set_index_k", {R::RegisterUse, R::String, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("new_table", {R::RegisterDef}, B::Single, false, true),
+        makeV6OpInfo("set_list", {R::RegisterUse, R::Immediate, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("append_pack", {R::RegisterUse, R::RegisterUse, R::Immediate}, B::None, false, true),
+        makeV6OpInfo("binary", {R::RegisterDef, R::Immediate, R::RegisterUse, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("binary_alt", {R::RegisterDef, R::Immediate, R::RegisterUse, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("unary", {R::RegisterDef, R::Immediate, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("pack_new", {R::RegisterDef}, B::Pack),
+        makeV6OpInfo("pack_push", {R::RegisterUse, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("pack_extend", {R::RegisterUse, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("pack_get", {R::RegisterDef, R::RegisterUse, R::Immediate}, B::Single),
+        makeV6OpInfo("pack_set", {R::RegisterUse, R::Immediate, R::RegisterUse}, B::None, false, true),
+        makeV6OpInfo("call", {R::RegisterDef, R::RegisterUse, R::RegisterUse}, B::Pack, false, true, true),
+        makeV6OpInfo("call_global_0", {R::RegisterDef, R::String}, B::Pack, false, true, true),
+        makeV6OpInfo("call_method_0", {R::RegisterDef, R::RegisterUse, R::String}, B::Pack, false, true, true),
+        makeV6OpInfo("make_closure", {R::RegisterDef, R::Prototype}, B::Single, false, true),
+        makeV6OpInfo("varargs", {R::RegisterDef}, B::Pack),
+        makeV6OpInfo("return", {R::RegisterUse}, B::None, true, true),
+        makeV6OpInfo("jump", {R::Target}, B::None, true),
+        makeV6OpInfo("jump_false", {R::RegisterUse, R::Target}, B::None, true),
+        makeV6OpInfo("jump_false_alt", {R::RegisterUse, R::Target}, B::None, true),
+        makeV6OpInfo("jump_true", {R::RegisterUse, R::Target}, B::None, true),
+        makeV6OpInfo("enter_scope", {}, B::None, false, true),
+        makeV6OpInfo("leave_scopes", {R::Immediate}, B::None, false, true),
+        makeV6OpInfo("to_string", {R::RegisterDef, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("iterator_init", {R::RegisterDef, R::RegisterUse}, B::Pack, false, true),
+        makeV6OpInfo("jump_nil", {R::RegisterUse, R::Target}, B::None, true),
+        makeV6OpInfo("for_check", {R::RegisterDef, R::RegisterUse, R::RegisterUse, R::RegisterUse}, B::Single, false, true),
+        makeV6OpInfo("opaque_guard", {R::Immediate, R::Immediate, R::Immediate, R::Immediate, R::Immediate}),
+    };
+    return instructions;
+}
+
+const V6OpInfo& v6OpInfo(V6Op op)
+{
+    size_t index = v6OpIndex(op);
+    if (index >= v6InstructionSet().size())
+        throw std::runtime_error("internal error: invalid AlexVM opcode");
+    return v6InstructionSet()[index];
+}
+
 bool v6IsBinary(V6Op op)
 {
     return op == V6Op::Binary || op == V6Op::BinaryAlt;
@@ -1575,132 +1681,47 @@ bool v6IsJump(V6Op op)
 
 bool v6IsTerminator(V6Op op)
 {
-    return op == V6Op::Return || v6IsJump(op);
+    return v6OpInfo(op).terminator;
 }
 
 std::vector<size_t> v6TargetArgs(V6Op op)
 {
-    switch (op)
-    {
-    case V6Op::Jump:
-        return {0};
-    case V6Op::JumpFalse:
-    case V6Op::JumpFalseAlt:
-    case V6Op::JumpTrue:
-    case V6Op::JumpNil:
-        return {1};
-    default:
-        return {};
-    }
+    std::vector<size_t> result;
+    const V6OpInfo& info = v6OpInfo(op);
+    for (size_t index = 0; index < info.operandCount; ++index)
+        if (info.operands[index] == V6OperandRole::Target)
+            result.push_back(index);
+    return result;
 }
 
 std::vector<size_t> v6RegisterDefs(V6Op op)
 {
-    switch (op)
-    {
-    case V6Op::LoadConstant:
-    case V6Op::LoadConstantAlt:
-    case V6Op::Move:
-    case V6Op::GetLocal:
-    case V6Op::GetLocalAlt:
-    case V6Op::GetGlobal:
-    case V6Op::GetIndex:
-    case V6Op::GetIndexK:
-    case V6Op::NewTable:
-    case V6Op::Binary:
-    case V6Op::BinaryAlt:
-    case V6Op::Unary:
-    case V6Op::PackNew:
-    case V6Op::PackGet:
-    case V6Op::Call:
-    case V6Op::CallGlobal0:
-    case V6Op::CallMethod0:
-    case V6Op::MakeClosure:
-    case V6Op::Varargs:
-    case V6Op::ToString:
-    case V6Op::IteratorInit:
-    case V6Op::ForCheck:
-        return {0};
-    default:
-        return {};
-    }
+    std::vector<size_t> result;
+    const V6OpInfo& info = v6OpInfo(op);
+    for (size_t index = 0; index < info.operandCount; ++index)
+        if (info.operands[index] == V6OperandRole::RegisterDef)
+            result.push_back(index);
+    return result;
 }
 
 std::vector<size_t> v6RegisterUses(V6Op op)
 {
-    switch (op)
-    {
-    case V6Op::Move:
-        return {1};
-    case V6Op::DeclareLocal:
-    case V6Op::SetLocal:
-    case V6Op::SetGlobal:
-        return {1};
-    case V6Op::GetIndex:
-        return {1, 2};
-    case V6Op::GetIndexK:
-        return {1};
-    case V6Op::SetIndex:
-        return {0, 1, 2};
-    case V6Op::SetIndexK:
-        return {0, 2};
-    case V6Op::SetList:
-        return {0, 2};
-    case V6Op::AppendPack:
-        return {0, 1};
-    case V6Op::Binary:
-    case V6Op::BinaryAlt:
-        return {2, 3};
-    case V6Op::Unary:
-        return {2};
-    case V6Op::PackPush:
-    case V6Op::PackExtend:
-        return {0, 1};
-    case V6Op::PackGet:
-        return {1};
-    case V6Op::PackSet:
-        return {0, 2};
-    case V6Op::Call:
-        return {1, 2};
-    case V6Op::CallMethod0:
-        return {1};
-    case V6Op::Return:
-        return {0};
-    case V6Op::JumpFalse:
-    case V6Op::JumpFalseAlt:
-    case V6Op::JumpTrue:
-    case V6Op::JumpNil:
-        return {0};
-    case V6Op::ToString:
-        return {1};
-    case V6Op::IteratorInit:
-        return {1};
-    case V6Op::ForCheck:
-        return {1, 2, 3};
-    default:
-        return {};
-    }
+    std::vector<size_t> result;
+    const V6OpInfo& info = v6OpInfo(op);
+    for (size_t index = 0; index < info.operandCount; ++index)
+        if (info.operands[index] == V6OperandRole::RegisterUse)
+            result.push_back(index);
+    return result;
 }
 
 std::vector<size_t> v6StringArgs(V6Op op)
 {
-    switch (op)
-    {
-    case V6Op::GetGlobal:
-        return {1};
-    case V6Op::SetGlobal:
-        return {0};
-    case V6Op::GetIndexK:
-        return {2};
-    case V6Op::SetIndexK:
-        return {1};
-    case V6Op::CallGlobal0:
-        return {1};
-    case V6Op::CallMethod0:
-        return {2};
-    default:
-        return {};
-    }
+    std::vector<size_t> result;
+    const V6OpInfo& info = v6OpInfo(op);
+    for (size_t index = 0; index < info.operandCount; ++index)
+        if (info.operands[index] == V6OperandRole::String)
+            result.push_back(index);
+    return result;
 }
 
 std::vector<V6BasicBlock> buildV6Blocks(const std::vector<V6Instruction>& code)
@@ -1757,6 +1778,266 @@ std::vector<V6BasicBlock> buildV6Blocks(const std::vector<V6Instruction>& code)
     return blocks;
 }
 
+struct V6ValidationFailure : std::runtime_error
+{
+    std::string stage;
+    std::string code;
+    std::string kind;
+    size_t prototype = 0;
+    size_t instruction = 0;
+
+    V6ValidationFailure(std::string stage, std::string code, std::string kind, size_t prototype, size_t instruction, std::string message)
+        : std::runtime_error(std::move(message))
+        , stage(std::move(stage))
+        , code(std::move(code))
+        , kind(std::move(kind))
+        , prototype(prototype)
+        , instruction(instruction)
+    {
+    }
+};
+
+void validateV6Program(V6Program& program, std::string stage, bool validateDefinitions)
+{
+    auto fail = [&](std::string code, std::string kind, size_t prototype, size_t instruction, std::string message) -> void {
+        throw V6ValidationFailure(stage, std::move(code), std::move(kind), prototype, instruction, std::move(message));
+    };
+
+    if (program.prototypes.empty() || program.rootPrototype == 0 || program.rootPrototype > program.prototypes.size())
+        fail("invalid_root_prototype", "Program", 0, 0, "AlexIR has no valid root prototype");
+
+    for (size_t prototypeIndex = 0; prototypeIndex < program.prototypes.size(); ++prototypeIndex)
+    {
+        V6Prototype& prototype = program.prototypes[prototypeIndex];
+        if (prototype.code.empty())
+            fail("empty_prototype", "Prototype", prototypeIndex + 1, 0, "AlexIR prototype has no instructions");
+
+        uint32_t registerLimit = prototype.maxRegister != 0 ? prototype.maxRegister : prototype.virtualRegisterCount;
+        for (size_t instructionIndex = 0; instructionIndex < prototype.code.size(); ++instructionIndex)
+        {
+            const V6Instruction& instruction = prototype.code[instructionIndex];
+            const V6OpInfo& info = v6OpInfo(instruction.op);
+            if (instruction.args.size() != info.operandCount)
+                fail("operand_count_mismatch", info.name, prototypeIndex + 1, instructionIndex,
+                    "AlexVM instruction operand count does not match its declarative schema");
+
+            for (size_t operandIndex = 0; operandIndex < instruction.args.size(); ++operandIndex)
+            {
+                uint32_t value = instruction.args[operandIndex];
+                switch (info.operands[operandIndex])
+                {
+                case V6OperandRole::RegisterDef:
+                case V6OperandRole::RegisterUse:
+                    if (value == 0 || value > registerLimit)
+                        fail("register_out_of_range", info.name, prototypeIndex + 1, instructionIndex, "AlexVM register operand is out of range");
+                    break;
+                case V6OperandRole::Constant:
+                    if (value == 0 || value > prototype.constants.size())
+                        fail("constant_out_of_range", info.name, prototypeIndex + 1, instructionIndex, "AlexVM constant operand is out of range");
+                    break;
+                case V6OperandRole::String:
+                    if (value == 0 || value > program.strings.size())
+                        fail("string_out_of_range", info.name, prototypeIndex + 1, instructionIndex, "AlexVM string operand is out of range");
+                    break;
+                case V6OperandRole::Prototype:
+                    if (value == 0 || value > program.prototypes.size())
+                        fail("prototype_out_of_range", info.name, prototypeIndex + 1, instructionIndex, "AlexVM child prototype operand is out of range");
+                    break;
+                case V6OperandRole::Target:
+                    if (value >= prototype.code.size())
+                        fail("control_flow_target_out_of_range", info.name, prototypeIndex + 1, instructionIndex, "AlexVM control-flow target is out of range");
+                    break;
+                case V6OperandRole::Local:
+                    if (value == 0)
+                        fail("invalid_local", info.name, prototypeIndex + 1, instructionIndex, "AlexIR local identifiers must be nonzero");
+                    break;
+                case V6OperandRole::None:
+                case V6OperandRole::Immediate:
+                    break;
+                }
+            }
+
+            if (v6IsBinary(instruction.op) && instruction.args[1] >= static_cast<uint32_t>(V6Binary::Count))
+                fail("invalid_binary_operator", info.name, prototypeIndex + 1, instructionIndex, "AlexVM binary operator tag is invalid");
+            if (instruction.op == V6Op::Unary && instruction.args[1] >= static_cast<uint32_t>(V6Unary::Count))
+                fail("invalid_unary_operator", info.name, prototypeIndex + 1, instructionIndex, "AlexVM unary operator tag is invalid");
+        }
+
+        for (uint32_t child : prototype.children)
+            if (child == 0 || child > program.prototypes.size())
+                fail("child_prototype_out_of_range", "Prototype", prototypeIndex + 1, 0, "prototype child reference is out of range");
+        for (uint32_t parameter : prototype.params)
+            if (parameter == 0)
+                fail("invalid_parameter", "Prototype", prototypeIndex + 1, 0, "prototype parameter identifier must be nonzero");
+        for (uint32_t capture : prototype.captures)
+            if (capture == 0)
+                fail("invalid_capture", "Prototype", prototypeIndex + 1, 0, "prototype capture identifier must be nonzero");
+
+        prototype.blocks = buildV6Blocks(prototype.code);
+        if (!validateDefinitions)
+            continue;
+
+        using RegisterSet = std::unordered_set<uint32_t>;
+        std::vector<std::vector<size_t>> predecessors(prototype.blocks.size());
+        RegisterSet universe;
+        for (const V6BasicBlock& block : prototype.blocks)
+        {
+            for (size_t successor : block.successors)
+                predecessors.at(successor).push_back(block.id);
+            for (size_t pc = block.start; pc < block.end; ++pc)
+                for (size_t position : v6RegisterDefs(prototype.code[pc].op))
+                    universe.insert(prototype.code[pc].args[position]);
+        }
+
+        std::vector<RegisterSet> in(prototype.blocks.size(), universe);
+        std::vector<RegisterSet> out(prototype.blocks.size(), universe);
+        in[0].clear();
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (const V6BasicBlock& block : prototype.blocks)
+            {
+                RegisterSet nextIn;
+                if (block.id != 0 && !predecessors[block.id].empty())
+                {
+                    nextIn = out[predecessors[block.id].front()];
+                    for (size_t index = 1; index < predecessors[block.id].size(); ++index)
+                    {
+                        RegisterSet intersection;
+                        for (uint32_t value : nextIn)
+                            if (out[predecessors[block.id][index]].count(value))
+                                intersection.insert(value);
+                        nextIn = std::move(intersection);
+                    }
+                }
+                RegisterSet nextOut = nextIn;
+                for (size_t pc = block.start; pc < block.end; ++pc)
+                    for (size_t position : v6RegisterDefs(prototype.code[pc].op))
+                        nextOut.insert(prototype.code[pc].args[position]);
+                if (nextIn != in[block.id] || nextOut != out[block.id])
+                {
+                    in[block.id] = std::move(nextIn);
+                    out[block.id] = std::move(nextOut);
+                    changed = true;
+                }
+            }
+        }
+
+        for (const V6BasicBlock& block : prototype.blocks)
+        {
+            RegisterSet defined = in[block.id];
+            for (size_t pc = block.start; pc < block.end; ++pc)
+            {
+                const V6Instruction& instruction = prototype.code[pc];
+                for (size_t position : v6RegisterUses(instruction.op))
+                    if (!defined.count(instruction.args[position]))
+                        fail("use_before_definition", v6OpInfo(instruction.op).name, prototypeIndex + 1, pc,
+                            "AlexIR register is not definitely defined on every incoming control-flow path");
+                for (size_t position : v6RegisterDefs(instruction.op))
+                    defined.insert(instruction.args[position]);
+            }
+        }
+    }
+}
+
+json v6ProgramToJson(const V6Program& program, std::string_view format)
+{
+    json prototypes = json::array();
+    for (const V6Prototype& prototype : program.prototypes)
+    {
+        json code = json::array();
+        for (const V6Instruction& instruction : prototype.code)
+        {
+            const V6OpInfo& info = v6OpInfo(instruction.op);
+            code.push_back({{"op", info.name}, {"args", instruction.args}, {"side_effecting", info.sideEffecting}, {"may_yield", info.mayYield}});
+        }
+        json blocks = json::array();
+        for (const V6BasicBlock& block : prototype.blocks)
+            blocks.push_back({{"id", block.id}, {"start", block.start}, {"end", block.end}, {"successors", block.successors}});
+        prototypes.push_back({
+            {"params", prototype.params}, {"children", prototype.children}, {"captures", prototype.captures}, {"code", std::move(code)},
+            {"blocks", std::move(blocks)}, {"constants", prototype.constants}, {"constant_map", prototype.logicalToPhysicalConstant},
+            {"opcodes", prototype.opcodes}, {"binary_codes", prototype.binaryCodes}, {"unary_codes", prototype.unaryCodes}, {"name", prototype.name},
+            {"virtual_registers", prototype.virtualRegisterCount}, {"physical_registers", prototype.maxRegister}, {"arg_multiplier", prototype.argMultiplier},
+            {"arg_salt", prototype.argSalt}, {"arg_step", prototype.argStep}, {"vararg", prototype.vararg}, {"decoy", prototype.decoy},
+        });
+    }
+    return {
+        {"format", format}, {"version", format == "alex-ir" ? 2 : 6}, {"root_prototype", program.rootPrototype}, {"strings", program.strings},
+        {"prototypes", std::move(prototypes)},
+        {"stats", {{"locals", program.localCount}, {"instructions", program.instructionCount}, {"blocks", program.blockCount},
+                      {"decoy_prototypes", program.decoyPrototypeCount}, {"opaque_guards", program.opaqueGuardCount},
+                      {"substitutions", program.substitutionCount}, {"superoperators", program.superoperatorCount}, {"register_reuse", program.registerReuse}}},
+    };
+}
+
+V6Op v6OpFromName(std::string_view name)
+{
+    for (size_t index = 0; index < v6InstructionSet().size(); ++index)
+        if (name == v6InstructionSet()[index].name)
+            return static_cast<V6Op>(index);
+    throw std::runtime_error("unknown opcode in AlexIR/AlexVM text");
+}
+
+V6Program v6ProgramFromJson(const json& value, std::string_view expectedFormat)
+{
+    if (!value.is_object() || value.value("format", "") != expectedFormat || value.value("version", 0) != (expectedFormat == "alex-ir" ? 2 : 6))
+        throw std::runtime_error("invalid AlexIR/AlexVM text header");
+    V6Program program;
+    program.rootPrototype = value.at("root_prototype").get<uint32_t>();
+    program.strings = value.at("strings").get<std::vector<std::string>>();
+    for (size_t index = 0; index < program.strings.size(); ++index)
+        program.stringIds.emplace(program.strings[index], static_cast<uint32_t>(index + 1));
+    for (const json& source : value.at("prototypes"))
+    {
+        V6Prototype prototype;
+        prototype.params = source.at("params").get<std::vector<uint32_t>>();
+        prototype.children = source.at("children").get<std::vector<uint32_t>>();
+        prototype.captures = source.at("captures").get<std::vector<uint32_t>>();
+        prototype.captureSet.insert(prototype.captures.begin(), prototype.captures.end());
+        for (const json& encoded : source.at("code"))
+            prototype.code.push_back({v6OpFromName(encoded.at("op").get<std::string>()), encoded.at("args").get<std::vector<uint32_t>>()});
+        for (const json& encoded : source.at("blocks"))
+            prototype.blocks.push_back({encoded.at("id").get<size_t>(), encoded.at("start").get<size_t>(), encoded.at("end").get<size_t>(),
+                encoded.at("successors").get<std::vector<size_t>>()});
+        prototype.constants = source.at("constants");
+        prototype.logicalToPhysicalConstant = source.at("constant_map").get<std::vector<uint32_t>>();
+        prototype.opcodes = source.at("opcodes").get<std::vector<uint32_t>>();
+        prototype.binaryCodes = source.at("binary_codes").get<std::vector<uint32_t>>();
+        prototype.unaryCodes = source.at("unary_codes").get<std::vector<uint32_t>>();
+        prototype.name = source.at("name").get<uint32_t>();
+        prototype.virtualRegisterCount = source.at("virtual_registers").get<uint32_t>();
+        prototype.maxRegister = source.at("physical_registers").get<uint32_t>();
+        prototype.argMultiplier = source.at("arg_multiplier").get<uint32_t>();
+        prototype.argSalt = source.at("arg_salt").get<uint32_t>();
+        prototype.argStep = source.at("arg_step").get<uint32_t>();
+        prototype.vararg = source.at("vararg").get<bool>();
+        prototype.decoy = source.at("decoy").get<bool>();
+        program.prototypes.push_back(std::move(prototype));
+    }
+    const json& stats = value.at("stats");
+    program.localCount = stats.at("locals").get<size_t>();
+    program.instructionCount = stats.at("instructions").get<size_t>();
+    program.blockCount = stats.at("blocks").get<size_t>();
+    program.decoyPrototypeCount = stats.at("decoy_prototypes").get<size_t>();
+    program.opaqueGuardCount = stats.at("opaque_guards").get<size_t>();
+    program.substitutionCount = stats.at("substitutions").get<size_t>();
+    program.superoperatorCount = stats.at("superoperators").get<size_t>();
+    program.registerReuse = stats.at("register_reuse").get<bool>();
+    return program;
+}
+
+std::string v6ProgramText(const V6Program& program, std::string_view format)
+{
+    json encoded = v6ProgramToJson(program, format);
+    std::string text = encoded.dump(2);
+    V6Program decoded = v6ProgramFromJson(json::parse(text), format);
+    if (v6ProgramToJson(decoded, format) != encoded)
+        throw std::runtime_error("AlexIR/AlexVM text failed deterministic round-trip validation");
+    return text + "\n";
+}
+
 class V6SemanticCompiler
 {
 public:
@@ -1768,7 +2049,7 @@ public:
     {
     }
 
-    V6Program compile(Luau::AstStatBlock* root)
+    V6Program compile(Luau::AstStatBlock* root, V6Program* semanticSnapshot = nullptr)
     {
         program.prototypes.emplace_back();
         program.prototypes[0].vararg = true;
@@ -1778,8 +2059,12 @@ public:
         program.prototypes[0].virtualRegisterCount = static_cast<uint32_t>(current().nextRegister - 1);
         contexts.pop_back();
 
+        validateV6Program(program, "ir_validate", true);
+        if (semanticSnapshot)
+            *semanticSnapshot = program;
         addDecoyPrototypes();
         finalizeProgram();
+        validateV6Program(program, "vm_lower", false);
         return std::move(program);
     }
 
@@ -2931,7 +3216,7 @@ public:
     {
     }
 
-    V6Program compile(const alex::lang::Program& source)
+    V6Program compile(const alex::lang::Program& source, V6Program* semanticSnapshot = nullptr)
     {
         program.prototypes.emplace_back();
         program.prototypes[0].vararg = true;
@@ -2943,8 +3228,12 @@ public:
         lexicalScopes.pop_back();
         contexts.pop_back();
 
+        validateV6Program(program, "ir_validate", true);
+        if (semanticSnapshot)
+            *semanticSnapshot = program;
         addDecoyPrototypes();
         finalizeProgram();
+        validateV6Program(program, "vm_lower", false);
         return std::move(program);
     }
 
@@ -3781,14 +4070,30 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
     size_t decoyRows = 0;
     size_t lazyBlockCount = 0;
     size_t encryptedConstantFragmentCount = 0;
+    size_t closureCount = 0;
+    size_t upvalueCellCount = 0;
+    size_t virtualRegisterCount = 0;
+    size_t physicalRegisterCount = 0;
+    size_t reusedRegisterCount = 0;
+    size_t constantCount = 0;
+    size_t movedConstantCount = 0;
+    size_t reorderedBlockCount = 0;
 
     for (size_t prototypeIndex = 0; prototypeIndex < program.prototypes.size(); ++prototypeIndex)
     {
         const V6Prototype& proto = program.prototypes[prototypeIndex];
+        closureCount += proto.children.size();
+        upvalueCellCount += proto.captures.size();
+        virtualRegisterCount += proto.virtualRegisterCount;
+        physicalRegisterCount += proto.maxRegister;
+        reusedRegisterCount += proto.virtualRegisterCount > proto.maxRegister ? proto.virtualRegisterCount - proto.maxRegister : 0;
+        constantCount += proto.constants.size();
         std::vector<size_t> blockOrder(proto.blocks.size());
         std::iota(blockOrder.begin(), blockOrder.end(), 0u);
         if (protectionRank(config.controlFlow) > 0 && blockOrder.size() > 1)
             std::shuffle(blockOrder.begin(), blockOrder.end(), rng);
+        for (size_t index = 0; index < blockOrder.size(); ++index)
+            reorderedBlockCount += blockOrder[index] != index ? 1u : 0u;
 
         std::vector<size_t> physicalOrder;
         physicalOrder.reserve(proto.code.size());
@@ -3871,6 +4176,8 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
             constantMap.push_back(value);
             constantShape << prototypeIndex + 1 << ':' << value << ',';
         }
+        for (size_t index = 0; index < proto.logicalToPhysicalConstant.size(); ++index)
+            movedConstantCount += proto.logicalToPhysicalConstant[index] != index + 1 ? 1u : 0u;
         uint32_t entry = proto.code.empty() ? 0u : static_cast<uint32_t>(physicalForLogical[0] + 1);
         uint32_t topology = static_cast<uint32_t>((rng() % 65521u) + 1u);
         topologyShape << topology << ':' << blockOrder.size() << ':' << rows.size() << ',';
@@ -3978,6 +4285,11 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
         {"decoy_instruction_count", decoyRows},
         {"basic_block_count", program.blockCount},
         {"local_count", program.localCount},
+        {"closure_count", closureCount},
+        {"upvalue_cell_count", upvalueCellCount},
+        {"virtual_register_count", virtualRegisterCount},
+        {"physical_register_count", physicalRegisterCount},
+        {"constant_count", constantCount},
         {"register_liveness_reuse", program.registerReuse},
         {"opaque_branch_count", program.opaqueGuardCount},
         {"instruction_substitution_count", program.substitutionCount},
@@ -3999,6 +4311,18 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
         {"encrypted_constant_fragment_count", encryptedConstantFragmentCount},
         {"hkdf_sha256", false},
         {"chacha20_poly1305", false},
+        {"passes", json::array({
+            {{"name", "frontend_lowering"}, {"changes", program.instructionCount}},
+            {{"name", "ir_validation"}, {"changes", 0}},
+            {{"name", "cfg_construction"}, {"changes", program.blockCount}},
+            {{"name", "constant_placement"}, {"changes", movedConstantCount}},
+            {{"name", "register_liveness"}, {"changes", reusedRegisterCount}},
+            {{"name", "opaque_edges"}, {"changes", program.opaqueGuardCount}},
+            {{"name", "instruction_substitution"}, {"changes", program.substitutionCount}},
+            {{"name", "block_layout"}, {"changes", reorderedBlockCount}},
+            {{"name", "prototype_polymorphism"}, {"changes", program.prototypes.size()}},
+            {{"name", "decoy_prototypes"}, {"changes", program.decoyPrototypeCount}},
+        })},
     };
     if (config.unsafeDebugMap)
     {
@@ -4239,6 +4563,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
     {
         std::mt19937_64 rng(config.seed ^ 0x5a17f05ca70b5eedull);
         V6Program program;
+        V6Program semanticProgram;
         if (config.effectiveLanguage == InputLanguage::Alex)
         {
             alex::lang::ParseResult parsed = alex::lang::parse(source);
@@ -4248,7 +4573,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
             if (!bindingDiagnostics.empty())
                 throw AlexCompileFailure(bindingDiagnostics.front());
             AlexSemanticCompiler compiler(rng, config);
-            program = compiler.compile(parsed.program);
+            program = compiler.compile(parsed.program, &semanticProgram);
         }
         else
         {
@@ -4273,8 +4598,12 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
                 return std::nullopt;
             }
             V6SemanticCompiler compiler(rng, config);
-            program = compiler.compile(parsed.root);
+            program = compiler.compile(parsed.root, &semanticProgram);
         }
+        if (!config.dumpIrPath.empty())
+            writeFile(config.dumpIrPath, v6ProgramText(semanticProgram, "alex-ir"));
+        if (!config.dumpVmPath.empty())
+            writeFile(config.dumpVmPath, v6ProgramText(program, "alex-vm"));
         V6SerializedProgram serialized = serializeV6Program(program, config, rng);
         std::string binaryProgram = encodeBinaryVmBundle(serialized.bundle);
 
@@ -4494,6 +4823,15 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
             {"kind", diagnostic.kind},
             {"message", diagnostic.message},
             {"location", {{"line", diagnostic.span.begin.line}, {"column", diagnostic.span.begin.column}}},
+        };
+        return std::nullopt;
+    }
+    catch (const V6ValidationFailure& failure)
+    {
+        gLastVmCompileError = failure.what();
+        gLastV6Diagnostic = {
+            {"code", failure.code}, {"stage", failure.stage}, {"language", inputLanguageName(config.effectiveLanguage)}, {"kind", failure.kind},
+            {"message", failure.what()}, {"prototype", failure.prototype}, {"instruction", failure.instruction},
         };
         return std::nullopt;
     }
