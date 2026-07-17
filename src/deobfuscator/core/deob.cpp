@@ -6149,6 +6149,57 @@ std::optional<json> liftLuraphOpcodeSpecializedTail(
     return best;
 }
 
+bool luraphStateOnlyOperation(const json& operation)
+{
+    if (!operation.is_object())
+        return false;
+    const std::string kind = operation.value("kind", "");
+    if (kind == "assign")
+    {
+        const json& targets = operation["targets"];
+        if (!targets.is_array() || targets.empty())
+            return false;
+        return std::all_of(targets.begin(), targets.end(), [](const json& target) {
+            return target.value("kind", "") == "vm_state";
+        });
+    }
+    if (kind == "compound_write")
+        return operation["target"].value("kind", "") == "vm_state";
+    return false;
+}
+
+std::optional<json> liftLuraphOpcodeStateSequence(
+    Luau::AstStatBlock* leaf,
+    const LuraphSemanticRoles& roles,
+    int64_t opcode)
+{
+    if (!leaf || !roles.opcode)
+        return std::nullopt;
+    std::vector<Luau::AstStatBlock*> blocks;
+    std::set<Luau::AstStatBlock*> seen;
+    collectLuraphOpcodeSpecializedBlocks(leaf, roles.opcode, opcode, blocks, seen);
+    std::optional<json> best;
+    size_t bestSize = std::numeric_limits<size_t>::max();
+    for (Luau::AstStatBlock* block : blocks)
+    {
+        bool dependsOnVmState = false;
+        std::optional<json> operations = normalizeLuraphSemanticBlock(
+            block, roles, opcode, dependsOnVmState, 0);
+        if (!operations || operations->empty() || operations->size() >= bestSize ||
+            !std::all_of(operations->begin(), operations->end(), luraphStateOnlyOperation))
+            continue;
+        best = {
+            {"kind", "prepare_vm_state"},
+            {"operations", *operations},
+            {"protector_state", true},
+            {"source_semantic", false},
+            {"proof", "opcode_specialized_state_only_sequence"},
+        };
+        bestSize = operations->size();
+    }
+    return best;
+}
+
 LuraphNormalizedHandler normalizeLuraphHandler(
     Luau::AstStatBlock* leaf,
     const LuraphSemanticRoles& roles,
@@ -6167,7 +6218,12 @@ LuraphNormalizedHandler normalizeLuraphHandler(
             {"operations", *operations},
             {"vm_state_independent", result.vm_state_independent},
         };
-        if (result.vm_state_independent && operations->size() == 1)
+        if (result.vm_state_independent && operations->empty())
+            result.semantic_operation = {
+                {"kind", "nop"},
+                {"proof", "selected_handler_block_is_empty"},
+            };
+        else if (result.vm_state_independent && operations->size() == 1)
             result.semantic_operation = (*operations)[0];
         else if (std::optional<json> lifted = liftStraightLineLuraphHandler(*operations))
         {
@@ -6220,6 +6276,16 @@ LuraphNormalizedHandler normalizeLuraphHandler(
                 result.ir = json{{"kind", "opcode_specialized_handler"}, {"opcode", opcode}};
             result.ir["opcode_specialized_branch_lifted"] = true;
             result.ir["vm_state_independent"] = true;
+        }
+    }
+    if (result.semantic_operation.is_null())
+    {
+        if (std::optional<json> stateSequence = liftLuraphOpcodeStateSequence(leaf, roles, opcode))
+        {
+            result.semantic_operation = std::move(*stateSequence);
+            if (result.ir.is_null())
+                result.ir = json{{"kind", "opcode_state_sequence_handler"}, {"opcode", opcode}};
+            result.ir["opcode_state_sequence_lifted"] = true;
         }
     }
     if (result.semantic_operation.is_null())
@@ -6744,6 +6810,25 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     std::sort(laneNames.begin(), laneNames.end());
 
     SourceView view(source);
+    json guardBindingCandidates = json::array();
+    std::vector<std::pair<std::pair<Luau::AstLocal*, int64_t>, size_t>> rankedGuardBindings(
+        guardCollector.scores.begin(), guardCollector.scores.end());
+    std::sort(rankedGuardBindings.begin(), rankedGuardBindings.end(), [](const auto& left, const auto& right) {
+        if (left.second != right.second)
+            return left.second > right.second;
+        return left.first.second < right.first.second;
+    });
+    for (const auto& [binding, score] : rankedGuardBindings)
+    {
+        if (score < 2 || guardBindingCandidates.size() >= 16)
+            break;
+        guardBindingCandidates.push_back({
+            {"local", binding.first && binding.first->name.value
+                ? json(std::string(binding.first->name.value)) : json(nullptr)},
+            {"value", binding.second},
+            {"score", score},
+        });
+    }
     json dispatcherDecisions = json::array();
     if (auto rootConditional = dispatcher->as<Luau::AstStatIf>())
     {
@@ -6762,7 +6847,8 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
     {
         Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode, &guardBindings);
-        bool resolved = leaf != nullptr;
+        const bool implicitGuardNoop = !leaf && !guardBindings.empty();
+        bool resolved = leaf != nullptr || implicitGuardNoop;
         bool opcodeLocalReused = false;
         if (leaf)
         {
@@ -6808,6 +6894,31 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             row["range"] = nullptr;
             row["handler_source"] = nullptr;
             row["handler_source_truncated"] = false;
+            if (implicitGuardNoop)
+            {
+                row["implicit_guard_noop"] = true;
+                row["normalization_complete"] = true;
+                row["vm_state_independent"] = true;
+                row["effects"] = {
+                    {"register_reads", 0}, {"register_writes", 0}, {"register_calls", 0},
+                    {"pc_writes", 0}, {"lane_reads", 0}, {"table_writes", 0},
+                    {"calls", 0}, {"returns", 0}, {"closures", 0},
+                    {"vararg_reads", 0}, {"conditionals", 0},
+                    {"operation_candidates", json::array()},
+                };
+                row["normalized_handler_ir"] = {
+                    {"kind", "handler_sequence"}, {"opcode", opcode},
+                    {"operations", json::array()}, {"vm_state_independent", true},
+                    {"guard_specialized", true},
+                };
+                row["semantic_operation"] = {
+                    {"kind", "nop"},
+                    {"protector_state", true},
+                    {"source_semantic", false},
+                    {"proof", "no_handler_branch_selected_under_dominant_guard_binding"},
+                };
+                ++catalog.resolved;
+            }
         }
         handlers.push_back(std::move(row));
     }
@@ -6843,6 +6954,7 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             {"value", guardBinding->first.second},
             {"score", guardBinding->second},
         } : json(nullptr)},
+        {"guard_binding_candidates", std::move(guardBindingCandidates)},
         {"resolved_opcodes", catalog.resolved},
         {"leaf_selection_complete", catalog.resolved == 256},
         {"unique_handlers", catalog.unique_handlers},
