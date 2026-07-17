@@ -172,7 +172,7 @@ struct PackedPayload
     std::vector<CryptoLayer> layers;
 };
 
-struct V5AeadEnvelope
+struct V6AeadEnvelope
 {
     std::array<uint8_t, 32> key{};
     std::array<uint8_t, 32> salt{};
@@ -198,19 +198,19 @@ std::array<uint8_t, 32> hkdfSha256(std::span<const uint8_t> input, std::span<con
     return hmacSha256(prk, expand);
 }
 
-V5AeadEnvelope makeV5AeadEnvelope(std::string_view plaintext, const Config& config, uint32_t guardExpected, std::mt19937_64& rng)
+V6AeadEnvelope makeV6AeadEnvelope(std::string_view plaintext, const Config& config, uint32_t guardExpected, std::mt19937_64& rng)
 {
-    V5AeadEnvelope envelope;
+    V6AeadEnvelope envelope;
     for (uint8_t& byte : envelope.salt)
         byte = static_cast<uint8_t>(rng() & 0xffu);
     for (uint8_t& byte : envelope.nonce)
         byte = static_cast<uint8_t>(rng() & 0xffu);
 
-    std::string material = "alexfuscator-v5|" + std::to_string(config.seed) + "|" + std::to_string(static_cast<int>(config.profile)) + "|" +
+    std::string material = "alexfuscator-v6|" + std::to_string(config.seed) + "|" + std::to_string(static_cast<int>(config.profile)) + "|" +
         (config.stage2EnvKey ? std::to_string(static_cast<int>(config.runtime)) + ":" + std::to_string(static_cast<int>(config.environmentBinding)) : "portable") + "|" +
         std::to_string(guardExpected) + "|" + (config.keyMode == KeyMode::Online ? config.onlineKeyMaterial : std::to_string(rng()) + ":" + std::to_string(rng()));
     envelope.key = hkdfSha256(
-        std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(material.data()), material.size()), envelope.salt, "alexfuscator-register-vm-v5-aead");
+        std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(material.data()), material.size()), envelope.salt, "alexfuscator-register-vm-v6-aead");
 
     EVP_CIPHER_CTX* context = EVP_CIPHER_CTX_new();
     if (!context)
@@ -1340,7 +1340,7 @@ std::string encodeBinaryVmBundle(const json& value)
     return out;
 }
 
-enum class V5Op : uint8_t
+enum class V6Op : uint8_t
 {
     Nop,
     LoadConstant,
@@ -1387,7 +1387,7 @@ enum class V5Op : uint8_t
     Count,
 };
 
-enum class V5Binary : uint8_t
+enum class V6Binary : uint8_t
 {
     Add,
     Sub,
@@ -1406,7 +1406,7 @@ enum class V5Binary : uint8_t
     Count,
 };
 
-enum class V5Unary : uint8_t
+enum class V6Unary : uint8_t
 {
     Not,
     Minus,
@@ -1414,13 +1414,13 @@ enum class V5Unary : uint8_t
     Count,
 };
 
-struct V5Instruction
+struct V6Instruction
 {
-    V5Op op = V5Op::Nop;
+    V6Op op = V6Op::Nop;
     std::vector<uint32_t> args;
 };
 
-struct V5BasicBlock
+struct V6BasicBlock
 {
     size_t id = 0;
     size_t start = 0;
@@ -1428,14 +1428,14 @@ struct V5BasicBlock
     std::vector<size_t> successors;
 };
 
-struct V5Prototype
+struct V6Prototype
 {
     std::vector<uint32_t> params;
     std::vector<uint32_t> children;
     std::vector<uint32_t> captures;
     std::unordered_set<uint32_t> captureSet;
-    std::vector<V5Instruction> code;
-    std::vector<V5BasicBlock> blocks;
+    std::vector<V6Instruction> code;
+    std::vector<V6BasicBlock> blocks;
     json constants = json::array();
     std::vector<uint32_t> logicalToPhysicalConstant;
     std::vector<uint32_t> opcodes;
@@ -1454,9 +1454,9 @@ struct V5Prototype
     size_t superoperatorCount = 0;
 };
 
-struct V5Program
+struct V6Program
 {
-    std::vector<V5Prototype> prototypes;
+    std::vector<V6Prototype> prototypes;
     std::vector<std::string> strings;
     std::unordered_map<std::string, uint32_t> stringIds;
     uint32_t rootPrototype = 1;
@@ -1470,7 +1470,7 @@ struct V5Program
     bool registerReuse = false;
 };
 
-struct V5CompileFailure : std::runtime_error
+struct V6CompileFailure : std::runtime_error
 {
     std::string code;
     std::string stage;
@@ -1478,7 +1478,7 @@ struct V5CompileFailure : std::runtime_error
     int line = 0;
     int column = 0;
 
-    V5CompileFailure(std::string code, std::string stage, std::string astKind, const Luau::Location& location, std::string message)
+    V6CompileFailure(std::string code, std::string stage, std::string astKind, const Luau::Location& location, std::string message)
         : std::runtime_error(std::move(message))
         , code(std::move(code))
         , stage(std::move(stage))
@@ -1502,214 +1502,214 @@ struct CliFailure : std::runtime_error
     }
 };
 
-size_t v5OpIndex(V5Op op)
+size_t v6OpIndex(V6Op op)
 {
     return static_cast<size_t>(op);
 }
 
-bool v5IsBinary(V5Op op)
+bool v6IsBinary(V6Op op)
 {
-    return op == V5Op::Binary || op == V5Op::BinaryAlt;
+    return op == V6Op::Binary || op == V6Op::BinaryAlt;
 }
 
-bool v5IsLoadConstant(V5Op op)
+bool v6IsLoadConstant(V6Op op)
 {
-    return op == V5Op::LoadConstant || op == V5Op::LoadConstantAlt;
+    return op == V6Op::LoadConstant || op == V6Op::LoadConstantAlt;
 }
 
-bool v5IsJump(V5Op op)
+bool v6IsJump(V6Op op)
 {
-    return op == V5Op::Jump || op == V5Op::JumpFalse || op == V5Op::JumpFalseAlt || op == V5Op::JumpTrue || op == V5Op::JumpNil;
+    return op == V6Op::Jump || op == V6Op::JumpFalse || op == V6Op::JumpFalseAlt || op == V6Op::JumpTrue || op == V6Op::JumpNil;
 }
 
-bool v5IsTerminator(V5Op op)
+bool v6IsTerminator(V6Op op)
 {
-    return op == V5Op::Return || v5IsJump(op);
+    return op == V6Op::Return || v6IsJump(op);
 }
 
-std::vector<size_t> v5TargetArgs(V5Op op)
+std::vector<size_t> v6TargetArgs(V6Op op)
 {
     switch (op)
     {
-    case V5Op::Jump:
+    case V6Op::Jump:
         return {0};
-    case V5Op::JumpFalse:
-    case V5Op::JumpFalseAlt:
-    case V5Op::JumpTrue:
-    case V5Op::JumpNil:
+    case V6Op::JumpFalse:
+    case V6Op::JumpFalseAlt:
+    case V6Op::JumpTrue:
+    case V6Op::JumpNil:
         return {1};
     default:
         return {};
     }
 }
 
-std::vector<size_t> v5RegisterDefs(V5Op op)
+std::vector<size_t> v6RegisterDefs(V6Op op)
 {
     switch (op)
     {
-    case V5Op::LoadConstant:
-    case V5Op::LoadConstantAlt:
-    case V5Op::Move:
-    case V5Op::GetLocal:
-    case V5Op::GetLocalAlt:
-    case V5Op::GetGlobal:
-    case V5Op::GetIndex:
-    case V5Op::GetIndexK:
-    case V5Op::NewTable:
-    case V5Op::Binary:
-    case V5Op::BinaryAlt:
-    case V5Op::Unary:
-    case V5Op::PackNew:
-    case V5Op::PackGet:
-    case V5Op::Call:
-    case V5Op::CallGlobal0:
-    case V5Op::CallMethod0:
-    case V5Op::MakeClosure:
-    case V5Op::Varargs:
-    case V5Op::ToString:
-    case V5Op::IteratorInit:
-    case V5Op::ForCheck:
+    case V6Op::LoadConstant:
+    case V6Op::LoadConstantAlt:
+    case V6Op::Move:
+    case V6Op::GetLocal:
+    case V6Op::GetLocalAlt:
+    case V6Op::GetGlobal:
+    case V6Op::GetIndex:
+    case V6Op::GetIndexK:
+    case V6Op::NewTable:
+    case V6Op::Binary:
+    case V6Op::BinaryAlt:
+    case V6Op::Unary:
+    case V6Op::PackNew:
+    case V6Op::PackGet:
+    case V6Op::Call:
+    case V6Op::CallGlobal0:
+    case V6Op::CallMethod0:
+    case V6Op::MakeClosure:
+    case V6Op::Varargs:
+    case V6Op::ToString:
+    case V6Op::IteratorInit:
+    case V6Op::ForCheck:
         return {0};
     default:
         return {};
     }
 }
 
-std::vector<size_t> v5RegisterUses(V5Op op)
+std::vector<size_t> v6RegisterUses(V6Op op)
 {
     switch (op)
     {
-    case V5Op::Move:
+    case V6Op::Move:
         return {1};
-    case V5Op::DeclareLocal:
-    case V5Op::SetLocal:
-    case V5Op::SetGlobal:
+    case V6Op::DeclareLocal:
+    case V6Op::SetLocal:
+    case V6Op::SetGlobal:
         return {1};
-    case V5Op::GetIndex:
+    case V6Op::GetIndex:
         return {1, 2};
-    case V5Op::GetIndexK:
+    case V6Op::GetIndexK:
         return {1};
-    case V5Op::SetIndex:
+    case V6Op::SetIndex:
         return {0, 1, 2};
-    case V5Op::SetIndexK:
+    case V6Op::SetIndexK:
         return {0, 2};
-    case V5Op::SetList:
+    case V6Op::SetList:
         return {0, 2};
-    case V5Op::AppendPack:
+    case V6Op::AppendPack:
         return {0, 1};
-    case V5Op::Binary:
-    case V5Op::BinaryAlt:
+    case V6Op::Binary:
+    case V6Op::BinaryAlt:
         return {2, 3};
-    case V5Op::Unary:
+    case V6Op::Unary:
         return {2};
-    case V5Op::PackPush:
-    case V5Op::PackExtend:
+    case V6Op::PackPush:
+    case V6Op::PackExtend:
         return {0, 1};
-    case V5Op::PackGet:
+    case V6Op::PackGet:
         return {1};
-    case V5Op::PackSet:
+    case V6Op::PackSet:
         return {0, 2};
-    case V5Op::Call:
+    case V6Op::Call:
         return {1, 2};
-    case V5Op::CallMethod0:
+    case V6Op::CallMethod0:
         return {1};
-    case V5Op::Return:
+    case V6Op::Return:
         return {0};
-    case V5Op::JumpFalse:
-    case V5Op::JumpFalseAlt:
-    case V5Op::JumpTrue:
-    case V5Op::JumpNil:
+    case V6Op::JumpFalse:
+    case V6Op::JumpFalseAlt:
+    case V6Op::JumpTrue:
+    case V6Op::JumpNil:
         return {0};
-    case V5Op::ToString:
+    case V6Op::ToString:
         return {1};
-    case V5Op::IteratorInit:
+    case V6Op::IteratorInit:
         return {1};
-    case V5Op::ForCheck:
+    case V6Op::ForCheck:
         return {1, 2, 3};
     default:
         return {};
     }
 }
 
-std::vector<size_t> v5StringArgs(V5Op op)
+std::vector<size_t> v6StringArgs(V6Op op)
 {
     switch (op)
     {
-    case V5Op::GetGlobal:
+    case V6Op::GetGlobal:
         return {1};
-    case V5Op::SetGlobal:
+    case V6Op::SetGlobal:
         return {0};
-    case V5Op::GetIndexK:
+    case V6Op::GetIndexK:
         return {2};
-    case V5Op::SetIndexK:
+    case V6Op::SetIndexK:
         return {1};
-    case V5Op::CallGlobal0:
+    case V6Op::CallGlobal0:
         return {1};
-    case V5Op::CallMethod0:
+    case V6Op::CallMethod0:
         return {2};
     default:
         return {};
     }
 }
 
-std::vector<V5BasicBlock> buildV5Blocks(const std::vector<V5Instruction>& code)
+std::vector<V6BasicBlock> buildV6Blocks(const std::vector<V6Instruction>& code)
 {
     if (code.empty())
-        throw std::runtime_error("internal error: empty v5 prototype");
+        throw std::runtime_error("internal error: empty v6 prototype");
 
     std::set<size_t> leaders = {0};
     for (size_t index = 0; index < code.size(); ++index)
     {
-        const V5Instruction& instruction = code[index];
-        for (size_t position : v5TargetArgs(instruction.op))
+        const V6Instruction& instruction = code[index];
+        for (size_t position : v6TargetArgs(instruction.op))
         {
             if (position >= instruction.args.size() || instruction.args[position] >= code.size())
-                throw std::runtime_error("internal error: v5 control-flow target is out of range");
+                throw std::runtime_error("internal error: v6 control-flow target is out of range");
             leaders.insert(instruction.args[position]);
         }
-        if (v5IsTerminator(instruction.op) && index + 1 < code.size())
+        if (v6IsTerminator(instruction.op) && index + 1 < code.size())
             leaders.insert(index + 1);
     }
 
     std::vector<size_t> starts(leaders.begin(), leaders.end());
-    std::vector<V5BasicBlock> blocks;
+    std::vector<V6BasicBlock> blocks;
     std::vector<size_t> blockForInstruction(code.size(), 0);
     for (size_t index = 0; index < starts.size(); ++index)
     {
         size_t start = starts[index];
         size_t end = index + 1 < starts.size() ? starts[index + 1] : code.size();
-        V5BasicBlock block{index, start, end, {}};
+        V6BasicBlock block{index, start, end, {}};
         for (size_t instruction = start; instruction < end; ++instruction)
             blockForInstruction[instruction] = index;
         blocks.push_back(std::move(block));
     }
 
-    for (V5BasicBlock& block : blocks)
+    for (V6BasicBlock& block : blocks)
     {
-        const V5Instruction& last = code[block.end - 1];
+        const V6Instruction& last = code[block.end - 1];
         auto addSuccessor = [&](size_t instruction) {
             size_t successor = blockForInstruction.at(instruction);
             if (std::find(block.successors.begin(), block.successors.end(), successor) == block.successors.end())
                 block.successors.push_back(successor);
         };
-        if (last.op == V5Op::Jump)
+        if (last.op == V6Op::Jump)
             addSuccessor(last.args[0]);
-        else if (last.op == V5Op::JumpFalse || last.op == V5Op::JumpFalseAlt || last.op == V5Op::JumpTrue || last.op == V5Op::JumpNil)
+        else if (last.op == V6Op::JumpFalse || last.op == V6Op::JumpFalseAlt || last.op == V6Op::JumpTrue || last.op == V6Op::JumpNil)
         {
             addSuccessor(last.args[1]);
             if (block.end < code.size())
                 addSuccessor(block.end);
         }
-        else if (last.op != V5Op::Return && block.end < code.size())
+        else if (last.op != V6Op::Return && block.end < code.size())
             addSuccessor(block.end);
     }
     return blocks;
 }
 
-class V5SemanticCompiler
+class V6SemanticCompiler
 {
 public:
-    V5SemanticCompiler(std::mt19937_64& rng, const Config& config)
+    V6SemanticCompiler(std::mt19937_64& rng, const Config& config)
         : rng(rng)
         , config(config)
         , localMultiplier(static_cast<uint32_t>(((rng() % 193u) + 17u) | 1u))
@@ -1717,7 +1717,7 @@ public:
     {
     }
 
-    V5Program compile(Luau::AstStatBlock* root)
+    V6Program compile(Luau::AstStatBlock* root)
     {
         program.prototypes.emplace_back();
         program.prototypes[0].vararg = true;
@@ -1767,7 +1767,7 @@ private:
 
     std::mt19937_64& rng;
     const Config& config;
-    V5Program program;
+    V6Program program;
     std::vector<Context> contexts;
     std::unordered_map<const Luau::AstLocal*, uint32_t> localIds;
     std::unordered_map<const Luau::AstLocal*, uint32_t> localOwners;
@@ -1780,7 +1780,7 @@ private:
         return contexts.back();
     }
 
-    V5Prototype& prototype()
+    V6Prototype& prototype()
     {
         return program.prototypes[current().prototype];
     }
@@ -1792,7 +1792,7 @@ private:
 
     [[noreturn]] void unsupported(const Luau::Location& location, std::string astKind, std::string detail) const
     {
-        throw V5CompileFailure("unsupported_syntax", "semantic_ir", std::move(astKind), location, "register VM v5 does not support " + detail);
+        throw V6CompileFailure("unsupported_syntax", "semantic_ir", std::move(astKind), location, "AlexVM 6 does not support " + detail);
     }
 
     static std::string astString(const Luau::AstArray<char>& value)
@@ -1805,20 +1805,20 @@ private:
         return current().nextRegister++;
     }
 
-    size_t emit(V5Op op, std::vector<uint32_t> args = {})
+    size_t emit(V6Op op, std::vector<uint32_t> args = {})
     {
         size_t index = prototype().code.size();
         prototype().code.push_back({op, std::move(args)});
-        if (op == V5Op::CallGlobal0 || op == V5Op::CallMethod0)
+        if (op == V6Op::CallGlobal0 || op == V6Op::CallMethod0)
             ++prototype().superoperatorCount;
         return index;
     }
 
     void patch(size_t instruction, size_t argument, size_t target)
     {
-        V5Instruction& value = prototype().code.at(instruction);
+        V6Instruction& value = prototype().code.at(instruction);
         if (argument >= value.args.size())
-            throw std::runtime_error("internal error: v5 jump patch argument is missing");
+            throw std::runtime_error("internal error: v6 jump patch argument is missing");
         value.args[argument] = static_cast<uint32_t>(target);
     }
 
@@ -1864,7 +1864,7 @@ private:
     uint32_t emitConstant(json value)
     {
         uint32_t destination = allocRegister();
-        emit(V5Op::LoadConstant, {destination, addConstant(std::move(value))});
+        emit(V6Op::LoadConstant, {destination, addConstant(std::move(value))});
         return destination;
     }
 
@@ -1873,38 +1873,38 @@ private:
         return emitConstant(json::array({0}));
     }
 
-    V5Binary binaryOperator(Luau::AstExprBinary::Op op, const Luau::Location& location) const
+    V6Binary binaryOperator(Luau::AstExprBinary::Op op, const Luau::Location& location) const
     {
         switch (op)
         {
         case Luau::AstExprBinary::Add:
-            return V5Binary::Add;
+            return V6Binary::Add;
         case Luau::AstExprBinary::Sub:
-            return V5Binary::Sub;
+            return V6Binary::Sub;
         case Luau::AstExprBinary::Mul:
-            return V5Binary::Mul;
+            return V6Binary::Mul;
         case Luau::AstExprBinary::Div:
-            return V5Binary::Div;
+            return V6Binary::Div;
         case Luau::AstExprBinary::FloorDiv:
-            return V5Binary::FloorDiv;
+            return V6Binary::FloorDiv;
         case Luau::AstExprBinary::Mod:
-            return V5Binary::Mod;
+            return V6Binary::Mod;
         case Luau::AstExprBinary::Pow:
-            return V5Binary::Pow;
+            return V6Binary::Pow;
         case Luau::AstExprBinary::Concat:
-            return V5Binary::Concat;
+            return V6Binary::Concat;
         case Luau::AstExprBinary::CompareNe:
-            return V5Binary::Ne;
+            return V6Binary::Ne;
         case Luau::AstExprBinary::CompareEq:
-            return V5Binary::Eq;
+            return V6Binary::Eq;
         case Luau::AstExprBinary::CompareLt:
-            return V5Binary::Lt;
+            return V6Binary::Lt;
         case Luau::AstExprBinary::CompareLe:
-            return V5Binary::Le;
+            return V6Binary::Le;
         case Luau::AstExprBinary::CompareGt:
-            return V5Binary::Gt;
+            return V6Binary::Gt;
         case Luau::AstExprBinary::CompareGe:
-            return V5Binary::Ge;
+            return V6Binary::Ge;
         case Luau::AstExprBinary::And:
         case Luau::AstExprBinary::Or:
         case Luau::AstExprBinary::Op__Count:
@@ -1913,16 +1913,16 @@ private:
         unsupported(location, "AstExprBinary", "this binary operator");
     }
 
-    V5Unary unaryOperator(Luau::AstExprUnary::Op op, const Luau::Location& location) const
+    V6Unary unaryOperator(Luau::AstExprUnary::Op op, const Luau::Location& location) const
     {
         switch (op)
         {
         case Luau::AstExprUnary::Op::Not:
-            return V5Unary::Not;
+            return V6Unary::Not;
         case Luau::AstExprUnary::Op::Minus:
-            return V5Unary::Minus;
+            return V6Unary::Minus;
         case Luau::AstExprUnary::Op::Len:
-            return V5Unary::Length;
+            return V6Unary::Length;
         }
         unsupported(location, "AstExprUnary", "this unary operator");
     }
@@ -1949,34 +1949,34 @@ private:
         if (peeled->as<Luau::AstExprVarargs>())
         {
             uint32_t destination = allocRegister();
-            emit(V5Op::Varargs, {destination});
+            emit(V6Op::Varargs, {destination});
             return destination;
         }
 
         uint32_t pack = allocRegister();
-        emit(V5Op::PackNew, {pack});
+        emit(V6Op::PackNew, {pack});
         uint32_t value = compileExpression(expression);
-        emit(V5Op::PackPush, {pack, value});
+        emit(V6Op::PackPush, {pack, value});
         return pack;
     }
 
     uint32_t compileExpressionList(const Luau::AstArray<Luau::AstExpr*>& expressions, std::optional<uint32_t> prefix = std::nullopt)
     {
         uint32_t pack = allocRegister();
-        emit(V5Op::PackNew, {pack});
+        emit(V6Op::PackNew, {pack});
         if (prefix)
-            emit(V5Op::PackPush, {pack, *prefix});
+            emit(V6Op::PackPush, {pack, *prefix});
         for (size_t index = 0; index < expressions.size; ++index)
         {
             if (index + 1 == expressions.size)
             {
                 uint32_t tail = compileExpressionPack(expressions.data[index]);
-                emit(V5Op::PackExtend, {pack, tail});
+                emit(V6Op::PackExtend, {pack, tail});
             }
             else
             {
                 uint32_t value = compileExpression(expressions.data[index]);
-                emit(V5Op::PackPush, {pack, value});
+                emit(V6Op::PackPush, {pack, value});
             }
         }
         return pack;
@@ -1990,7 +1990,7 @@ private:
             if (auto global = function->as<Luau::AstExprGlobal>())
             {
                 uint32_t destination = allocRegister();
-                emit(V5Op::CallGlobal0, {destination, stringId(global->name.value ? global->name.value : "")});
+                emit(V6Op::CallGlobal0, {destination, stringId(global->name.value ? global->name.value : "")});
                 return destination;
             }
         }
@@ -2000,7 +2000,7 @@ private:
             {
                 uint32_t self = compileExpression(index->expr);
                 uint32_t destination = allocRegister();
-                emit(V5Op::CallMethod0, {destination, self, stringId(index->index.value ? index->index.value : "")});
+                emit(V6Op::CallMethod0, {destination, self, stringId(index->index.value ? index->index.value : "")});
                 return destination;
             }
         }
@@ -2014,7 +2014,7 @@ private:
                 unsupported(call->location, "AstExprCall", "this method-call target");
             uint32_t self = compileExpression(index->expr);
             functionRegister = allocRegister();
-            emit(V5Op::GetIndexK, {functionRegister, self, stringId(index->index.value ? index->index.value : "")});
+            emit(V6Op::GetIndexK, {functionRegister, self, stringId(index->index.value ? index->index.value : "")});
             arguments = compileExpressionList(call->args, self);
         }
         else
@@ -2024,7 +2024,7 @@ private:
         }
 
         uint32_t destination = allocRegister();
-        emit(V5Op::Call, {destination, functionRegister, arguments});
+        emit(V6Op::Call, {destination, functionRegister, arguments});
         return destination;
     }
 
@@ -2049,7 +2049,7 @@ private:
         contexts.pop_back();
 
         uint32_t destination = allocRegister();
-        emit(V5Op::MakeClosure, {destination, static_cast<uint32_t>(child + 1)});
+        emit(V6Op::MakeClosure, {destination, static_cast<uint32_t>(child + 1)});
         return destination;
     }
 
@@ -2076,27 +2076,27 @@ private:
             uint32_t id = localId(local->local);
             noteCapture(local->local, id);
             uint32_t destination = allocRegister();
-            emit(V5Op::GetLocal, {destination, id});
+            emit(V6Op::GetLocal, {destination, id});
             return destination;
         }
         if (auto global = expression->as<Luau::AstExprGlobal>())
         {
             uint32_t destination = allocRegister();
-            emit(V5Op::GetGlobal, {destination, stringId(global->name.value ? global->name.value : "")});
+            emit(V6Op::GetGlobal, {destination, stringId(global->name.value ? global->name.value : "")});
             return destination;
         }
         if (expression->as<Luau::AstExprVarargs>())
         {
             uint32_t values = compileExpressionPack(expression);
             uint32_t destination = allocRegister();
-            emit(V5Op::PackGet, {destination, values, 1});
+            emit(V6Op::PackGet, {destination, values, 1});
             return destination;
         }
         if (auto index = expression->as<Luau::AstExprIndexName>())
         {
             uint32_t object = compileExpression(index->expr);
             uint32_t destination = allocRegister();
-            emit(V5Op::GetIndexK, {destination, object, stringId(index->index.value ? index->index.value : "")});
+            emit(V6Op::GetIndexK, {destination, object, stringId(index->index.value ? index->index.value : "")});
             return destination;
         }
         if (auto index = expression->as<Luau::AstExprIndexExpr>())
@@ -2104,7 +2104,7 @@ private:
             uint32_t object = compileExpression(index->expr);
             uint32_t key = compileExpression(index->index);
             uint32_t destination = allocRegister();
-            emit(V5Op::GetIndex, {destination, object, key});
+            emit(V6Op::GetIndex, {destination, object, key});
             return destination;
         }
         if (auto binary = expression->as<Luau::AstExprBinary>())
@@ -2113,32 +2113,32 @@ private:
             {
                 uint32_t destination = allocRegister();
                 uint32_t left = compileExpression(binary->left);
-                emit(V5Op::Move, {destination, left});
-                V5Op jump = binary->op == Luau::AstExprBinary::And ? V5Op::JumpFalse : V5Op::JumpTrue;
+                emit(V6Op::Move, {destination, left});
+                V6Op jump = binary->op == Luau::AstExprBinary::And ? V6Op::JumpFalse : V6Op::JumpTrue;
                 size_t done = emit(jump, {left, 0});
                 uint32_t right = compileExpression(binary->right);
-                emit(V5Op::Move, {destination, right});
+                emit(V6Op::Move, {destination, right});
                 patch(done, 1, prototype().code.size());
                 return destination;
             }
             uint32_t left = compileExpression(binary->left);
             uint32_t right = compileExpression(binary->right);
             uint32_t destination = allocRegister();
-            emit(V5Op::Binary, {destination, static_cast<uint32_t>(binaryOperator(binary->op, binary->location)), left, right});
+            emit(V6Op::Binary, {destination, static_cast<uint32_t>(binaryOperator(binary->op, binary->location)), left, right});
             return destination;
         }
         if (auto unary = expression->as<Luau::AstExprUnary>())
         {
             uint32_t source = compileExpression(unary->expr);
             uint32_t destination = allocRegister();
-            emit(V5Op::Unary, {destination, static_cast<uint32_t>(unaryOperator(unary->op, unary->location)), source});
+            emit(V6Op::Unary, {destination, static_cast<uint32_t>(unaryOperator(unary->op, unary->location)), source});
             return destination;
         }
         if (auto call = expression->as<Luau::AstExprCall>())
         {
             uint32_t values = compileCall(call);
             uint32_t destination = allocRegister();
-            emit(V5Op::PackGet, {destination, values, 1});
+            emit(V6Op::PackGet, {destination, values, 1});
             return destination;
         }
         if (auto function = expression->as<Luau::AstExprFunction>())
@@ -2147,13 +2147,13 @@ private:
         {
             uint32_t destination = allocRegister();
             uint32_t condition = compileExpression(conditional->condition);
-            size_t otherwise = emit(V5Op::JumpFalse, {condition, 0});
+            size_t otherwise = emit(V6Op::JumpFalse, {condition, 0});
             uint32_t yes = compileExpression(conditional->trueExpr);
-            emit(V5Op::Move, {destination, yes});
-            size_t done = emit(V5Op::Jump, {0});
+            emit(V6Op::Move, {destination, yes});
+            size_t done = emit(V6Op::Jump, {0});
             patch(otherwise, 1, prototype().code.size());
             uint32_t no = compileExpression(conditional->falseExpr);
-            emit(V5Op::Move, {destination, no});
+            emit(V6Op::Move, {destination, no});
             patch(done, 0, prototype().code.size());
             return destination;
         }
@@ -2164,19 +2164,19 @@ private:
             {
                 uint32_t value = compileExpression(interpolation->expressions.data[index]);
                 uint32_t text = allocRegister();
-                emit(V5Op::ToString, {text, value});
+                emit(V6Op::ToString, {text, value});
                 uint32_t joined = allocRegister();
-                emit(V5Op::Binary, {joined, static_cast<uint32_t>(V5Binary::Concat), destination, text});
+                emit(V6Op::Binary, {joined, static_cast<uint32_t>(V6Binary::Concat), destination, text});
                 uint32_t suffix = emitConstant(json::array({3, stringId(astString(interpolation->strings.data[index + 1]))}));
                 destination = allocRegister();
-                emit(V5Op::Binary, {destination, static_cast<uint32_t>(V5Binary::Concat), joined, suffix});
+                emit(V6Op::Binary, {destination, static_cast<uint32_t>(V6Binary::Concat), joined, suffix});
             }
             return destination;
         }
         if (auto table = expression->as<Luau::AstExprTable>())
         {
             uint32_t destination = allocRegister();
-            emit(V5Op::NewTable, {destination});
+            emit(V6Op::NewTable, {destination});
             uint32_t listIndex = 1;
             for (size_t index = 0; index < table->items.size; ++index)
             {
@@ -2186,12 +2186,12 @@ private:
                     if (index + 1 == table->items.size)
                     {
                         uint32_t values = compileExpressionPack(item.value);
-                        emit(V5Op::AppendPack, {destination, values, listIndex});
+                        emit(V6Op::AppendPack, {destination, values, listIndex});
                     }
                     else
                     {
                         uint32_t value = compileExpression(item.value);
-                        emit(V5Op::SetList, {destination, listIndex++, value});
+                        emit(V6Op::SetList, {destination, listIndex++, value});
                     }
                 }
                 else if (item.kind == Luau::AstExprTable::Item::Kind::Record)
@@ -2200,13 +2200,13 @@ private:
                     if (!key)
                         unsupported(expression->location, "AstExprTable", "this record key");
                     uint32_t value = compileExpression(item.value);
-                    emit(V5Op::SetIndexK, {destination, stringId(astString(key->value)), value});
+                    emit(V6Op::SetIndexK, {destination, stringId(astString(key->value)), value});
                 }
                 else
                 {
                     uint32_t key = compileExpression(item.key);
                     uint32_t value = compileExpression(item.value);
-                    emit(V5Op::SetIndex, {destination, key, value});
+                    emit(V6Op::SetIndex, {destination, key, value});
                 }
             }
             return destination;
@@ -2244,16 +2244,16 @@ private:
         switch (target.kind)
         {
         case TargetKind::Local:
-            emit(V5Op::GetLocal, {destination, target.id});
+            emit(V6Op::GetLocal, {destination, target.id});
             break;
         case TargetKind::Global:
-            emit(V5Op::GetGlobal, {destination, target.id});
+            emit(V6Op::GetGlobal, {destination, target.id});
             break;
         case TargetKind::Index:
-            emit(V5Op::GetIndex, {destination, target.object, target.key});
+            emit(V6Op::GetIndex, {destination, target.object, target.key});
             break;
         case TargetKind::IndexName:
-            emit(V5Op::GetIndexK, {destination, target.object, target.id});
+            emit(V6Op::GetIndexK, {destination, target.object, target.id});
             break;
         }
         return destination;
@@ -2264,16 +2264,16 @@ private:
         switch (target.kind)
         {
         case TargetKind::Local:
-            emit(V5Op::SetLocal, {target.id, value});
+            emit(V6Op::SetLocal, {target.id, value});
             break;
         case TargetKind::Global:
-            emit(V5Op::SetGlobal, {target.id, value});
+            emit(V6Op::SetGlobal, {target.id, value});
             break;
         case TargetKind::Index:
-            emit(V5Op::SetIndex, {target.object, target.key, value});
+            emit(V6Op::SetIndex, {target.object, target.key, value});
             break;
         case TargetKind::IndexName:
-            emit(V5Op::SetIndexK, {target.object, target.id, value});
+            emit(V6Op::SetIndexK, {target.object, target.id, value});
             break;
         }
     }
@@ -2286,18 +2286,18 @@ private:
 
     void compileScopedBlock(Luau::AstStatBlock* block)
     {
-        emit(V5Op::EnterScope);
+        emit(V6Op::EnterScope);
         ++current().scopeDepth;
         compileBlockBody(block);
-        emit(V5Op::LeaveScopes, {1});
+        emit(V6Op::LeaveScopes, {1});
         --current().scopeDepth;
     }
 
     void emitEmptyReturn()
     {
         uint32_t values = allocRegister();
-        emit(V5Op::PackNew, {values});
-        emit(V5Op::Return, {values});
+        emit(V6Op::PackNew, {values});
+        emit(V6Op::Return, {values});
     }
 
     void patchLoop(LoopContext& loop, size_t breakTarget, size_t continueTarget)
@@ -2316,8 +2316,8 @@ private:
             for (size_t index = 0; index < local->vars.size; ++index)
             {
                 uint32_t value = allocRegister();
-                emit(V5Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
-                emit(V5Op::DeclareLocal, {localId(local->vars.data[index]), value});
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                emit(V6Op::DeclareLocal, {localId(local->vars.data[index]), value});
             }
             return;
         }
@@ -2325,15 +2325,15 @@ private:
         {
             uint32_t id = localId(localFunction->name);
             uint32_t nil = emitNil();
-            emit(V5Op::DeclareLocal, {id, nil});
+            emit(V6Op::DeclareLocal, {id, nil});
             uint32_t closure = compileFunction(localFunction->func);
-            emit(V5Op::SetLocal, {id, closure});
+            emit(V6Op::SetLocal, {id, closure});
             return;
         }
         if (auto returns = statement->as<Luau::AstStatReturn>())
         {
             uint32_t values = compileExpressionList(returns->list);
-            emit(V5Op::Return, {values});
+            emit(V6Op::Return, {values});
             return;
         }
         if (auto expression = statement->as<Luau::AstStatExpr>())
@@ -2355,7 +2355,7 @@ private:
             for (size_t index = 0; index < targets.size(); ++index)
             {
                 uint32_t value = allocRegister();
-                emit(V5Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
                 writeTarget(targets[index], value);
             }
             return;
@@ -2366,7 +2366,7 @@ private:
             uint32_t left = readTarget(target);
             uint32_t right = compileExpression(compound->value);
             uint32_t value = allocRegister();
-            emit(V5Op::Binary, {value, static_cast<uint32_t>(binaryOperator(compound->op, compound->location)), left, right});
+            emit(V6Op::Binary, {value, static_cast<uint32_t>(binaryOperator(compound->op, compound->location)), left, right});
             writeTarget(target, value);
             return;
         }
@@ -2380,9 +2380,9 @@ private:
         if (auto conditional = statement->as<Luau::AstStatIf>())
         {
             uint32_t condition = compileExpression(conditional->condition);
-            size_t otherwise = emit(V5Op::JumpFalse, {condition, 0});
+            size_t otherwise = emit(V6Op::JumpFalse, {condition, 0});
             compileScopedBlock(conditional->thenbody);
-            size_t done = emit(V5Op::Jump, {0});
+            size_t done = emit(V6Op::Jump, {0});
             patch(otherwise, 1, prototype().code.size());
             if (conditional->elsebody)
             {
@@ -2405,11 +2405,11 @@ private:
         {
             size_t start = prototype().code.size();
             uint32_t condition = compileExpression(loop->condition);
-            size_t done = emit(V5Op::JumpFalse, {condition, 0});
+            size_t done = emit(V6Op::JumpFalse, {condition, 0});
             current().loops.push_back({current().scopeDepth, current().scopeDepth, {}, {}});
             compileScopedBlock(loop->body);
             size_t continueTarget = prototype().code.size();
-            emit(V5Op::Jump, {static_cast<uint32_t>(start)});
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
             size_t end = prototype().code.size();
             patch(done, 1, end);
             LoopContext context = std::move(current().loops.back());
@@ -2420,16 +2420,16 @@ private:
         if (auto loop = statement->as<Luau::AstStatRepeat>())
         {
             size_t start = prototype().code.size();
-            emit(V5Op::EnterScope);
+            emit(V6Op::EnterScope);
             ++current().scopeDepth;
             int iterationDepth = current().scopeDepth;
             current().loops.push_back({iterationDepth - 1, iterationDepth, {}, {}});
             compileBlockBody(loop->body);
             size_t continueTarget = prototype().code.size();
             uint32_t condition = compileExpression(loop->condition);
-            emit(V5Op::LeaveScopes, {1});
+            emit(V6Op::LeaveScopes, {1});
             --current().scopeDepth;
-            emit(V5Op::JumpFalse, {condition, static_cast<uint32_t>(start)});
+            emit(V6Op::JumpFalse, {condition, static_cast<uint32_t>(start)});
             size_t end = prototype().code.size();
             LoopContext context = std::move(current().loops.back());
             current().loops.pop_back();
@@ -2442,25 +2442,25 @@ private:
             uint32_t limit = compileExpression(loop->to);
             uint32_t step = loop->step ? compileExpression(loop->step) : emitConstant(json::array({2, 1}));
             uint32_t currentValue = allocRegister();
-            emit(V5Op::Move, {currentValue, from});
+            emit(V6Op::Move, {currentValue, from});
             size_t start = prototype().code.size();
             uint32_t condition = allocRegister();
-            emit(V5Op::ForCheck, {condition, currentValue, limit, step});
-            size_t done = emit(V5Op::JumpFalse, {condition, 0});
+            emit(V6Op::ForCheck, {condition, currentValue, limit, step});
+            size_t done = emit(V6Op::JumpFalse, {condition, 0});
 
             int baseDepth = current().scopeDepth;
             current().loops.push_back({baseDepth, baseDepth, {}, {}});
-            emit(V5Op::EnterScope);
+            emit(V6Op::EnterScope);
             ++current().scopeDepth;
-            emit(V5Op::DeclareLocal, {localId(loop->var), currentValue});
+            emit(V6Op::DeclareLocal, {localId(loop->var), currentValue});
             compileBlockBody(loop->body);
-            emit(V5Op::LeaveScopes, {1});
+            emit(V6Op::LeaveScopes, {1});
             --current().scopeDepth;
             size_t continueTarget = prototype().code.size();
             uint32_t next = allocRegister();
-            emit(V5Op::Binary, {next, static_cast<uint32_t>(V5Binary::Add), currentValue, step});
-            emit(V5Op::Move, {currentValue, next});
-            emit(V5Op::Jump, {static_cast<uint32_t>(start)});
+            emit(V6Op::Binary, {next, static_cast<uint32_t>(V6Binary::Add), currentValue, step});
+            emit(V6Op::Move, {currentValue, next});
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
             size_t end = prototype().code.size();
             patch(done, 1, end);
             LoopContext context = std::move(current().loops.back());
@@ -2472,41 +2472,41 @@ private:
         {
             uint32_t source = compileExpressionList(loop->values);
             uint32_t iteratorState = allocRegister();
-            emit(V5Op::IteratorInit, {iteratorState, source});
+            emit(V6Op::IteratorInit, {iteratorState, source});
             uint32_t iterator = allocRegister();
             uint32_t state = allocRegister();
             uint32_t control = allocRegister();
-            emit(V5Op::PackGet, {iterator, iteratorState, 1});
-            emit(V5Op::PackGet, {state, iteratorState, 2});
-            emit(V5Op::PackGet, {control, iteratorState, 3});
+            emit(V6Op::PackGet, {iterator, iteratorState, 1});
+            emit(V6Op::PackGet, {state, iteratorState, 2});
+            emit(V6Op::PackGet, {control, iteratorState, 3});
 
             size_t start = prototype().code.size();
             uint32_t arguments = allocRegister();
-            emit(V5Op::PackNew, {arguments});
-            emit(V5Op::PackPush, {arguments, state});
-            emit(V5Op::PackPush, {arguments, control});
+            emit(V6Op::PackNew, {arguments});
+            emit(V6Op::PackPush, {arguments, state});
+            emit(V6Op::PackPush, {arguments, control});
             uint32_t values = allocRegister();
-            emit(V5Op::Call, {values, iterator, arguments});
+            emit(V6Op::Call, {values, iterator, arguments});
             uint32_t first = allocRegister();
-            emit(V5Op::PackGet, {first, values, 1});
-            size_t done = emit(V5Op::JumpNil, {first, 0});
-            emit(V5Op::Move, {control, first});
+            emit(V6Op::PackGet, {first, values, 1});
+            size_t done = emit(V6Op::JumpNil, {first, 0});
+            emit(V6Op::Move, {control, first});
 
             int baseDepth = current().scopeDepth;
             current().loops.push_back({baseDepth, baseDepth, {}, {}});
-            emit(V5Op::EnterScope);
+            emit(V6Op::EnterScope);
             ++current().scopeDepth;
             for (size_t index = 0; index < loop->vars.size; ++index)
             {
                 uint32_t value = allocRegister();
-                emit(V5Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
-                emit(V5Op::DeclareLocal, {localId(loop->vars.data[index]), value});
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                emit(V6Op::DeclareLocal, {localId(loop->vars.data[index]), value});
             }
             compileBlockBody(loop->body);
-            emit(V5Op::LeaveScopes, {1});
+            emit(V6Op::LeaveScopes, {1});
             --current().scopeDepth;
             size_t continueTarget = prototype().code.size();
-            emit(V5Op::Jump, {static_cast<uint32_t>(start)});
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
             size_t end = prototype().code.size();
             patch(done, 1, end);
             LoopContext context = std::move(current().loops.back());
@@ -2517,21 +2517,21 @@ private:
         if (statement->as<Luau::AstStatBreak>() || statement->as<Luau::AstStatContinue>())
         {
             if (current().loops.empty())
-                throw V5CompileFailure("invalid_control_flow", "semantic_ir", "AstStatLoopControl", statement->location, "loop control statement is outside a loop");
+                throw V6CompileFailure("invalid_control_flow", "semantic_ir", "AstStatLoopControl", statement->location, "loop control statement is outside a loop");
             LoopContext& loop = current().loops.back();
             bool isBreak = statement->as<Luau::AstStatBreak>() != nullptr;
             int targetDepth = isBreak ? loop.breakDepth : loop.continueDepth;
             int leaveCount = current().scopeDepth - targetDepth;
             if (leaveCount > 0)
-                emit(V5Op::LeaveScopes, {static_cast<uint32_t>(leaveCount)});
-            size_t jump = emit(V5Op::Jump, {0});
+                emit(V6Op::LeaveScopes, {static_cast<uint32_t>(leaveCount)});
+            size_t jump = emit(V6Op::Jump, {0});
             (isBreak ? loop.breaks : loop.continues).push_back(jump);
             return;
         }
         if (statement->as<Luau::AstStatTypeAlias>() || statement->as<Luau::AstStatTypeFunction>() || statement->as<Luau::AstStatDeclareGlobal>() ||
             statement->as<Luau::AstStatDeclareFunction>() || statement->as<Luau::AstStatDeclareExternType>())
         {
-            emit(V5Op::Nop);
+            emit(V6Op::Nop);
             return;
         }
         unsupported(statement->location, "AstStat", "this statement form");
@@ -2545,27 +2545,27 @@ private:
             count = 0;
         for (size_t index = 0; index < count; ++index)
         {
-            V5Prototype decoy;
+            V6Prototype decoy;
             decoy.decoy = true;
             decoy.constants.push_back(json::array({2, static_cast<uint32_t>((rng() % 900000u) + 1000u)}));
-            decoy.code.push_back({V5Op::Nop, {}});
-            decoy.code.push_back({V5Op::PackNew, {1}});
-            decoy.code.push_back({V5Op::Return, {1}});
+            decoy.code.push_back({V6Op::Nop, {}});
+            decoy.code.push_back({V6Op::PackNew, {1}});
+            decoy.code.push_back({V6Op::Return, {1}});
             decoy.virtualRegisterCount = 1;
             program.prototypes.push_back(std::move(decoy));
         }
         program.decoyPrototypeCount = count;
     }
 
-    void injectOpaqueGuards(V5Prototype& proto)
+    void injectOpaqueGuards(V6Prototype& proto)
     {
         int rank = protectionRank(config.controlFlow);
         size_t frequency = rank >= 3 ? 4u : rank >= 2 ? 8u : 0u;
         if (frequency == 0 || proto.decoy || proto.code.size() < 4)
             return;
 
-        std::vector<V5Instruction> original = std::move(proto.code);
-        std::vector<V5Instruction> rewritten;
+        std::vector<V6Instruction> original = std::move(proto.code);
+        std::vector<V6Instruction> rewritten;
         std::vector<size_t> targetMap(original.size() + 1, 0);
         rewritten.reserve(original.size() + original.size() / frequency + 1);
         for (size_t index = 0; index < original.size(); ++index)
@@ -2578,39 +2578,39 @@ private:
                 uint32_t add = static_cast<uint32_t>((rng() % 997u) + 17u);
                 uint32_t modulus = static_cast<uint32_t>((rng() % 109u) + 43u);
                 uint32_t expected = static_cast<uint32_t>((static_cast<uint64_t>(value) * multiplier + add) % modulus);
-                rewritten.push_back({V5Op::OpaqueGuard, {value, multiplier, add, modulus, expected}});
+                rewritten.push_back({V6Op::OpaqueGuard, {value, multiplier, add, modulus, expected}});
                 ++proto.opaqueGuardCount;
             }
             rewritten.push_back(std::move(original[index]));
         }
         targetMap[original.size()] = rewritten.size();
-        for (V5Instruction& instruction : rewritten)
+        for (V6Instruction& instruction : rewritten)
         {
-            for (size_t position : v5TargetArgs(instruction.op))
+            for (size_t position : v6TargetArgs(instruction.op))
                 instruction.args[position] = static_cast<uint32_t>(targetMap.at(instruction.args[position]));
         }
         proto.code = std::move(rewritten);
     }
 
-    void substituteInstructions(V5Prototype& proto)
+    void substituteInstructions(V6Prototype& proto)
     {
         int rank = protectionRank(config.vmDiversity);
         if (rank < 2 || proto.decoy)
             return;
         uint64_t divisor = rank >= 3 ? 2u : 4u;
-        for (V5Instruction& instruction : proto.code)
+        for (V6Instruction& instruction : proto.code)
         {
             if (rng() % divisor != 0)
                 continue;
-            V5Op replacement = instruction.op;
-            if (instruction.op == V5Op::LoadConstant)
-                replacement = V5Op::LoadConstantAlt;
-            else if (instruction.op == V5Op::GetLocal)
-                replacement = V5Op::GetLocalAlt;
-            else if (instruction.op == V5Op::Binary)
-                replacement = V5Op::BinaryAlt;
-            else if (instruction.op == V5Op::JumpFalse)
-                replacement = V5Op::JumpFalseAlt;
+            V6Op replacement = instruction.op;
+            if (instruction.op == V6Op::LoadConstant)
+                replacement = V6Op::LoadConstantAlt;
+            else if (instruction.op == V6Op::GetLocal)
+                replacement = V6Op::GetLocalAlt;
+            else if (instruction.op == V6Op::Binary)
+                replacement = V6Op::BinaryAlt;
+            else if (instruction.op == V6Op::JumpFalse)
+                replacement = V6Op::JumpFalseAlt;
             if (replacement != instruction.op)
             {
                 instruction.op = replacement;
@@ -2619,7 +2619,7 @@ private:
         }
     }
 
-    void shuffleConstants(V5Prototype& proto)
+    void shuffleConstants(V6Prototype& proto)
     {
         size_t count = proto.constants.size();
         proto.logicalToPhysicalConstant.resize(count);
@@ -2636,9 +2636,9 @@ private:
             physical.push_back(std::move(proto.constants[logical]));
         }
         proto.constants = std::move(physical);
-        for (V5Instruction& instruction : proto.code)
+        for (V6Instruction& instruction : proto.code)
         {
-            if (v5IsLoadConstant(instruction.op))
+            if (v6IsLoadConstant(instruction.op))
             {
                 uint32_t logical = instruction.args.at(1);
                 instruction.args[1] = proto.logicalToPhysicalConstant.at(logical - 1);
@@ -2646,28 +2646,28 @@ private:
         }
     }
 
-    void allocateRegisters(V5Prototype& proto)
+    void allocateRegisters(V6Prototype& proto)
     {
         const uint32_t count = proto.virtualRegisterCount;
         if (count == 0)
             return;
-        proto.blocks = buildV5Blocks(proto.code);
+        proto.blocks = buildV6Blocks(proto.code);
 
         using RegisterSet = std::unordered_set<uint32_t>;
         std::vector<RegisterSet> use(proto.blocks.size());
         std::vector<RegisterSet> def(proto.blocks.size());
-        for (const V5BasicBlock& block : proto.blocks)
+        for (const V6BasicBlock& block : proto.blocks)
         {
             for (size_t index = block.start; index < block.end; ++index)
             {
-                const V5Instruction& instruction = proto.code[index];
-                for (size_t position : v5RegisterUses(instruction.op))
+                const V6Instruction& instruction = proto.code[index];
+                for (size_t position : v6RegisterUses(instruction.op))
                 {
                     uint32_t reg = instruction.args.at(position);
                     if (!def[block.id].count(reg))
                         use[block.id].insert(reg);
                 }
-                for (size_t position : v5RegisterDefs(instruction.op))
+                for (size_t position : v6RegisterDefs(instruction.op))
                     def[block.id].insert(instruction.args.at(position));
             }
         }
@@ -2680,7 +2680,7 @@ private:
             changed = false;
             for (size_t reverse = proto.blocks.size(); reverse-- > 0;)
             {
-                const V5BasicBlock& block = proto.blocks[reverse];
+                const V6BasicBlock& block = proto.blocks[reverse];
                 RegisterSet nextOut;
                 for (size_t successor : block.successors)
                     nextOut.insert(liveIn[successor].begin(), liveIn[successor].end());
@@ -2700,13 +2700,13 @@ private:
         }
 
         std::vector<RegisterSet> interference(static_cast<size_t>(count + 1));
-        for (const V5BasicBlock& block : proto.blocks)
+        for (const V6BasicBlock& block : proto.blocks)
         {
             RegisterSet live = liveOut[block.id];
             for (size_t reverse = block.end; reverse-- > block.start;)
             {
-                const V5Instruction& instruction = proto.code[reverse];
-                for (size_t position : v5RegisterDefs(instruction.op))
+                const V6Instruction& instruction = proto.code[reverse];
+                for (size_t position : v6RegisterDefs(instruction.op))
                 {
                     uint32_t defined = instruction.args.at(position);
                     for (uint32_t other : live)
@@ -2718,7 +2718,7 @@ private:
                     }
                     live.erase(defined);
                 }
-                for (size_t position : v5RegisterUses(instruction.op))
+                for (size_t position : v6RegisterUses(instruction.op))
                     live.insert(instruction.args.at(position));
             }
         }
@@ -2763,38 +2763,38 @@ private:
         for (uint32_t reg = 1; reg <= count; ++reg)
             color[reg] = permutation[color[reg] - 1];
 
-        for (V5Instruction& instruction : proto.code)
+        for (V6Instruction& instruction : proto.code)
         {
             std::unordered_set<size_t> positions;
-            for (size_t position : v5RegisterDefs(instruction.op))
+            for (size_t position : v6RegisterDefs(instruction.op))
                 positions.insert(position);
-            for (size_t position : v5RegisterUses(instruction.op))
+            for (size_t position : v6RegisterUses(instruction.op))
                 positions.insert(position);
             for (size_t position : positions)
                 instruction.args[position] = color.at(instruction.args.at(position));
         }
         proto.maxRegister = colorCount;
         program.registerReuse = program.registerReuse || colorCount < count;
-        proto.blocks = buildV5Blocks(proto.code);
+        proto.blocks = buildV6Blocks(proto.code);
     }
 
-    void assignCodecs(V5Prototype& proto)
+    void assignCodecs(V6Prototype& proto)
     {
         std::vector<uint32_t> opcodePool;
         for (uint32_t value = 17; value < 241; ++value)
             opcodePool.push_back(value);
         std::shuffle(opcodePool.begin(), opcodePool.end(), rng);
-        proto.opcodes.assign(opcodePool.begin(), opcodePool.begin() + static_cast<std::ptrdiff_t>(v5OpIndex(V5Op::Count)));
+        proto.opcodes.assign(opcodePool.begin(), opcodePool.begin() + static_cast<std::ptrdiff_t>(v6OpIndex(V6Op::Count)));
 
         std::vector<uint32_t> tagPool;
         for (uint32_t value = 257; value < 997; ++value)
             tagPool.push_back(value);
         std::shuffle(tagPool.begin(), tagPool.end(), rng);
         size_t cursor = 0;
-        proto.binaryCodes.resize(static_cast<size_t>(V5Binary::Count));
+        proto.binaryCodes.resize(static_cast<size_t>(V6Binary::Count));
         for (uint32_t& value : proto.binaryCodes)
             value = tagPool[cursor++];
-        proto.unaryCodes.resize(static_cast<size_t>(V5Unary::Count));
+        proto.unaryCodes.resize(static_cast<size_t>(V6Unary::Count));
         for (uint32_t& value : proto.unaryCodes)
             value = tagPool[cursor++];
 
@@ -2820,13 +2820,13 @@ private:
             map[logical + 1] = static_cast<uint32_t>(physicalIndex + 1);
         }
         program.strings = std::move(physical);
-        for (V5Prototype& proto : program.prototypes)
+        for (V6Prototype& proto : program.prototypes)
         {
             if (proto.name != 0)
                 proto.name = map.at(proto.name);
-            for (V5Instruction& instruction : proto.code)
+            for (V6Instruction& instruction : proto.code)
             {
-                for (size_t position : v5StringArgs(instruction.op))
+                for (size_t position : v6StringArgs(instruction.op))
                     instruction.args[position] = map.at(instruction.args[position]);
             }
             for (json& constant : proto.constants)
@@ -2839,7 +2839,7 @@ private:
 
     void finalizeProgram()
     {
-        for (V5Prototype& proto : program.prototypes)
+        for (V6Prototype& proto : program.prototypes)
         {
             injectOpaqueGuards(proto);
             substituteInstructions(proto);
@@ -2847,7 +2847,7 @@ private:
         }
         shuffleStrings();
 
-        for (V5Prototype& proto : program.prototypes)
+        for (V6Prototype& proto : program.prototypes)
         {
             allocateRegisters(proto);
             assignCodecs(proto);
@@ -3082,20 +3082,20 @@ struct VmEmitResult
 };
 
 std::string gLastVmCompileError;
-json gLastV5Diagnostic = json::object();
+json gLastV6Diagnostic = json::object();
 
-struct V5SerializedProgram
+struct V6SerializedProgram
 {
     json bundle = json::array();
     json debug = json::object();
 };
 
-uint64_t encodeV5Operand(const V5Prototype& proto, uint32_t value, size_t ordinal)
+uint64_t encodeV6Operand(const V6Prototype& proto, uint32_t value, size_t ordinal)
 {
     return static_cast<uint64_t>(value) * proto.argMultiplier + proto.argSalt + static_cast<uint64_t>(ordinal) * proto.argStep;
 }
 
-V5SerializedProgram serializeV5Program(const V5Program& program, const Config& config, std::mt19937_64& rng)
+V6SerializedProgram serializeV6Program(const V6Program& program, const Config& config, std::mt19937_64& rng)
 {
     json prototypes = json::array();
     std::ostringstream opcodeShape;
@@ -3109,7 +3109,7 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
 
     for (size_t prototypeIndex = 0; prototypeIndex < program.prototypes.size(); ++prototypeIndex)
     {
-        const V5Prototype& proto = program.prototypes[prototypeIndex];
+        const V6Prototype& proto = program.prototypes[prototypeIndex];
         std::vector<size_t> blockOrder(proto.blocks.size());
         std::iota(blockOrder.begin(), blockOrder.end(), 0u);
         if (protectionRank(config.controlFlow) > 0 && blockOrder.size() > 1)
@@ -3119,13 +3119,13 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
         physicalOrder.reserve(proto.code.size());
         for (size_t blockId : blockOrder)
         {
-            const V5BasicBlock& block = proto.blocks[blockId];
+            const V6BasicBlock& block = proto.blocks[blockId];
             blockShape << prototypeIndex + 1 << ':' << blockId << ',';
             for (size_t instruction = block.start; instruction < block.end; ++instruction)
                 physicalOrder.push_back(instruction);
         }
         if (physicalOrder.size() != proto.code.size())
-            throw std::runtime_error("internal error: v5 physical block layout is incomplete");
+            throw std::runtime_error("internal error: v6 physical block layout is incomplete");
 
         std::vector<size_t> physicalForLogical(proto.code.size(), 0);
         for (size_t physical = 0; physical < physicalOrder.size(); ++physical)
@@ -3135,21 +3135,21 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
         for (size_t physical = 0; physical < physicalOrder.size(); ++physical)
         {
             size_t logical = physicalOrder[physical];
-            const V5Instruction& instruction = proto.code[logical];
+            const V6Instruction& instruction = proto.code[logical];
             std::vector<uint32_t> arguments = instruction.args;
-            for (size_t position : v5TargetArgs(instruction.op))
+            for (size_t position : v6TargetArgs(instruction.op))
                 arguments[position] = static_cast<uint32_t>(physicalForLogical.at(arguments[position]) + 1);
-            if (v5IsBinary(instruction.op))
+            if (v6IsBinary(instruction.op))
                 arguments[1] = proto.binaryCodes.at(arguments[1]);
-            else if (instruction.op == V5Op::Unary)
+            else if (instruction.op == V6Op::Unary)
                 arguments[1] = proto.unaryCodes.at(arguments[1]);
 
             json encodedArguments = json::array();
             for (size_t argument = 0; argument < arguments.size(); ++argument)
-                encodedArguments.push_back(encodeV5Operand(proto, arguments[argument], argument + 1));
+                encodedArguments.push_back(encodeV6Operand(proto, arguments[argument], argument + 1));
             uint32_t next = logical + 1 < proto.code.size() ? static_cast<uint32_t>(physicalForLogical[logical + 1] + 1) : 0;
-            uint32_t opcode = proto.opcodes.at(v5OpIndex(instruction.op));
-            rows.push_back(json::array({opcode, encodedArguments, encodeV5Operand(proto, next, 0)}));
+            uint32_t opcode = proto.opcodes.at(v6OpIndex(instruction.op));
+            rows.push_back(json::array({opcode, encodedArguments, encodeV6Operand(proto, next, 0)}));
             opcodeShape << prototypeIndex + 1 << ':' << opcode << ',';
             ++emittedRows;
         }
@@ -3167,8 +3167,8 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
             json arguments = json::array();
             size_t count = static_cast<size_t>(rng() % 5u);
             for (size_t argument = 0; argument < count; ++argument)
-                arguments.push_back(encodeV5Operand(proto, static_cast<uint32_t>(rng() % 1000u), argument + 1));
-            rows.push_back(json::array({opcode, arguments, encodeV5Operand(proto, 0, 0)}));
+                arguments.push_back(encodeV6Operand(proto, static_cast<uint32_t>(rng() % 1000u), argument + 1));
+            rows.push_back(json::array({opcode, arguments, encodeV6Operand(proto, 0, 0)}));
             ++decoyRows;
         }
 
@@ -3210,7 +3210,7 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
             size_t cursor = 0;
             for (size_t recordIndex = 0; recordIndex < blockOrder.size(); ++recordIndex)
             {
-                const V5BasicBlock& block = proto.blocks[blockOrder[recordIndex]];
+                const V6BasicBlock& block = proto.blocks[blockOrder[recordIndex]];
                 size_t count = block.end - block.start;
                 json blockRows = json::array();
                 for (size_t row = 0; row < count; ++row)
@@ -3219,7 +3219,7 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
                     blockIndex[cursor + row] = recordIndex + 1;
                 }
                 std::string blockPlaintext = encodeBinaryVmBundle(blockRows);
-                V5AeadEnvelope blockEnvelope = makeV5AeadEnvelope(blockPlaintext, config, 0, rng);
+                V6AeadEnvelope blockEnvelope = makeV6AeadEnvelope(blockPlaintext, config, 0, rng);
                 auto bytes = [](auto&& values) {
                     json result = json::array();
                     for (auto value : values)
@@ -3246,7 +3246,7 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
         if (protectConstantFragment)
         {
             std::string constantPlaintext = encodeBinaryVmBundle(proto.constants);
-            V5AeadEnvelope constantEnvelope = makeV5AeadEnvelope(constantPlaintext, config, 0, rng);
+            V6AeadEnvelope constantEnvelope = makeV6AeadEnvelope(constantPlaintext, config, 0, rng);
             auto bytes = [](auto&& values) {
                 json result = json::array();
                 for (auto value : values)
@@ -3290,10 +3290,10 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
         return std::to_string(digest.size) + ":" + std::to_string(digest.a) + ":" + std::to_string(digest.b) + ":" + std::to_string(digest.c) + ":" + std::to_string(digest.d);
     };
 
-    V5SerializedProgram serialized;
+    V6SerializedProgram serialized;
     serialized.bundle = json::array({5, program.rootPrototype, prototypes});
     serialized.debug = {
-        {"backend", "register_vm_v5"},
+        {"backend", "alexvm6"},
         {"vm_version", 5},
         {"ir_version", 1},
         {"prototype_count", program.prototypes.size() - program.decoyPrototypeCount},
@@ -3336,7 +3336,7 @@ V5SerializedProgram serializeV5Program(const V5Program& program, const Config& c
     return serialized;
 }
 
-struct V5RuntimeNames
+struct V6RuntimeNames
 {
     std::string proto;
     std::string strings;
@@ -3366,148 +3366,148 @@ struct V5RuntimeNames
     std::string tostringFn;
 };
 
-void emitV5DispatchBranches(std::ostringstream& out, const std::vector<V5Op>& order, const V5RuntimeNames& n)
+void emitV6DispatchBranches(std::ostringstream& out, const std::vector<V6Op>& order, const V6RuntimeNames& n)
 {
     bool first = true;
-    auto condition = [&](V5Op op) {
-        out << (first ? "            if " : "            elseif ") << n.opcode << " == " << n.proto << ".o[" << (v5OpIndex(op) + 1) << "] then ";
+    auto condition = [&](V6Op op) {
+        out << (first ? "            if " : "            elseif ") << n.opcode << " == " << n.proto << ".o[" << (v6OpIndex(op) + 1) << "] then ";
         first = false;
     };
     auto d = [&](size_t index) {
         return n.decodeArg + "(" + std::to_string(index) + ")";
     };
 
-    for (V5Op op : order)
+    for (V6Op op : order)
     {
         condition(op);
         switch (op)
         {
-        case V5Op::Nop:
+        case V6Op::Nop:
             out << n.pc << " = " << n.pc << "\n";
             break;
-        case V5Op::LoadConstant:
-        case V5Op::LoadConstantAlt:
+        case V6Op::LoadConstant:
+        case V6Op::LoadConstantAlt:
             out << n.registers << "[" << d(1) << "] = " << n.unwrap << "(" << n.loadConstants << "(" << n.proto << ")[" << d(2) << "])\n";
             break;
-        case V5Op::Move:
+        case V6Op::Move:
             out << n.registers << "[" << d(1) << "] = " << n.registers << "[" << d(2) << "]\n";
             break;
-        case V5Op::GetLocal:
-        case V5Op::GetLocalAlt:
+        case V6Op::GetLocal:
+        case V6Op::GetLocalAlt:
             out << n.registers << "[" << d(1) << "] = " << n.getLocal << "(" << n.environment << ", " << d(2) << ")\n";
             break;
-        case V5Op::DeclareLocal:
+        case V6Op::DeclareLocal:
             out << n.declareLocal << "(" << n.environment << ", " << d(1) << ", " << n.registers << "[" << d(2) << "])\n";
             break;
-        case V5Op::SetLocal:
+        case V6Op::SetLocal:
             out << n.setLocal << "(" << n.environment << ", " << d(1) << ", " << n.registers << "[" << d(2) << "])\n";
             break;
-        case V5Op::GetGlobal:
+        case V6Op::GetGlobal:
             out << n.registers << "[" << d(1) << "] = " << n.resolveGlobal << "(" << n.environment << ", " << n.strings << "[" << d(2) << "])\n";
             break;
-        case V5Op::SetGlobal:
+        case V6Op::SetGlobal:
             out << n.globalTable << "(" << n.environment << ")[" << n.strings << "[" << d(1) << "]] = " << n.registers << "[" << d(2) << "]\n";
             break;
-        case V5Op::GetIndex:
+        case V6Op::GetIndex:
             out << n.registers << "[" << d(1) << "] = " << n.registers << "[" << d(2) << "][" << n.registers << "[" << d(3) << "]]\n";
             break;
-        case V5Op::GetIndexK:
+        case V6Op::GetIndexK:
             out << n.registers << "[" << d(1) << "] = " << n.registers << "[" << d(2) << "][" << n.strings << "[" << d(3) << "]]\n";
             break;
-        case V5Op::SetIndex:
+        case V6Op::SetIndex:
             out << n.registers << "[" << d(1) << "][" << n.registers << "[" << d(2) << "]] = " << n.registers << "[" << d(3) << "]\n";
             break;
-        case V5Op::SetIndexK:
+        case V6Op::SetIndexK:
             out << n.registers << "[" << d(1) << "][" << n.strings << "[" << d(2) << "]] = " << n.registers << "[" << d(3) << "]\n";
             break;
-        case V5Op::NewTable:
+        case V6Op::NewTable:
             out << n.registers << "[" << d(1) << "] = {}\n";
             break;
-        case V5Op::SetList:
+        case V6Op::SetList:
             out << n.registers << "[" << d(1) << "][" << d(2) << "] = " << n.registers << "[" << d(3) << "]\n";
             break;
-        case V5Op::AppendPack:
+        case V6Op::AppendPack:
             out << "local t, p, s = " << n.registers << "[" << d(1) << "], " << n.registers << "[" << d(2) << "], " << d(3) << "; for i = 1, p.n do t[s + i - 1] = p[i] end\n";
             break;
-        case V5Op::Binary:
-        case V5Op::BinaryAlt:
+        case V6Op::Binary:
+        case V6Op::BinaryAlt:
             out << n.registers << "[" << d(1) << "] = " << n.binary << "(" << n.proto << ", " << d(2) << ", " << n.registers << "[" << d(3) << "], " << n.registers << "[" << d(4) << "])\n";
             break;
-        case V5Op::Unary:
+        case V6Op::Unary:
             out << n.registers << "[" << d(1) << "] = " << n.unary << "(" << n.proto << ", " << d(2) << ", " << n.registers << "[" << d(3) << "])\n";
             break;
-        case V5Op::PackNew:
+        case V6Op::PackNew:
             out << n.registers << "[" << d(1) << "] = {n=0}\n";
             break;
-        case V5Op::PackPush:
+        case V6Op::PackPush:
             out << "local p = " << n.registers << "[" << d(1) << "]; p.n = p.n + 1; p[p.n] = " << n.registers << "[" << d(2) << "]\n";
             break;
-        case V5Op::PackExtend:
+        case V6Op::PackExtend:
             out << "local p, q = " << n.registers << "[" << d(1) << "], " << n.registers << "[" << d(2) << "]; for i = 1, q.n do p.n = p.n + 1; p[p.n] = q[i] end\n";
             break;
-        case V5Op::PackGet:
+        case V6Op::PackGet:
             out << n.registers << "[" << d(1) << "] = " << n.registers << "[" << d(2) << "][" << d(3) << "]\n";
             break;
-        case V5Op::PackSet:
+        case V6Op::PackSet:
             out << n.registers << "[" << d(1) << "][" << d(2) << "] = " << n.registers << "[" << d(3) << "]\n";
             break;
-        case V5Op::Call:
+        case V6Op::Call:
             out << n.registers << "[" << d(1) << "] = " << n.callPacked << "(" << n.registers << "[" << d(2) << "], " << n.registers << "[" << d(3) << "])\n";
             break;
-        case V5Op::CallGlobal0:
+        case V6Op::CallGlobal0:
             out << n.registers << "[" << d(1) << "] = " << n.pack << "(" << n.resolveGlobal << "(" << n.environment << ", " << n.strings << "[" << d(2) << "])())\n";
             break;
-        case V5Op::CallMethod0:
+        case V6Op::CallMethod0:
             out << "local s = " << n.registers << "[" << d(2) << "]; " << n.registers << "[" << d(1) << "] = " << n.pack << "(s[" << n.strings << "[" << d(3) << "]](s))\n";
             break;
-        case V5Op::MakeClosure:
+        case V6Op::MakeClosure:
             out << n.registers << "[" << d(1) << "] = " << n.makeClosure << "(" << d(2) << ", " << n.environment << ")\n";
             break;
-        case V5Op::Varargs:
+        case V6Op::Varargs:
             out << n.registers << "[" << d(1) << "] = " << n.varargs << "(" << n.environment << ")\n";
             break;
-        case V5Op::Return:
+        case V6Op::Return:
             out << "return " << n.registers << "[" << d(1) << "]\n";
             break;
-        case V5Op::Jump:
+        case V6Op::Jump:
             out << n.pc << " = " << d(1) << "\n";
             break;
-        case V5Op::JumpFalse:
-        case V5Op::JumpFalseAlt:
+        case V6Op::JumpFalse:
+        case V6Op::JumpFalseAlt:
             out << "if not " << n.truthy << "(" << n.registers << "[" << d(1) << "]) then " << n.pc << " = " << d(2) << " end\n";
             break;
-        case V5Op::JumpTrue:
+        case V6Op::JumpTrue:
             out << "if " << n.truthy << "(" << n.registers << "[" << d(1) << "]) then " << n.pc << " = " << d(2) << " end\n";
             break;
-        case V5Op::EnterScope:
+        case V6Op::EnterScope:
             out << n.environment << " = {v={}, h={}, p=" << n.environment << "}\n";
             break;
-        case V5Op::LeaveScopes:
+        case V6Op::LeaveScopes:
             out << "for _ = 1, " << d(1) << " do " << n.environment << " = " << n.environment << ".p end\n";
             break;
-        case V5Op::ToString:
+        case V6Op::ToString:
             out << n.registers << "[" << d(1) << "] = " << n.tostringFn << "(" << n.registers << "[" << d(2) << "])\n";
             break;
-        case V5Op::IteratorInit:
+        case V6Op::IteratorInit:
             out << n.registers << "[" << d(1) << "] = " << n.iteratorInit << "(" << n.registers << "[" << d(2) << "])\n";
             break;
-        case V5Op::JumpNil:
+        case V6Op::JumpNil:
             out << "if " << n.registers << "[" << d(1) << "] == nil then " << n.pc << " = " << d(2) << " end\n";
             break;
-        case V5Op::ForCheck:
+        case V6Op::ForCheck:
             out << "local c, l, s = " << n.registers << "[" << d(2) << "], " << n.registers << "[" << d(3) << "], " << n.registers << "[" << d(4) << "]; " << n.registers << "[" << d(1) << "] = (s >= 0 and c <= l) or (s < 0 and c >= l)\n";
             break;
-        case V5Op::OpaqueGuard:
+        case V6Op::OpaqueGuard:
             out << "if ((" << d(1) << " * " << d(2) << " + " << d(3) << ") % " << d(4) << ") ~= " << d(5) << " then return nil end\n";
             break;
-        case V5Op::Count:
+        case V6Op::Count:
             break;
         }
     }
     out << "            else return nil end\n";
 }
 
-std::string emitV5AeadRuntime(const V5AeadEnvelope& envelope, const Config& config, std::mt19937_64& rng, uint32_t guardExpected,
+std::string emitV6AeadRuntime(const V6AeadEnvelope& envelope, const Config& config, std::mt19937_64& rng, uint32_t guardExpected,
     const std::string& guardName, const std::string& bxorName, const std::string& onlineMaterialName, const std::string& keyName,
     const std::string& keyCapsuleName, const std::string& nonceName, const std::string& tagName, const std::string& decryptName)
 {
@@ -3555,10 +3555,10 @@ std::string emitV5AeadRuntime(const V5AeadEnvelope& envelope, const Config& conf
     return out.str();
 }
 
-std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const Config& config)
+std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const Config& config)
 {
     gLastVmCompileError.clear();
-    gLastV5Diagnostic = json::object();
+    gLastV6Diagnostic = json::object();
     Luau::Allocator allocator;
     Luau::AstNameTable names(allocator);
     Luau::ParseResult parsed = Luau::Parser::parse(source.data(), source.size(), names, allocator);
@@ -3568,7 +3568,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
         if (!parsed.errors.empty())
         {
             const Luau::ParseError& error = parsed.errors.front();
-            gLastV5Diagnostic = {
+            gLastV6Diagnostic = {
                 {"code", "parse_error"},
                 {"stage", "parse"},
                 {"message", error.getMessage()},
@@ -3581,9 +3581,9 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
     try
     {
         std::mt19937_64 rng(config.seed ^ 0x5a17f05ca70b5eedull);
-        V5SemanticCompiler compiler(rng, config);
-        V5Program program = compiler.compile(parsed.root);
-        V5SerializedProgram serialized = serializeV5Program(program, config, rng);
+        V6SemanticCompiler compiler(rng, config);
+        V6Program program = compiler.compile(parsed.root);
+        V6SerializedProgram serialized = serializeV6Program(program, config, rng);
         std::string binaryProgram = encodeBinaryVmBundle(serialized.bundle);
 
         int tamperRank = protectionRank(config.tamperDensity);
@@ -3593,7 +3593,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
         guardExpected = (guardExpected + gameIdGuardHash(config.gameId)) & 0xffffu;
         if (config.keyMode == KeyMode::Online)
             guardExpected = (guardExpected + onlineGuardHash(config.onlineKeyMaterial)) & 0xffffu;
-        V5AeadEnvelope aead = makeV5AeadEnvelope(binaryProgram, config, guardExpected, rng);
+        V6AeadEnvelope aead = makeV6AeadEnvelope(binaryProgram, config, guardExpected, rng);
         PackedPayload packed = encryptBase95Payload(aead.ciphertext, rng, config.layers);
 
         std::string vDecoy = makeIdent(rng, "_");
@@ -3633,7 +3633,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
         std::string vLoadRow = makeIdent(rng, "_");
         std::string vLoadConstants = makeIdent(rng, "_");
 
-        V5RuntimeNames n{
+        V6RuntimeNames n{
             makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"),
             makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"),
             makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"), makeIdent(rng, "_"),
@@ -3647,7 +3647,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
 
         std::ostringstream out;
         if (config.watermark)
-            out << "-- Alexfuscator " << profileName(config.profile) << " | register VM v5, no source reconstruction\n";
+            out << "-- Alexfuscator " << profileName(config.profile) << " | AlexVM 6, no source reconstruction\n";
         out << "return (function(...)\n";
         out << "    local " << vDecoy << " = function() return nil end\n";
         out << emitGuardSetup(config, rng, vDecoy, vGuard, guard);
@@ -3686,7 +3686,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
             out << emitByteArrayIntegrityFunction(vIntegrity, packed.integrity);
             out << "    if not " << vIntegrity << "(" << vIr << ") then return " << vDecoy << "() end\n";
         }
-        out << emitV5AeadRuntime(aead, config, rng, guardExpected, vGuard, vBxor, vOnlineMaterial, vAeadKey, vAeadKeyCapsule, vAeadNonce, vAeadTag, vAeadDecrypt);
+        out << emitV6AeadRuntime(aead, config, rng, guardExpected, vGuard, vBxor, vOnlineMaterial, vAeadKey, vAeadKeyCapsule, vAeadNonce, vAeadTag, vAeadDecrypt);
         out << "    " << vIr << "=" << vAeadDecrypt << "(" << vIr << "," << vAeadKey << "," << vAeadNonce << "," << vAeadTag << "); if not " << vIr << " then return " << vDecoy << "() end\n";
         out << "    local " << vBundle << " = " << vParseIr << "(" << vIr << "); if " << vBundle << "[1] ~= 5 then return " << vDecoy << "() end\n";
         out << "    local " << vNil << " = {}\n";
@@ -3739,7 +3739,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
         out << "    " << vCompat << "[" << hiddenCompat("newlclosure") << "]=function(fn) return fn end; " << vCompat << "[" << hiddenCompat("newcclosure") << "]=function(fn) return function(...) return fn(...) end end\n";
         out << "    local " << vSyntheticHash << "=function(fn) local meta=" << vMetadata << "[fn]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("getfunctionhash") << ",fn) end; local value=(meta.proto.id*2654435761+#meta.proto.b*131+#meta.proto.cm*17)%4294967296; return string.format('%08x%08x',value,(value*1103515245+12345)%4294967296) end\n";
         out << "    " << vCompat << "[" << hiddenCompat("getfunctionhash") << "]=" << vSyntheticHash << "; " << vCompat << "[" << hiddenCompat("getfunctionbytecode") << "]=function(fn) local meta=" << vMetadata << "[fn]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("getfunctionbytecode") << ",fn) end; return string.char(27).." << hiddenCompat("LUAUVM5:") << "..tostring(meta.proto.id)..':'.." << vSyntheticHash << "(fn) end\n";
-        const std::vector<std::pair<std::string_view, std::string_view>> v5CompatAliases = {
+        const std::vector<std::pair<std::string_view, std::string_view>> v6CompatAliases = {
             {"getinfo", "getinfo"}, {"getfuncinfo", "getinfo"}, {"getfunctioninfo", "getinfo"}, {"getconstants", "getconstants"}, {"getconsts", "getconstants"},
             {"getconstant", "getconstant"}, {"getconst", "getconstant"}, {"setconstant", "setconstant"}, {"setconst", "setconstant"}, {"setconsts", "setconstant"},
             {"getupvalues", "getupvalues"}, {"getupvals", "getupvalues"}, {"getupvalue", "getupvalue"}, {"getupval", "getupvalue"}, {"setupvalue", "setupvalue"},
@@ -3751,19 +3751,19 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
             {"getfunctionhash", "getfunctionhash"}, {"getfunctionbytecode", "getfunctionbytecode"}, {"dumpfunctionbytecode", "getfunctionbytecode"},
         };
         out << "    local " << vAliases << "={}\n";
-        for (const auto& [alias, target] : v5CompatAliases)
+        for (const auto& [alias, target] : v6CompatAliases)
             out << "    " << vAliases << "[" << hiddenCompat(alias) << "]=" << hiddenCompat(target) << "\n";
         out << "    local nativeDebug=" << vGlobals << "[" << hiddenCompat("debug") << "] or {}; local " << vDebugProxy << "=setmetatable({}, {__index=function(_,key) if key==" << hiddenCompat("info") << " then return " << vCompat << "[" << hiddenCompat("info") << "] end; local alias=" << vAliases << "[key]; if alias then return " << vCompat << "[alias] end; return nativeDebug[key] end}); " << vCompat << "[" << hiddenCompat("debug") << "]=" << vDebugProxy << "\n";
         out << "    " << n.resolveGlobal << "=function(env,name) if name==" << hiddenCompat("debug") << " then return " << vDebugProxy << " end; if name==" << hiddenCompat("getfenv") << " then return " << vCompat << "[" << hiddenCompat("getfenv") << "] end; if name==" << hiddenCompat("setfenv") << " then return " << vCompat << "[" << hiddenCompat("setfenv") << "] end; local alias=" << vAliases << "[name]; if alias then return " << vCompat << "[alias] end; return " << n.globalTable << "(env)[name] end\n";
 
-        std::vector<V5Op> dispatchOrder;
-        for (size_t index = 0; index < v5OpIndex(V5Op::Count); ++index)
-            dispatchOrder.push_back(static_cast<V5Op>(index));
+        std::vector<V6Op> dispatchOrder;
+        for (size_t index = 0; index < v6OpIndex(V6Op::Count); ++index)
+            dispatchOrder.push_back(static_cast<V6Op>(index));
         if (protectionRank(config.vmDiversity) > 0)
             std::shuffle(dispatchOrder.begin(), dispatchOrder.end(), rng);
 
         out << "    " << n.proto << " = function(" << n.proto << ", " << n.environment << ") local " << n.registers << ", " << n.pc << " = {}, " << n.proto << ".e; while " << n.pc << " ~= 0 do local " << n.row << "=" << vLoadRow << "(" << n.proto << "," << n.pc << "); if not " << n.row << " then return nil end; local " << n.opcode << "," << n.args << "=" << n.row << "[1]," << n.row << "[2]; " << n.pc << "=(" << n.row << "[3]-" << n.proto << ".as)/" << n.proto << ".am; local function " << n.decodeArg << "(i) return (" << n.args << "[i]-" << n.proto << ".as-i*" << n.proto << ".ap)/" << n.proto << ".am end\n";
-        emitV5DispatchBranches(out, dispatchOrder, n);
+        emitV6DispatchBranches(out, dispatchOrder, n);
         out << "        end; return {n=0} end\n";
         out << "    " << n.makeClosure << " = function(protoId,env,globals) local p=" << vPrototypes << "[protoId]; local wrapper; wrapper=function(...) local meta=" << vMetadata << "[wrapper]; if meta.hook then return meta.hook(...) end; local values=" << n.pack << "(...); local child={v={},h={},p=meta.env,proto=p,meta=meta,g=meta.g}; for i=1,#p.p do " << n.declareLocal << "(child,p.p[i],values[i]) end; if p.v~=0 then local extra={n=math.max(0,values.n-#p.p)}; for i=1,extra.n do extra[i]=values[#p.p+i] end; child.a=extra end; " << vFrames << "[#" << vFrames << "+1]=child; local result=" << n.proto << "(p,child); " << vFrames << "[#" << vFrames << "]=nil; if result then return " << vUnpack << "(result,1,result.n) end end; local meta={proto=p,env=env,g=globals,fn=wrapper,active={}}; " << vMetadata << "[wrapper]=meta; local owner=env; while owner and not owner.meta do owner=owner.p end; if owner and owner.meta then local active=owner.meta.active; active[protoId]=active[protoId] or {}; active[protoId][#active[protoId]+1]=wrapper end; return wrapper end\n";
         out << "    local rootEnv={v={},h={},p=nil,a=" << n.pack << "(...),proto=" << vRoot << ",g=" << vGlobals << "}; local result=" << n.proto << "(" << vRoot << ",rootEnv); if result then return " << vUnpack << "(result,1,result.n) end\n";
@@ -3779,10 +3779,10 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
         debug["chained_integrity_checks"] = config.integrityChecks && debug.value("per_block_lazy_decryption", false);
         return VmEmitResult{out.str(), packed.integrity, std::move(debug)};
     }
-    catch (const V5CompileFailure& failure)
+    catch (const V6CompileFailure& failure)
     {
         gLastVmCompileError = failure.what();
-        gLastV5Diagnostic = {
+        gLastV6Diagnostic = {
             {"code", failure.code},
             {"stage", failure.stage},
             {"ast_kind", failure.astKind},
@@ -3794,7 +3794,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV5(std::string_view source, const C
     catch (const std::exception& failure)
     {
         gLastVmCompileError = failure.what();
-        gLastV5Diagnostic = {{"code", "compiler_internal_error"}, {"stage", "emit"}, {"message", failure.what()}};
+        gLastV6Diagnostic = {{"code", "compiler_internal_error"}, {"stage", "emit"}, {"message", failure.what()}};
         return std::nullopt;
     }
 }
@@ -3809,8 +3809,8 @@ void writeVmDebugMap(
         {"tool", "alexfuscator"},
         {"report_version", 3},
         {"profile", profileName(config.profile)},
-        {"mode", "register_vm_v5"},
-        {"backend", "register_vm_v5"},
+        {"mode", "alexvm6"},
+        {"backend", "alexvm6"},
         {"vm_version", 5},
         {"ir_version", 1},
         {"target", config.target},
@@ -4083,7 +4083,7 @@ Config parseArgs(int argc, char** argv)
         else if (arg == "--no-watermark")
             config.watermark = false;
         else if (arg == "--source-minify" || arg == "--no-source-minify" || arg == "--source-wrap" || arg == "--no-source-wrap")
-            throw CliFailure("removed_option", arg, arg + " was removed with the source-loader fallback; register VM v5 never embeds source");
+            throw CliFailure("removed_option", arg, arg + " was removed with the source-loader fallback; AlexVM 6 never embeds source");
         else if (arg == "--integrity")
         {
             config.integrityChecks = true;
@@ -4126,7 +4126,7 @@ Config parseArgs(int argc, char** argv)
             config.environmentBinding = EnvironmentBinding::Portable;
         }
         else if (arg == "--max-vm-v2" || arg == "--max-vm-v3" || arg == "--max-vm-v4" || arg == "--legacy-vm")
-            throw CliFailure("removed_option", arg, arg + " was removed; all production profiles use register VM v5");
+            throw CliFailure("removed_option", arg, arg + " was removed; all production profiles use AlexVM 6");
         else if (arg == "--fallback-policy")
         {
             config.fallbackPolicy = parseFallbackPolicy(needValue(arg));
@@ -4314,17 +4314,17 @@ int main(int argc, char** argv)
 
         std::string source = readFile(config.inputPath);
 
-        std::optional<VmEmitResult> vmOutput = tryEmitRegisterVmV5(source, config);
+        std::optional<VmEmitResult> vmOutput = tryEmitRegisterVmV6(source, config);
         if (!vmOutput)
         {
             std::string detail = gLastVmCompileError.empty() ? "unsupported Luau syntax" : gLastVmCompileError;
             if (diagnosticsJson)
             {
-                json error = gLastV5Diagnostic.empty() ? json({{"code", "compile_failed"}, {"stage", "semantic_ir"}, {"message", detail}}) : gLastV5Diagnostic;
+                json error = gLastV6Diagnostic.empty() ? json({{"code", "compile_failed"}, {"stage", "semantic_ir"}, {"message", detail}}) : gLastV6Diagnostic;
                 std::cerr << json({{"ok", false}, {"error", std::move(error)}}).dump() << "\n";
                 return 1;
             }
-            throw std::runtime_error("register VM v5 could not lower the script: " + detail);
+            throw std::runtime_error("AlexVM 6 could not lower the script: " + detail);
         }
 
         std::string output = finalizeGeneratedOutput(config, std::move(vmOutput->source));
@@ -4334,7 +4334,7 @@ int main(int argc, char** argv)
 
         std::ostream& log = config.outputPath == "-" ? std::cerr : std::cout;
         log << "Alexfuscator wrote " << config.outputPath << " (" << output.size() << " bytes, profile=" << profileName(config.profile)
-                  << ", mode=register_vm_v5"
+                  << ", mode=alexvm6"
                   << ", layers=" << config.layers << ", seed=" << config.seed
                   << ", integrity=" << (config.integrityChecks ? "on" : "off")
                   << ", runtime=" << runtimeTargetName(config.runtime)
