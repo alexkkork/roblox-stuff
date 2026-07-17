@@ -371,6 +371,45 @@ std::string environmentBindingName(EnvironmentBinding binding)
     return "portable";
 }
 
+std::string inputLanguageName(InputLanguage language)
+{
+    switch (language)
+    {
+    case InputLanguage::Auto:
+        return "auto";
+    case InputLanguage::Luau:
+        return "luau";
+    case InputLanguage::Alex:
+        return "alex";
+    }
+    return "luau";
+}
+
+InputLanguage parseInputLanguage(std::string_view value)
+{
+    if (value == "auto")
+        return InputLanguage::Auto;
+    if (value == "luau")
+        return InputLanguage::Luau;
+    if (value == "alex")
+        return InputLanguage::Alex;
+    throw std::runtime_error("--language expects auto, luau, or alex");
+}
+
+InputLanguage resolveInputLanguage(InputLanguage requested, const fs::path& inputPath)
+{
+    if (requested != InputLanguage::Auto)
+        return requested;
+    if (inputPath != "-")
+    {
+        std::string extension = inputPath.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (extension == ".alex")
+            return InputLanguage::Alex;
+    }
+    return InputLanguage::Luau;
+}
+
 Profile parseProfile(std::string_view value)
 {
     if (value == "compatibility")
@@ -1744,7 +1783,7 @@ public:
         return std::move(program);
     }
 
-private:
+protected:
     struct LoopContext
     {
         int breakDepth = 0;
@@ -2873,6 +2912,630 @@ private:
     }
 };
 
+struct AlexCompileFailure : std::runtime_error
+{
+    alex::lang::Diagnostic diagnostic;
+
+    explicit AlexCompileFailure(alex::lang::Diagnostic diagnostic)
+        : std::runtime_error(diagnostic.message)
+        , diagnostic(std::move(diagnostic))
+    {
+    }
+};
+
+class AlexSemanticCompiler final : public V6SemanticCompiler
+{
+public:
+    AlexSemanticCompiler(std::mt19937_64& rng, const Config& config)
+        : V6SemanticCompiler(rng, config)
+    {
+    }
+
+    V6Program compile(const alex::lang::Program& source)
+    {
+        program.prototypes.emplace_back();
+        program.prototypes[0].vararg = true;
+        contexts.push_back({0, 1, 0, {}});
+        lexicalScopes.emplace_back();
+        compileBlockBody(source.root);
+        emitEmptyReturn();
+        program.prototypes[0].virtualRegisterCount = current().nextRegister - 1;
+        lexicalScopes.pop_back();
+        contexts.pop_back();
+
+        addDecoyPrototypes();
+        finalizeProgram();
+        return std::move(program);
+    }
+
+private:
+    struct Binding
+    {
+        uint32_t id = 0;
+        uint32_t owner = 0;
+    };
+
+    std::vector<std::unordered_map<std::string, Binding>> lexicalScopes;
+
+    [[noreturn]] void fail(std::string stage, std::string code, std::string kind, const alex::lang::Span& span, std::string message) const
+    {
+        throw AlexCompileFailure({std::move(stage), std::move(code), std::move(kind), std::move(message), span});
+    }
+
+    Binding declare(const std::string& name, const alex::lang::Span& span)
+    {
+        auto& scope = lexicalScopes.back();
+        if (scope.count(name))
+            fail("bind", "duplicate_local", "Local", span, "a local with this name is already declared in the current scope");
+        uint32_t id = nextLocal++ * localMultiplier + localSalt;
+        Binding binding{id, currentPrototypeId()};
+        scope.emplace(name, binding);
+        return binding;
+    }
+
+    std::optional<Binding> resolve(const std::string& name) const
+    {
+        for (auto scope = lexicalScopes.rbegin(); scope != lexicalScopes.rend(); ++scope)
+        {
+            auto found = scope->find(name);
+            if (found != scope->end())
+                return found->second;
+        }
+        return std::nullopt;
+    }
+
+    void noteCapture(const Binding& binding)
+    {
+        if (binding.owner == currentPrototypeId())
+            return;
+        if (prototype().captureSet.insert(binding.id).second)
+            prototype().captures.push_back(binding.id);
+    }
+
+    V6Binary binaryOperator(std::string_view operation, const alex::lang::Span& span) const
+    {
+        if (operation == "+")
+            return V6Binary::Add;
+        if (operation == "-")
+            return V6Binary::Sub;
+        if (operation == "*")
+            return V6Binary::Mul;
+        if (operation == "/")
+            return V6Binary::Div;
+        if (operation == "//")
+            return V6Binary::FloorDiv;
+        if (operation == "%")
+            return V6Binary::Mod;
+        if (operation == "^")
+            return V6Binary::Pow;
+        if (operation == "..")
+            return V6Binary::Concat;
+        if (operation == "~=")
+            return V6Binary::Ne;
+        if (operation == "==")
+            return V6Binary::Eq;
+        if (operation == "<")
+            return V6Binary::Lt;
+        if (operation == "<=")
+            return V6Binary::Le;
+        if (operation == ">")
+            return V6Binary::Gt;
+        if (operation == ">=")
+            return V6Binary::Ge;
+        fail("ir_validate", "unknown_binary_operator", "Binary", span, "unknown Alex binary operator");
+    }
+
+    V6Unary unaryOperator(std::string_view operation, const alex::lang::Span& span) const
+    {
+        if (operation == "not")
+            return V6Unary::Not;
+        if (operation == "-")
+            return V6Unary::Minus;
+        if (operation == "#")
+            return V6Unary::Length;
+        fail("ir_validate", "unknown_unary_operator", "Unary", span, "unknown Alex unary operator");
+    }
+
+    uint32_t compileExpressionPack(const alex::lang::ExprPtr& expression)
+    {
+        if (expression->kind == alex::lang::Expr::Kind::Call || expression->kind == alex::lang::Expr::Kind::MethodCall)
+            return compileCall(expression);
+        if (expression->kind == alex::lang::Expr::Kind::Varargs)
+        {
+            uint32_t destination = allocRegister();
+            emit(V6Op::Varargs, {destination});
+            return destination;
+        }
+        uint32_t pack = allocRegister();
+        emit(V6Op::PackNew, {pack});
+        emit(V6Op::PackPush, {pack, compileExpression(expression)});
+        return pack;
+    }
+
+    uint32_t compileExpressionList(const std::vector<alex::lang::ExprPtr>& expressions, std::optional<uint32_t> prefix = std::nullopt)
+    {
+        uint32_t pack = allocRegister();
+        emit(V6Op::PackNew, {pack});
+        if (prefix)
+            emit(V6Op::PackPush, {pack, *prefix});
+        for (size_t index = 0; index < expressions.size(); ++index)
+        {
+            if (index + 1 == expressions.size())
+                emit(V6Op::PackExtend, {pack, compileExpressionPack(expressions[index])});
+            else
+                emit(V6Op::PackPush, {pack, compileExpression(expressions[index])});
+        }
+        return pack;
+    }
+
+    uint32_t compileCall(const alex::lang::ExprPtr& call)
+    {
+        bool method = call->kind == alex::lang::Expr::Kind::MethodCall;
+        const alex::lang::ExprPtr& function = call->values.front();
+        size_t firstArgument = 1;
+
+        if (!method && call->values.size() == 1 && function->kind == alex::lang::Expr::Kind::Name && !resolve(function->text))
+        {
+            uint32_t destination = allocRegister();
+            emit(V6Op::CallGlobal0, {destination, stringId(function->text)});
+            return destination;
+        }
+        if (method && call->values.size() == 1)
+        {
+            uint32_t self = compileExpression(function);
+            uint32_t destination = allocRegister();
+            emit(V6Op::CallMethod0, {destination, self, stringId(call->text)});
+            return destination;
+        }
+
+        uint32_t functionRegister = 0;
+        uint32_t arguments = 0;
+        std::vector<alex::lang::ExprPtr> argumentExpressions(call->values.begin() + static_cast<std::ptrdiff_t>(firstArgument), call->values.end());
+        if (method)
+        {
+            uint32_t self = compileExpression(function);
+            functionRegister = allocRegister();
+            emit(V6Op::GetIndexK, {functionRegister, self, stringId(call->text)});
+            arguments = compileExpressionList(argumentExpressions, self);
+        }
+        else
+        {
+            functionRegister = compileExpression(function);
+            arguments = compileExpressionList(argumentExpressions);
+        }
+
+        uint32_t destination = allocRegister();
+        emit(V6Op::Call, {destination, functionRegister, arguments});
+        return destination;
+    }
+
+    uint32_t compileFunction(const alex::lang::ExprPtr& function)
+    {
+        size_t parent = current().prototype;
+        size_t child = program.prototypes.size();
+        program.prototypes.emplace_back();
+        program.prototypes[parent].children.push_back(static_cast<uint32_t>(child + 1));
+        if (!function->text.empty())
+            program.prototypes[child].name = stringId(function->text);
+        program.prototypes[child].vararg = function->variadic;
+
+        contexts.push_back({child, 1, 0, {}});
+        lexicalScopes.emplace_back();
+        for (const std::string& parameter : function->names)
+            prototype().params.push_back(declare(parameter, function->span).id);
+        compileBlockBody(function->body);
+        emitEmptyReturn();
+        prototype().virtualRegisterCount = current().nextRegister - 1;
+        lexicalScopes.pop_back();
+        contexts.pop_back();
+
+        uint32_t destination = allocRegister();
+        emit(V6Op::MakeClosure, {destination, static_cast<uint32_t>(child + 1)});
+        return destination;
+    }
+
+    uint32_t compileValueBlock(const alex::lang::BlockPtr& block)
+    {
+        if (!block || block->statements.empty())
+            fail("ir_validate", "empty_value_block", "IfElse", block ? block->span : alex::lang::Span{}, "an if-expression branch must produce a value");
+        emit(V6Op::EnterScope);
+        ++current().scopeDepth;
+        lexicalScopes.emplace_back();
+        for (size_t index = 0; index + 1 < block->statements.size(); ++index)
+            compileStatement(block->statements[index]);
+        const alex::lang::StatementPtr& tail = block->statements.back();
+        if (tail->kind != alex::lang::Statement::Kind::Expression)
+            fail("ir_validate", "missing_branch_value", "IfElse", tail->span, "an if-expression branch must end with an expression");
+        uint32_t value = compileExpression(tail->values.front());
+        lexicalScopes.pop_back();
+        emit(V6Op::LeaveScopes, {1});
+        --current().scopeDepth;
+        return value;
+    }
+
+    uint32_t compileExpression(const alex::lang::ExprPtr& expression)
+    {
+        using Kind = alex::lang::Expr::Kind;
+        switch (expression->kind)
+        {
+        case Kind::Nil:
+            return emitNil();
+        case Kind::Boolean:
+            return emitConstant(json::array({1, expression->boolean ? 1 : 0}));
+        case Kind::Number:
+            return emitConstant(json::array({2, expression->number}));
+        case Kind::String:
+            return emitConstant(json::array({3, stringId(expression->text)}));
+        case Kind::Name:
+        {
+            uint32_t destination = allocRegister();
+            if (std::optional<Binding> binding = resolve(expression->text))
+            {
+                noteCapture(*binding);
+                emit(V6Op::GetLocal, {destination, binding->id});
+            }
+            else
+                emit(V6Op::GetGlobal, {destination, stringId(expression->text)});
+            return destination;
+        }
+        case Kind::Varargs:
+        {
+            uint32_t values = compileExpressionPack(expression);
+            uint32_t destination = allocRegister();
+            emit(V6Op::PackGet, {destination, values, 1});
+            return destination;
+        }
+        case Kind::Group:
+            return compileExpression(expression->values.front());
+        case Kind::IndexName:
+        {
+            uint32_t object = compileExpression(expression->values.front());
+            uint32_t destination = allocRegister();
+            emit(V6Op::GetIndexK, {destination, object, stringId(expression->text)});
+            return destination;
+        }
+        case Kind::Index:
+        {
+            uint32_t object = compileExpression(expression->values[0]);
+            uint32_t key = compileExpression(expression->values[1]);
+            uint32_t destination = allocRegister();
+            emit(V6Op::GetIndex, {destination, object, key});
+            return destination;
+        }
+        case Kind::Binary:
+        {
+            if (expression->text == "and" || expression->text == "or")
+            {
+                uint32_t destination = allocRegister();
+                uint32_t left = compileExpression(expression->values[0]);
+                emit(V6Op::Move, {destination, left});
+                size_t done = emit(expression->text == "and" ? V6Op::JumpFalse : V6Op::JumpTrue, {left, 0});
+                emit(V6Op::Move, {destination, compileExpression(expression->values[1])});
+                patch(done, 1, prototype().code.size());
+                return destination;
+            }
+            uint32_t left = compileExpression(expression->values[0]);
+            uint32_t right = compileExpression(expression->values[1]);
+            uint32_t destination = allocRegister();
+            emit(V6Op::Binary, {destination, static_cast<uint32_t>(binaryOperator(expression->text, expression->span)), left, right});
+            return destination;
+        }
+        case Kind::Unary:
+        {
+            uint32_t source = compileExpression(expression->values.front());
+            uint32_t destination = allocRegister();
+            emit(V6Op::Unary, {destination, static_cast<uint32_t>(unaryOperator(expression->text, expression->span)), source});
+            return destination;
+        }
+        case Kind::Call:
+        case Kind::MethodCall:
+        {
+            uint32_t values = compileCall(expression);
+            uint32_t destination = allocRegister();
+            emit(V6Op::PackGet, {destination, values, 1});
+            return destination;
+        }
+        case Kind::Function:
+            return compileFunction(expression);
+        case Kind::IfElse:
+        {
+            uint32_t destination = allocRegister();
+            uint32_t condition = compileExpression(expression->values.front());
+            size_t otherwise = emit(V6Op::JumpFalse, {condition, 0});
+            emit(V6Op::Move, {destination, compileValueBlock(expression->body)});
+            size_t done = emit(V6Op::Jump, {0});
+            patch(otherwise, 1, prototype().code.size());
+            emit(V6Op::Move, {destination, compileValueBlock(expression->elseBody)});
+            patch(done, 0, prototype().code.size());
+            return destination;
+        }
+        case Kind::Interpolation:
+        {
+            uint32_t destination = emitConstant(json::array({3, stringId("")}));
+            for (const alex::lang::ExprPtr& part : expression->values)
+            {
+                uint32_t value = compileExpression(part);
+                uint32_t text = value;
+                if (part->kind != Kind::String)
+                {
+                    text = allocRegister();
+                    emit(V6Op::ToString, {text, value});
+                }
+                uint32_t joined = allocRegister();
+                emit(V6Op::Binary, {joined, static_cast<uint32_t>(V6Binary::Concat), destination, text});
+                destination = joined;
+            }
+            return destination;
+        }
+        case Kind::Table:
+        {
+            uint32_t destination = allocRegister();
+            emit(V6Op::NewTable, {destination});
+            uint32_t listIndex = 1;
+            for (size_t index = 0; index < expression->tableItems.size(); ++index)
+            {
+                const alex::lang::TableItem& item = expression->tableItems[index];
+                if (item.kind == alex::lang::TableItem::Kind::List)
+                {
+                    if (index + 1 == expression->tableItems.size())
+                        emit(V6Op::AppendPack, {destination, compileExpressionPack(item.value), listIndex});
+                    else
+                        emit(V6Op::SetList, {destination, listIndex++, compileExpression(item.value)});
+                }
+                else if (item.kind == alex::lang::TableItem::Kind::Record)
+                    emit(V6Op::SetIndexK, {destination, stringId(item.name), compileExpression(item.value)});
+                else
+                    emit(V6Op::SetIndex, {destination, compileExpression(item.key), compileExpression(item.value)});
+            }
+            return destination;
+        }
+        }
+        fail("ir_validate", "unsupported_expression", alex::lang::expressionKindName(expression->kind), expression->span, "unsupported Alex expression");
+    }
+
+    PreparedTarget prepareTarget(const alex::lang::ExprPtr& target)
+    {
+        if (target->kind == alex::lang::Expr::Kind::Name)
+        {
+            if (std::optional<Binding> binding = resolve(target->text))
+            {
+                noteCapture(*binding);
+                return {TargetKind::Local, binding->id, 0, 0};
+            }
+            return {TargetKind::Global, stringId(target->text), 0, 0};
+        }
+        if (target->kind == alex::lang::Expr::Kind::IndexName)
+            return {TargetKind::IndexName, stringId(target->text), compileExpression(target->values.front()), 0};
+        if (target->kind == alex::lang::Expr::Kind::Index)
+            return {TargetKind::Index, 0, compileExpression(target->values[0]), compileExpression(target->values[1])};
+        fail("ir_validate", "invalid_assignment_target", alex::lang::expressionKindName(target->kind), target->span, "this expression cannot be assigned to");
+    }
+
+    void compileBlockBody(const alex::lang::BlockPtr& block)
+    {
+        for (const alex::lang::StatementPtr& statement : block->statements)
+            compileStatement(statement);
+    }
+
+    void compileScopedBlock(const alex::lang::BlockPtr& block)
+    {
+        emit(V6Op::EnterScope);
+        ++current().scopeDepth;
+        lexicalScopes.emplace_back();
+        compileBlockBody(block);
+        lexicalScopes.pop_back();
+        emit(V6Op::LeaveScopes, {1});
+        --current().scopeDepth;
+    }
+
+    void compileStatement(const alex::lang::StatementPtr& statement)
+    {
+        using Kind = alex::lang::Statement::Kind;
+        switch (statement->kind)
+        {
+        case Kind::Let:
+        {
+            uint32_t values = compileExpressionList(statement->values);
+            for (size_t index = 0; index < statement->names.size(); ++index)
+            {
+                uint32_t value = allocRegister();
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                emit(V6Op::DeclareLocal, {declare(statement->names[index], statement->span).id, value});
+            }
+            return;
+        }
+        case Kind::Function:
+        {
+            Binding binding = declare(statement->names.front(), statement->span);
+            emit(V6Op::DeclareLocal, {binding.id, emitNil()});
+            emit(V6Op::SetLocal, {binding.id, compileFunction(statement->values.front())});
+            return;
+        }
+        case Kind::Return:
+            emit(V6Op::Return, {compileExpressionList(statement->values)});
+            return;
+        case Kind::Expression:
+            if (statement->values.front()->kind == alex::lang::Expr::Kind::Call || statement->values.front()->kind == alex::lang::Expr::Kind::MethodCall)
+                compileCall(statement->values.front());
+            else
+                compileExpression(statement->values.front());
+            return;
+        case Kind::Assign:
+        {
+            std::vector<PreparedTarget> targets;
+            for (const alex::lang::ExprPtr& target : statement->targets)
+                targets.push_back(prepareTarget(target));
+            uint32_t values = compileExpressionList(statement->values);
+            for (size_t index = 0; index < targets.size(); ++index)
+            {
+                uint32_t value = allocRegister();
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                writeTarget(targets[index], value);
+            }
+            return;
+        }
+        case Kind::CompoundAssign:
+        {
+            PreparedTarget target = prepareTarget(statement->targets.front());
+            uint32_t left = readTarget(target);
+            uint32_t right = compileExpression(statement->values.front());
+            uint32_t value = allocRegister();
+            emit(V6Op::Binary, {value, static_cast<uint32_t>(binaryOperator(statement->text, statement->span)), left, right});
+            writeTarget(target, value);
+            return;
+        }
+        case Kind::If:
+        {
+            uint32_t condition = compileExpression(statement->condition);
+            size_t otherwise = emit(V6Op::JumpFalse, {condition, 0});
+            compileScopedBlock(statement->body);
+            size_t done = emit(V6Op::Jump, {0});
+            patch(otherwise, 1, prototype().code.size());
+            if (statement->elseBody)
+                compileScopedBlock(statement->elseBody);
+            patch(done, 0, prototype().code.size());
+            return;
+        }
+        case Kind::Scope:
+            compileScopedBlock(statement->body);
+            return;
+        case Kind::While:
+        {
+            size_t start = prototype().code.size();
+            uint32_t condition = compileExpression(statement->condition);
+            size_t done = emit(V6Op::JumpFalse, {condition, 0});
+            current().loops.push_back({current().scopeDepth, current().scopeDepth, {}, {}});
+            compileScopedBlock(statement->body);
+            size_t continueTarget = prototype().code.size();
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
+            size_t end = prototype().code.size();
+            patch(done, 1, end);
+            LoopContext context = std::move(current().loops.back());
+            current().loops.pop_back();
+            patchLoop(context, end, continueTarget);
+            return;
+        }
+        case Kind::Repeat:
+        {
+            size_t start = prototype().code.size();
+            emit(V6Op::EnterScope);
+            ++current().scopeDepth;
+            lexicalScopes.emplace_back();
+            int iterationDepth = current().scopeDepth;
+            current().loops.push_back({iterationDepth - 1, iterationDepth, {}, {}});
+            compileBlockBody(statement->body);
+            size_t continueTarget = prototype().code.size();
+            uint32_t condition = compileExpression(statement->condition);
+            lexicalScopes.pop_back();
+            emit(V6Op::LeaveScopes, {1});
+            --current().scopeDepth;
+            emit(V6Op::JumpFalse, {condition, static_cast<uint32_t>(start)});
+            size_t end = prototype().code.size();
+            LoopContext context = std::move(current().loops.back());
+            current().loops.pop_back();
+            patchLoop(context, end, continueTarget);
+            return;
+        }
+        case Kind::ForNumeric:
+        {
+            uint32_t from = compileExpression(statement->values[0]);
+            uint32_t limit = compileExpression(statement->values[1]);
+            uint32_t step = statement->values.size() > 2 ? compileExpression(statement->values[2]) : emitConstant(json::array({2, 1}));
+            uint32_t currentValue = allocRegister();
+            emit(V6Op::Move, {currentValue, from});
+            size_t start = prototype().code.size();
+            uint32_t condition = allocRegister();
+            emit(V6Op::ForCheck, {condition, currentValue, limit, step});
+            size_t done = emit(V6Op::JumpFalse, {condition, 0});
+            int baseDepth = current().scopeDepth;
+            current().loops.push_back({baseDepth, baseDepth, {}, {}});
+            emit(V6Op::EnterScope);
+            ++current().scopeDepth;
+            lexicalScopes.emplace_back();
+            Binding loop = declare(statement->names.front(), statement->span);
+            emit(V6Op::DeclareLocal, {loop.id, currentValue});
+            compileBlockBody(statement->body);
+            lexicalScopes.pop_back();
+            emit(V6Op::LeaveScopes, {1});
+            --current().scopeDepth;
+            size_t continueTarget = prototype().code.size();
+            uint32_t next = allocRegister();
+            emit(V6Op::Binary, {next, static_cast<uint32_t>(V6Binary::Add), currentValue, step});
+            emit(V6Op::Move, {currentValue, next});
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
+            size_t end = prototype().code.size();
+            patch(done, 1, end);
+            LoopContext context = std::move(current().loops.back());
+            current().loops.pop_back();
+            patchLoop(context, end, continueTarget);
+            return;
+        }
+        case Kind::ForIn:
+        {
+            uint32_t source = compileExpressionList(statement->values);
+            uint32_t iteratorState = allocRegister();
+            emit(V6Op::IteratorInit, {iteratorState, source});
+            uint32_t iterator = allocRegister();
+            uint32_t state = allocRegister();
+            uint32_t control = allocRegister();
+            emit(V6Op::PackGet, {iterator, iteratorState, 1});
+            emit(V6Op::PackGet, {state, iteratorState, 2});
+            emit(V6Op::PackGet, {control, iteratorState, 3});
+            size_t start = prototype().code.size();
+            uint32_t arguments = allocRegister();
+            emit(V6Op::PackNew, {arguments});
+            emit(V6Op::PackPush, {arguments, state});
+            emit(V6Op::PackPush, {arguments, control});
+            uint32_t values = allocRegister();
+            emit(V6Op::Call, {values, iterator, arguments});
+            uint32_t first = allocRegister();
+            emit(V6Op::PackGet, {first, values, 1});
+            size_t done = emit(V6Op::JumpNil, {first, 0});
+            emit(V6Op::Move, {control, first});
+            int baseDepth = current().scopeDepth;
+            current().loops.push_back({baseDepth, baseDepth, {}, {}});
+            emit(V6Op::EnterScope);
+            ++current().scopeDepth;
+            lexicalScopes.emplace_back();
+            for (size_t index = 0; index < statement->names.size(); ++index)
+            {
+                uint32_t value = allocRegister();
+                emit(V6Op::PackGet, {value, values, static_cast<uint32_t>(index + 1)});
+                emit(V6Op::DeclareLocal, {declare(statement->names[index], statement->span).id, value});
+            }
+            compileBlockBody(statement->body);
+            lexicalScopes.pop_back();
+            emit(V6Op::LeaveScopes, {1});
+            --current().scopeDepth;
+            size_t continueTarget = prototype().code.size();
+            emit(V6Op::Jump, {static_cast<uint32_t>(start)});
+            size_t end = prototype().code.size();
+            patch(done, 1, end);
+            LoopContext context = std::move(current().loops.back());
+            current().loops.pop_back();
+            patchLoop(context, end, continueTarget);
+            return;
+        }
+        case Kind::Break:
+        case Kind::Continue:
+        {
+            if (current().loops.empty())
+                fail("bind", "loop_control_outside_loop", alex::lang::statementKindName(statement->kind), statement->span, "loop control is only valid inside a loop");
+            LoopContext& loop = current().loops.back();
+            bool isBreak = statement->kind == Kind::Break;
+            int targetDepth = isBreak ? loop.breakDepth : loop.continueDepth;
+            int leaveCount = current().scopeDepth - targetDepth;
+            if (leaveCount > 0)
+                emit(V6Op::LeaveScopes, {static_cast<uint32_t>(leaveCount)});
+            size_t jump = emit(V6Op::Jump, {0});
+            (isBreak ? loop.breaks : loop.continues).push_back(jump);
+            return;
+        }
+        }
+        fail("ir_validate", "unsupported_statement", alex::lang::statementKindName(statement->kind), statement->span, "unsupported Alex statement");
+    }
+};
+
 std::string emitEncryptedStringConstant(const std::string& value, std::mt19937_64& rng, const std::string& decodeFn)
 {
     uint32_t mask = static_cast<uint32_t>((rng() % 229u) + 19u);
@@ -3303,11 +3966,11 @@ V6SerializedProgram serializeV6Program(const V6Program& program, const Config& c
     };
 
     V6SerializedProgram serialized;
-    serialized.bundle = json::array({5, program.rootPrototype, prototypes});
+    serialized.bundle = json::array({6, program.rootPrototype, prototypes});
     serialized.debug = {
         {"backend", "alexvm6"},
-        {"vm_version", 5},
-        {"ir_version", 1},
+        {"vm_version", 6},
+        {"ir_version", 2},
         {"prototype_count", program.prototypes.size() - program.decoyPrototypeCount},
         {"decoy_prototype_count", program.decoyPrototypeCount},
         {"instruction_count", program.instructionCount},
@@ -3571,30 +4234,47 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
 {
     gLastVmCompileError.clear();
     gLastV6Diagnostic = json::object();
-    Luau::Allocator allocator;
-    Luau::AstNameTable names(allocator);
-    Luau::ParseResult parsed = Luau::Parser::parse(source.data(), source.size(), names, allocator);
-    if (!parsed.root || !parsed.errors.empty())
-    {
-        gLastVmCompileError = "Luau parser rejected the source";
-        if (!parsed.errors.empty())
-        {
-            const Luau::ParseError& error = parsed.errors.front();
-            gLastV6Diagnostic = {
-                {"code", "parse_error"},
-                {"stage", "parse"},
-                {"message", error.getMessage()},
-                {"location", {{"line", error.getLocation().begin.line + 1}, {"column", error.getLocation().begin.column + 1}}},
-            };
-        }
-        return std::nullopt;
-    }
 
     try
     {
         std::mt19937_64 rng(config.seed ^ 0x5a17f05ca70b5eedull);
-        V6SemanticCompiler compiler(rng, config);
-        V6Program program = compiler.compile(parsed.root);
+        V6Program program;
+        if (config.effectiveLanguage == InputLanguage::Alex)
+        {
+            alex::lang::ParseResult parsed = alex::lang::parse(source);
+            if (!parsed)
+                throw AlexCompileFailure(parsed.diagnostics.front());
+            std::vector<alex::lang::Diagnostic> bindingDiagnostics = alex::lang::bind(parsed.program);
+            if (!bindingDiagnostics.empty())
+                throw AlexCompileFailure(bindingDiagnostics.front());
+            AlexSemanticCompiler compiler(rng, config);
+            program = compiler.compile(parsed.program);
+        }
+        else
+        {
+            Luau::Allocator allocator;
+            Luau::AstNameTable names(allocator);
+            Luau::ParseResult parsed = Luau::Parser::parse(source.data(), source.size(), names, allocator);
+            if (!parsed.root || !parsed.errors.empty())
+            {
+                if (!parsed.errors.empty())
+                {
+                    const Luau::ParseError& error = parsed.errors.front();
+                    gLastV6Diagnostic = {
+                        {"code", "parse_error"},
+                        {"stage", "parse"},
+                        {"language", "luau"},
+                        {"kind", "LuauSource"},
+                        {"message", error.getMessage()},
+                        {"location", {{"line", error.getLocation().begin.line + 1}, {"column", error.getLocation().begin.column + 1}}},
+                    };
+                }
+                gLastVmCompileError = "Luau parser rejected the source";
+                return std::nullopt;
+            }
+            V6SemanticCompiler compiler(rng, config);
+            program = compiler.compile(parsed.root);
+        }
         V6SerializedProgram serialized = serializeV6Program(program, config, rng);
         std::string binaryProgram = encodeBinaryVmBundle(serialized.bundle);
 
@@ -3700,7 +4380,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
         }
         out << emitV6AeadRuntime(aead, config, rng, guardExpected, vGuard, vBxor, vOnlineMaterial, vAeadKey, vAeadKeyCapsule, vAeadNonce, vAeadTag, vAeadDecrypt);
         out << "    " << vIr << "=" << vAeadDecrypt << "(" << vIr << "," << vAeadKey << "," << vAeadNonce << "," << vAeadTag << "); if not " << vIr << " then return " << vDecoy << "() end\n";
-        out << "    local " << vBundle << " = " << vParseIr << "(" << vIr << "); if " << vBundle << "[1] ~= 5 then return " << vDecoy << "() end\n";
+        out << "    local " << vBundle << " = " << vParseIr << "(" << vIr << "); if " << vBundle << "[1] ~= 6 then return " << vDecoy << "() end\n";
         out << "    local " << vNil << " = {}\n";
         out << "    local function " << n.unwrap << "(v) if v == " << vNil << " then return nil end return v end\n";
         out << "    local function " << n.store << "(v) if v == nil then return " << vNil << " end return v end\n";
@@ -3803,6 +4483,20 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
         };
         return std::nullopt;
     }
+    catch (const AlexCompileFailure& failure)
+    {
+        const alex::lang::Diagnostic& diagnostic = failure.diagnostic;
+        gLastVmCompileError = failure.what();
+        gLastV6Diagnostic = {
+            {"code", diagnostic.code},
+            {"stage", diagnostic.stage},
+            {"language", "alex"},
+            {"kind", diagnostic.kind},
+            {"message", diagnostic.message},
+            {"location", {{"line", diagnostic.span.begin.line}, {"column", diagnostic.span.begin.column}}},
+        };
+        return std::nullopt;
+    }
     catch (const std::exception& failure)
     {
         gLastVmCompileError = failure.what();
@@ -3819,12 +4513,15 @@ void writeVmDebugMap(
 
     json data = {
         {"tool", "alexfuscator"},
-        {"report_version", 3},
+        {"report_version", 4},
         {"profile", profileName(config.profile)},
         {"mode", "alexvm6"},
         {"backend", "alexvm6"},
-        {"vm_version", 5},
-        {"ir_version", 1},
+        {"vm_version", 6},
+        {"ir_version", 2},
+        {"language", inputLanguageName(config.effectiveLanguage)},
+        {"language_version", config.effectiveLanguage == InputLanguage::Alex ? 1 : 0},
+        {"frontend", config.effectiveLanguage == InputLanguage::Alex ? "alex1" : "luau"},
         {"target", config.target},
         {"runtime", runtimeTargetName(config.runtime)},
         {"key_mode", keyModeName(config.keyMode)},
@@ -3927,14 +4624,16 @@ void writeVmDebugMap(
 [[noreturn]] void usage(int exitCode)
 {
     std::ostream& os = exitCode == 0 ? std::cout : std::cerr;
-    os << "alexfuscator - Roblox Luau obfuscator\n\n"
+    os << "alexfuscator - Alex 1 and Roblox Luau compiler/obfuscator\n\n"
        << "Usage:\n"
        << "  alexfuscator input.luau -o output.luau [--profile maximum] [--seed auto]\n"
+       << "  alexfuscator input.alex -o output.luau [--profile maximum]\n"
        << "  alexfuscator --stdin --stdout --profile hardened [options]\n"
        << "  alexfuscator --owner-keygen keys/alex_owner [--owner-id alex]\n"
        << "  alexfuscator --serve [--port 8787]\n\n"
        << "Options:\n"
        << "  -o, --output PATH          Output .luau path\n"
+       << "  --language auto|luau|alex Input language, default auto by extension\n"
        << "  --profile compatibility|hardened|maximum  vNext profile, default maximum\n"
        << "  --runtime universal|roblox|executor  Generated runtime target, default universal\n"
        << "  --key-mode standalone|online  Payload key mode, default standalone\n"
@@ -3968,6 +4667,8 @@ void writeVmDebugMap(
        << "  --owner-private-key PATH   Private key used for --owner-protect sign/sign-and-lock\n"
        << "  --owner-id NAME            Owner id for keygen/signing, default alex\n"
        << "  --unsafe-debug-map         Include sensitive debug fields useful for reversing output\n"
+       << "  --dump-ir PATH             Write deterministic AlexIR 2 text; requires --unsafe-debug-map\n"
+       << "  --dump-vm PATH             Write deterministic AlexVM 6 text; requires --unsafe-debug-map\n"
        << "  --bytecode-trampoline      Add unreachable entry islands/decoy bytecode, default\n"
        << "  --no-bytecode-trampoline   Disable unreachable entry islands/decoy bytecode\n"
        << "  --stage2                   Enable Maximum lazy block/constant AEAD, default\n"
@@ -4049,6 +4750,8 @@ Config parseArgs(int argc, char** argv)
             config.outputPath = "-";
         else if (arg == "-o" || arg == "--output")
             config.outputPath = needValue(arg);
+        else if (arg == "--language")
+            config.language = parseInputLanguage(needValue(arg));
         else if (arg == "--profile")
             config.profile = parseProfile(needValue(arg));
         else if (arg == "--runtime")
@@ -4161,6 +4864,10 @@ Config parseArgs(int argc, char** argv)
         }
         else if (arg == "--unsafe-debug-map")
             config.unsafeDebugMap = true;
+        else if (arg == "--dump-ir")
+            config.dumpIrPath = needValue(arg);
+        else if (arg == "--dump-vm")
+            config.dumpVmPath = needValue(arg);
         else if (arg == "--bytecode-trampoline")
             config.bytecodeTrampoline = true;
         else if (arg == "--no-bytecode-trampoline")
@@ -4281,7 +4988,11 @@ Config parseArgs(int argc, char** argv)
             throw std::runtime_error("missing input file");
         if (config.outputPath.empty())
             config.outputPath = config.inputPath == "-" ? fs::path("-") : fs::path(defaultOutputFor(config.inputPath));
+        config.effectiveLanguage = resolveInputLanguage(config.language, config.inputPath);
     }
+
+    if ((!config.dumpIrPath.empty() || !config.dumpVmPath.empty()) && !config.unsafeDebugMap)
+        throw std::runtime_error("--dump-ir and --dump-vm require --unsafe-debug-map");
 
     return config;
 }
