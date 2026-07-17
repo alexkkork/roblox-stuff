@@ -1,0 +1,93 @@
+// A line comment must not become floor division.
+/* A block comment may appear between declarations. */
+fn triple(value) {
+    return value, value + 1, value + 2
+}
+
+fn addThree(first, second, third) {
+    return first + second + third
+}
+
+fn factorial(value) {
+    if value <= 1 {
+        return 1
+    }
+    return value * factorial(value - 1)
+}
+
+fn makeStepper(startValue) {
+    let currentValue = startValue
+    return fn(amount) {
+        currentValue += amount or 1
+        return currentValue
+    }
+}
+
+fn forward(...) {
+    return ...
+}
+
+let floorValue = 17 // 5
+floorValue //= 2
+let negativeFloor = -17 // 5
+
+let first, second, third = forward(triple(4))
+let expanded = addThree(1, triple(2))
+let truncated = addThree((triple(7)), 8, 9)
+
+let trace = ""
+let storage = {value = 10}
+
+fn targetObject() {
+    trace ..= "O"
+    return storage
+}
+
+fn targetKey() {
+    trace ..= "K"
+    return "value"
+}
+
+fn assignedValue() {
+    trace ..= "R"
+    return 5
+}
+
+targetObject()[targetKey()] += assignedValue()
+
+let loopTotal = 0
+for index = 1, 10 {
+    if index == 2 {
+        continue
+    }
+    if index == 6 {
+        break
+    }
+    loopTotal += index
+}
+
+let whileCount = 0
+while whileCount < 4 {
+    whileCount += 1
+    if whileCount == 2 {
+        continue
+    }
+    loopTotal += whileCount
+}
+
+repeat {
+    loopTotal += 1
+} until loopTotal >= 22
+
+for index, value in ipairs({2, 3}) {
+    loopTotal += index * value
+}
+
+let stepper = makeStepper(10)
+let stepOne = stepper(2)
+let stepTwo = stepper()
+let label = `edge {floorValue}:{factorial(5)}:{trace}`
+
+print("alex1-edges", floorValue, negativeFloor, first, second, third, expanded, truncated, storage.value, trace, loopTotal, stepOne, stepTwo, label)
+
+return floorValue, negativeFloor, storage.value, loopTotal, stepTwo

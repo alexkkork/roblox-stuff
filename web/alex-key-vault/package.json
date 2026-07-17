@@ -10,7 +10,9 @@
     "hash-admin-password": "node scripts/hash-admin-password.js",
     "generate-keys": "node scripts/generate-keys.js",
     "package-keyset": "node scripts/package-keyset.js",
-    "self-test": "node scripts/self-test.js"
+    "self-test": "node scripts/self-test.js",
+    "contract-test": "node scripts/hosted-contract-test.js",
+    "test": "npm run self-test && npm run contract-test"
   },
   "engines": {
     "node": "24.x"

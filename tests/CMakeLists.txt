@@ -603,6 +603,15 @@ if(TARGET alexfuscator AND TARGET rbx_luau_runtime)
     )
 
     rbx_add_python_test(
+        alexfuscator_alex_language_edges
+        "unit;conformance;alexfuscator"
+        240
+        test_alex_language_edges.py
+        --alexfuscator "$<TARGET_FILE:alexfuscator>"
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
+
+    rbx_add_python_test(
         alexfuscator_semantic_corpus
         "conformance;alexfuscator"
         3600
