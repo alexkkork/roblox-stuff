@@ -1626,7 +1626,11 @@ struct IndexedWriteCollector : Luau::AstVisitor
 
 Luau::AstExpr* unwrapLuraphExpression(Luau::AstExpr* expression);
 
-std::optional<bool> evaluateStateCondition(Luau::AstExpr* expression, Luau::AstLocal* state, int64_t value)
+std::optional<bool> evaluateStateCondition(
+    Luau::AstExpr* expression,
+    Luau::AstLocal* state,
+    int64_t value,
+    const std::map<Luau::AstLocal*, double>* bindings = nullptr)
 {
     while (expression)
     {
@@ -1643,7 +1647,7 @@ std::optional<bool> evaluateStateCondition(Luau::AstExpr* expression, Luau::AstL
     {
         if (unary->op != Luau::AstExprUnary::Op::Not)
             return std::nullopt;
-        const std::optional<bool> nested = evaluateStateCondition(unary->expr, state, value);
+        const std::optional<bool> nested = evaluateStateCondition(unary->expr, state, value, bindings);
         return nested ? std::optional<bool>(!*nested) : std::nullopt;
     }
     auto binary = expression ? expression->as<Luau::AstExprBinary>() : nullptr;
@@ -1651,33 +1655,31 @@ std::optional<bool> evaluateStateCondition(Luau::AstExpr* expression, Luau::AstL
         return std::nullopt;
     if (binary->op == Luau::AstExprBinary::And || binary->op == Luau::AstExprBinary::Or)
     {
-        const std::optional<bool> left = evaluateStateCondition(binary->left, state, value);
+        const std::optional<bool> left = evaluateStateCondition(binary->left, state, value, bindings);
         if (!left)
             return std::nullopt;
         if (binary->op == Luau::AstExprBinary::And)
-            return !*left ? std::optional<bool>(false) : evaluateStateCondition(binary->right, state, value);
-        return *left ? std::optional<bool>(true) : evaluateStateCondition(binary->right, state, value);
+            return !*left ? std::optional<bool>(false) : evaluateStateCondition(binary->right, state, value, bindings);
+        return *left ? std::optional<bool>(true) : evaluateStateCondition(binary->right, state, value, bindings);
     }
     Luau::AstExpr* leftExpression = unwrapLuraphExpression(binary->left);
     Luau::AstExpr* rightExpression = unwrapLuraphExpression(binary->right);
     auto leftLocal = leftExpression ? leftExpression->as<Luau::AstExprLocal>() : nullptr;
     auto rightLocal = rightExpression ? rightExpression->as<Luau::AstExprLocal>() : nullptr;
-    auto leftNumber = evaluateAstNumber(binary->left);
-    auto rightNumber = evaluateAstNumber(binary->right);
-    double left = 0;
-    double right = 0;
-    if (leftLocal && leftLocal->local == state && rightNumber)
-    {
-        left = static_cast<double>(value);
-        right = *rightNumber;
-    }
-    else if (rightLocal && rightLocal->local == state && leftNumber)
-    {
-        left = *leftNumber;
-        right = static_cast<double>(value);
-    }
-    else
+    auto resolveValue = [&](Luau::AstExpr* candidate, Luau::AstExprLocal* local) -> std::optional<double> {
+        if (local && local->local == state)
+            return static_cast<double>(value);
+        if (local && bindings)
+            if (auto found = bindings->find(local->local); found != bindings->end())
+                return found->second;
+        return evaluateAstNumber(candidate);
+    };
+    const std::optional<double> resolvedLeft = resolveValue(binary->left, leftLocal);
+    const std::optional<double> resolvedRight = resolveValue(binary->right, rightLocal);
+    if (!resolvedLeft || !resolvedRight)
         return std::nullopt;
+    const double left = *resolvedLeft;
+    const double right = *resolvedRight;
 
     switch (binary->op)
     {
@@ -1691,9 +1693,17 @@ std::optional<bool> evaluateStateCondition(Luau::AstExpr* expression, Luau::AstL
     }
 }
 
-Luau::AstStatBlock* selectLeaf(Luau::AstStat* statement, Luau::AstLocal* state, int64_t value);
+Luau::AstStatBlock* selectLeaf(
+    Luau::AstStat* statement,
+    Luau::AstLocal* state,
+    int64_t value,
+    const std::map<Luau::AstLocal*, double>* bindings = nullptr);
 
-Luau::AstStatBlock* selectLeaf(Luau::AstStatBlock* block, Luau::AstLocal* state, int64_t value)
+Luau::AstStatBlock* selectLeaf(
+    Luau::AstStatBlock* block,
+    Luau::AstLocal* state,
+    int64_t value,
+    const std::map<Luau::AstLocal*, double>* bindings)
 {
     if (!block || block->body.size == 0)
         return block;
@@ -1701,37 +1711,41 @@ Luau::AstStatBlock* selectLeaf(Luau::AstStatBlock* block, Luau::AstLocal* state,
     {
         if (auto nested = statement->as<Luau::AstStatIf>())
         {
-            const std::optional<bool> decision = evaluateStateCondition(nested->condition, state, value);
+            const std::optional<bool> decision = evaluateStateCondition(nested->condition, state, value, bindings);
             if (!decision.has_value())
                 continue;
 
             if (*decision)
-                return selectLeaf(nested->thenbody, state, value);
+                return selectLeaf(nested->thenbody, state, value, bindings);
 
             // A one-sided opcode guard is a sibling leaf, not the end of the
             // dispatcher. Keep scanning the enclosing block when it misses.
             if (nested->elsebody)
-                return selectLeaf(nested->elsebody, state, value);
+                return selectLeaf(nested->elsebody, state, value, bindings);
         }
     }
     return block;
 }
 
-Luau::AstStatBlock* selectLeaf(Luau::AstStat* statement, Luau::AstLocal* state, int64_t value)
+Luau::AstStatBlock* selectLeaf(
+    Luau::AstStat* statement,
+    Luau::AstLocal* state,
+    int64_t value,
+    const std::map<Luau::AstLocal*, double>* bindings)
 {
     if (!statement)
         return nullptr;
     if (auto block = statement->as<Luau::AstStatBlock>())
-        return selectLeaf(block, state, value);
+        return selectLeaf(block, state, value, bindings);
     auto conditional = statement->as<Luau::AstStatIf>();
     if (!conditional)
         return nullptr;
-    auto decision = evaluateStateCondition(conditional->condition, state, value);
+    auto decision = evaluateStateCondition(conditional->condition, state, value, bindings);
     if (!decision)
         return nullptr;
     if (*decision)
-        return selectLeaf(conditional->thenbody, state, value);
-    return selectLeaf(conditional->elsebody, state, value);
+        return selectLeaf(conditional->thenbody, state, value, bindings);
+    return selectLeaf(conditional->elsebody, state, value, bindings);
 }
 
 struct BlockInfo
@@ -4399,6 +4413,65 @@ struct LuraphLoopShapeCollector : Luau::AstVisitor
     }
 };
 
+struct LuraphOpcodeDispatcherCollector : Luau::AstVisitor
+{
+    explicit LuraphOpcodeDispatcherCollector(Luau::AstLocal* opcode)
+        : opcode(opcode)
+    {
+    }
+
+    struct Candidate
+    {
+        Luau::AstStatIf* node = nullptr;
+        size_t conditionals = 0;
+    };
+
+    Luau::AstLocal* opcode = nullptr;
+    std::vector<Candidate> candidates;
+
+    bool visit(Luau::AstStatIf* node) override
+    {
+        bool opcodeCondition = false;
+        for (int64_t sample : {int64_t(0), int64_t(80), int64_t(255)})
+            opcodeCondition = opcodeCondition || evaluateStateCondition(node->condition, opcode, sample).has_value();
+        if (opcodeCondition)
+        {
+            IfCounter counter;
+            node->visit(&counter);
+            candidates.push_back({node, counter.count});
+        }
+        return true;
+    }
+};
+
+struct LuraphGuardBindingCollector : Luau::AstVisitor
+{
+    explicit LuraphGuardBindingCollector(Luau::AstLocal* opcode)
+        : opcode(opcode)
+    {
+    }
+
+    Luau::AstLocal* opcode = nullptr;
+    std::map<std::pair<Luau::AstLocal*, int64_t>, size_t> scores;
+
+    bool visit(Luau::AstExprBinary* node) override
+    {
+        if (node->op != Luau::AstExprBinary::CompareEq && node->op != Luau::AstExprBinary::CompareNe)
+            return true;
+        Luau::AstExpr* leftExpression = unwrapLuraphExpression(node->left);
+        Luau::AstExpr* rightExpression = unwrapLuraphExpression(node->right);
+        auto leftLocal = leftExpression ? leftExpression->as<Luau::AstExprLocal>() : nullptr;
+        auto rightLocal = rightExpression ? rightExpression->as<Luau::AstExprLocal>() : nullptr;
+        const std::optional<int64_t> leftNumber = evaluateAstInteger(node->left);
+        const std::optional<int64_t> rightNumber = evaluateAstInteger(node->right);
+        if (leftLocal && leftLocal->local != opcode && rightNumber)
+            ++scores[{leftLocal->local, *rightNumber}];
+        else if (rightLocal && rightLocal->local != opcode && leftNumber)
+            ++scores[{rightLocal->local, *leftNumber}];
+        return true;
+    }
+};
+
 struct LuraphRegisterRoleCollector : Luau::AstVisitor
 {
     explicit LuraphRegisterRoleCollector(Luau::AstLocal* pc)
@@ -6586,19 +6659,23 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     if (shape == collector.shapes.end() || shape->conditionals < 40 || !shape->opcode || !shape->body)
         return catalog;
 
-    Luau::AstStat* dispatcher = nullptr;
-    for (Luau::AstStat* statement : shape->body->body)
-    {
-        if (statement == shape->fetch)
-            continue;
-        if (statement->is<Luau::AstStatIf>())
-        {
-            dispatcher = statement;
-            break;
-        }
-    }
-    if (!dispatcher)
+    LuraphOpcodeDispatcherCollector dispatcherCollector(shape->opcode);
+    shape->body->visit(&dispatcherCollector);
+    auto dispatcherCandidate = std::max_element(
+        dispatcherCollector.candidates.begin(), dispatcherCollector.candidates.end(),
+        [](const auto& left, const auto& right) { return left.conditionals < right.conditionals; });
+    if (dispatcherCandidate == dispatcherCollector.candidates.end() || dispatcherCandidate->conditionals < 40)
         return catalog;
+    Luau::AstStat* dispatcher = dispatcherCandidate->node;
+
+    LuraphGuardBindingCollector guardCollector(shape->opcode);
+    dispatcher->visit(&guardCollector);
+    std::map<Luau::AstLocal*, double> guardBindings;
+    auto guardBinding = std::max_element(
+        guardCollector.scores.begin(), guardCollector.scores.end(),
+        [](const auto& left, const auto& right) { return left.second < right.second; });
+    if (guardBinding != guardCollector.scores.end() && guardBinding->second >= 4)
+        guardBindings[guardBinding->first.first] = static_cast<double>(guardBinding->first.second);
 
     LuraphRegisterRoleCollector roles(shape->pc);
     shape->body->visit(&roles);
@@ -6625,7 +6702,7 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
 
     LuraphDirectRegisterSourceCollector environmentRoles(registers);
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
-        if (Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode))
+        if (Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode, &guardBindings))
             leaf->visit(&environmentRoles);
     for (Luau::AstLocal* lane : lanes)
         environmentRoles.scores.erase(lane);
@@ -6667,11 +6744,24 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     std::sort(laneNames.begin(), laneNames.end());
 
     SourceView view(source);
+    json dispatcherDecisions = json::array();
+    if (auto rootConditional = dispatcher->as<Luau::AstStatIf>())
+    {
+        for (int64_t sample : {int64_t(0), int64_t(80), int64_t(255)})
+        {
+            const std::optional<bool> decision = evaluateStateCondition(
+                rootConditional->condition, shape->opcode, sample, &guardBindings);
+            dispatcherDecisions.push_back({
+                {"opcode", sample},
+                {"decision", decision ? json(*decision) : json(nullptr)},
+            });
+        }
+    }
     json handlers = json::array();
     std::set<std::pair<size_t, size_t>> uniqueRanges;
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
     {
-        Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode);
+        Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode, &guardBindings);
         bool resolved = leaf != nullptr;
         bool opcodeLocalReused = false;
         if (leaf)
@@ -6740,6 +6830,19 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
         {"operand_lane_locals", laneNames},
         {"loop_kind", shape->loop->is<Luau::AstStatRepeat>() ? "repeat-until-false" : "while-true"},
         {"conditionals", shape->conditionals},
+        {"dispatcher_conditionals", dispatcherCandidate->conditionals},
+        {"dispatcher_range", {
+            {"begin", view.offset(dispatcher->location.begin)},
+            {"end", view.offset(dispatcher->location.end)},
+        }},
+        {"dispatcher_preview", view.slice(dispatcher->location, 1024)},
+        {"dispatcher_decisions", std::move(dispatcherDecisions)},
+        {"guard_binding", guardBinding != guardCollector.scores.end() && guardBinding->second >= 4 ? json{
+            {"local", guardBinding->first.first && guardBinding->first.first->name.value
+                ? json(std::string(guardBinding->first.first->name.value)) : json(nullptr)},
+            {"value", guardBinding->first.second},
+            {"score", guardBinding->second},
+        } : json(nullptr)},
         {"resolved_opcodes", catalog.resolved},
         {"leaf_selection_complete", catalog.resolved == 256},
         {"unique_handlers", catalog.unique_handlers},
