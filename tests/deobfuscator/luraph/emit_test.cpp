@@ -2021,6 +2021,28 @@ bool testUnsupportedPathSpecificExpressionFailsClosed()
             "unsupported expression was not counted as an incomplete reconstruction");
 }
 
+bool testOverloadedClosureOpcodeRespectsRecoveredScalarWrite()
+{
+    json instruction = pathSpecificInstruction(1, {
+        {"kind", "register_write"},
+        {"register", { {"kind", "constant"}, {"value", 14} }},
+        {"value", {
+            {"kind", "observed_register_value"},
+            {"value", number(502)},
+        }},
+    });
+    instruction["opcode"] = 22;
+    const SemanticCandidate candidate = emitWithTarget(json::array({std::move(instruction)}), 0);
+
+    return require(candidate.source.find("registers[14] = recovered_register_14_p2_pc1") != std::string::npos &&
+                   candidate.source.find("= 502") != std::string::npos,
+               "recovered opcode-22 scalar write was not emitted") &&
+        require(candidate.source.find("closure descriptor is unavailable") == std::string::npos,
+            "overloaded opcode 22 overrode a stronger recovered semantic operation") &&
+        require(candidate.unresolved_closure_descriptors == 0,
+            "recovered opcode-22 scalar write was counted as an unresolved closure");
+}
+
 bool testUnknownPathSpecificOperationPreservesIrAndProvenance()
 {
     const json opaqueMetadata = {
@@ -2115,6 +2137,7 @@ int main()
     ok &= testVerifiedOpcode112ClosureDescriptorRenders();
     ok &= testCaptureKindThreeRemainsExplicitlyUnsupported();
     ok &= testUnsupportedPathSpecificExpressionFailsClosed();
+    ok &= testOverloadedClosureOpcodeRespectsRecoveredScalarWrite();
     ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";

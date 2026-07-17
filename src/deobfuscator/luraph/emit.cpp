@@ -3752,16 +3752,22 @@ private:
     bool closureConstruction(const json& instruction, const json& semanticOperation,
         size_t depth, Context& context)
     {
-        const bool semanticClosure = semanticOperation.value("kind", "") == "closure";
+        const std::string semanticKind = semanticOperation.value("kind", "");
+        const bool semanticClosure = semanticKind == "closure";
         const json* descriptorValue = nullptr;
         if (instruction.contains("closure_descriptor") && instruction["closure_descriptor"].is_object())
             descriptorValue = &instruction["closure_descriptor"];
         else if (semanticClosure && semanticOperation.contains("descriptor") &&
             semanticOperation["descriptor"].is_object())
             descriptorValue = &semanticOperation["descriptor"];
-        if (!descriptorValue && !semanticClosure && instruction.value("opcode", int64_t(-1)) != 22 &&
-            instruction.value("opcode", int64_t(-1)) != 112)
-            return false;
+        if (!descriptorValue && !semanticClosure)
+        {
+            // Opcodes 22 and 112 are overloaded by the protected dispatcher. Only use the
+            // legacy closure hint when no stronger semantic classification was recovered.
+            if (!semanticKind.empty() || (instruction.value("opcode", int64_t(-1)) != 22 &&
+                                             instruction.value("opcode", int64_t(-1)) != 112))
+                return false;
+        }
         if (!descriptorValue)
         {
             ++result.unresolved_closure_descriptors;

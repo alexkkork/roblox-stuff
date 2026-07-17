@@ -11340,6 +11340,72 @@ json inferLuraphObservationalSiteOperation(
         return operation;
     }
 
+    std::optional<int64_t> primitiveDestination;
+    std::optional<json> stablePrimitive;
+    size_t changedPrimitiveWrites = 0;
+    size_t unchangedPrimitiveWrites = 0;
+    bool stablePrimitiveWrite = !observations.empty();
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json origins = observation.value("write_origins", json::object());
+        if (!guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) ||
+            observation.value("next_pc", int64_t(-1)) != static_cast<int64_t>(pc + 1) ||
+            !writes.is_array() || !origins.is_object() || !origins.empty())
+        {
+            stablePrimitiveWrite = false;
+            break;
+        }
+        if (writes.empty())
+        {
+            ++unchangedPrimitiveWrites;
+            continue;
+        }
+        if (writes.size() != 1 || !writes.front().is_object() ||
+            !writes.front().contains("value") || !writes.front()["value"].is_object())
+        {
+            stablePrimitiveWrite = false;
+            break;
+        }
+        const int64_t destination = writes.front().value(
+            "register", std::numeric_limits<int64_t>::min());
+        const json& value = writes.front()["value"];
+        const std::string valueType = value.value("type", "");
+        if (destination == std::numeric_limits<int64_t>::min() ||
+            (valueType != "nil" && valueType != "boolean" && valueType != "number" &&
+                valueType != "string") ||
+            (primitiveDestination && *primitiveDestination != destination) ||
+            (stablePrimitive && !luraphObservedValuesEqual(*stablePrimitive, value)))
+        {
+            stablePrimitiveWrite = false;
+            break;
+        }
+        primitiveDestination = destination;
+        stablePrimitive = value;
+        ++changedPrimitiveWrites;
+    }
+    if (stablePrimitiveWrite && primitiveDestination && stablePrimitive && changedPrimitiveWrites > 0)
+    {
+        json operation = evidence("load_constant");
+        operation["kind"] = "register_write";
+        operation["register"] = {
+            {"kind", "constant"},
+            {"value", *primitiveDestination},
+        };
+        operation["value"] = {
+            {"kind", "observed_register_value"},
+            {"value", *stablePrimitive},
+        };
+        operation["proof"] = "complete_observation_set_stable_primitive_write";
+        operation["source_claim"] = false;
+        operation["path_replay_only"] = true;
+        operation["changed_write_observations"] = changedPrimitiveWrites;
+        operation["unchanged_write_observations"] = unchangedPrimitiveWrites;
+        return operation;
+    }
+
     std::optional<int64_t> moveDestination;
     std::optional<int64_t> moveSource;
     bool observedRegisterMove = !observations.empty();
