@@ -144,6 +144,20 @@ add_test(NAME deobfuscator_luraph_range_clear_semantics_unit COMMAND luraph_rang
 set_tests_properties(deobfuscator_luraph_range_clear_semantics_unit
     PROPERTIES LABELS "unit;deobfuscator;security" TIMEOUT 30)
 
+add_executable(luraph_index_read_semantics_test
+    deobfuscator/luraph/index_read_semantics_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/deobfuscator/luraph/index_read_semantics.cpp
+)
+target_include_directories(luraph_index_read_semantics_test PRIVATE ${PROJECT_SOURCE_DIR}/src/deobfuscator)
+if(MSVC)
+    target_compile_options(luraph_index_read_semantics_test PRIVATE /W4)
+else()
+    target_compile_options(luraph_index_read_semantics_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deobfuscator_luraph_index_read_semantics_unit COMMAND luraph_index_read_semantics_test)
+set_tests_properties(deobfuscator_luraph_index_read_semantics_unit
+    PROPERTIES LABELS "unit;deobfuscator;security" TIMEOUT 30)
+
 add_executable(luraph_semantic_emitter_test
     deobfuscator/luraph/emit_test.cpp
     ${PROJECT_SOURCE_DIR}/src/deobfuscator/luraph/emit.cpp

@@ -122,9 +122,96 @@ const OperandLane& operandLane(const NormalizedInstruction& instruction, Normali
     return instruction.D;
 }
 
+bool checkedAdd(int64_t left, int64_t right, int64_t& result)
+{
+    if ((right > 0 && left > std::numeric_limits<int64_t>::max() - right) ||
+        (right < 0 && left < std::numeric_limits<int64_t>::min() - right))
+        return false;
+    result = left + right;
+    return true;
+}
+
+bool checkedSubtract(int64_t left, int64_t right, int64_t& result)
+{
+    if ((right > 0 && left < std::numeric_limits<int64_t>::min() + right) ||
+        (right < 0 && left > std::numeric_limits<int64_t>::max() + right))
+        return false;
+    result = left - right;
+    return true;
+}
+
+void recordResidue(
+    OperandResidueDiagnostics& diagnostics,
+    const OperandLane& lane,
+    size_t prototypeMetadataIndex,
+    size_t pc,
+    NormalizedOperandLane laneName)
+{
+    ++diagnostics.operand_lane_count;
+    if (lane.residue < diagnostics.counts.size())
+        ++diagnostics.counts[lane.residue];
+    if (lane.status == OperandLaneStatus::Valid)
+    {
+        ++diagnostics.valid_operand_lane_count;
+        return;
+    }
+
+    ++diagnostics.invalid_operand_lane_count;
+    if (!diagnostics.first_invalid_prototype_metadata_index)
+    {
+        diagnostics.first_invalid_prototype_metadata_index = prototypeMetadataIndex;
+        diagnostics.first_invalid_pc = pc;
+        diagnostics.first_invalid_lane = laneName;
+        diagnostics.first_invalid_residue = lane.residue;
+    }
+}
+
 } // namespace
 
-OperandLane normalizeLane(int64_t rawWord, size_t pc, size_t constantCount, size_t prototypeCount)
+InstructionSchemaSelection selectInstructionSchema(const ContainerAnalysis& container)
+{
+    InstructionSchemaSelection result;
+    result.lph_dollar_marker = container.marker == '$';
+    result.transport_validated = container.decode_status == ContainerDecodeStatus::Decoded;
+    result.structural_metadata_validated =
+        container.parse_status == ContainerParseStatus::StructuralMetadataRecovered;
+    result.static_graph_validated = container.prototype_graph_complete &&
+        container.root_selector_graph_validated && container.root_selector_in_bounds &&
+        container.root_metadata_index.has_value() &&
+        *container.root_metadata_index < container.prototypes.size() &&
+        container.prototype_count == container.prototypes.size() &&
+        container.root_selector == *container.root_metadata_index + 1;
+
+    if (!result.lph_dollar_marker)
+    {
+        result.schema = InstructionSchema::LegacyV147;
+        result.status = InstructionSchemaSelectionStatus::Selected;
+        result.diagnostic = "legacy v14.7 schema selected because the carrier is not LPH$";
+        return result;
+    }
+
+    result.schema = InstructionSchema::LuaAuthLphDollar;
+    if (!result.transport_validated || !result.structural_metadata_validated ||
+        !result.static_graph_validated)
+    {
+        result.status = InstructionSchemaSelectionStatus::InvalidEvidence;
+        result.diagnostic =
+            "LPH$ schema withheld because decoded transport, structural metadata, and a complete rooted static graph were not all validated";
+        return result;
+    }
+
+    result.status = InstructionSchemaSelectionStatus::Selected;
+    result.diagnostic =
+        "LuaAuth LPH$ schema selected from validated framing, structural metadata, and rooted static graph evidence";
+    return result;
+}
+
+OperandLane normalizeLane(
+    int64_t rawWord,
+    size_t pc,
+    size_t constantCount,
+    size_t prototypeCount,
+    InstructionSchema schema)
 {
     OperandLane lane;
     lane.raw_word = rawWord;
@@ -136,16 +223,73 @@ OperandLane normalizeLane(int64_t rawWord, size_t pc, size_t constantCount, size
     lane.quotient = (rawWord - residue) / 8;
     lane.base_value = lane.quotient;
 
-    if (lane.residue == 1)
-        lane.side_reference = reference(ReferenceKind::Constant, lane.quotient, constantCount);
-    else if (lane.residue == 3)
-        lane.side_reference = reference(ReferenceKind::Prototype, lane.quotient, prototypeCount);
-    else if (lane.residue == 5)
-        lane.base_value = static_cast<int64_t>(pc) - lane.quotient;
-    else if (lane.residue == 6)
-        lane.base_value = static_cast<int64_t>(pc) + lane.quotient;
+    if (schema == InstructionSchema::LegacyV147)
+    {
+        if (lane.residue == 1)
+            lane.side_reference = reference(ReferenceKind::Constant, lane.quotient, constantCount);
+        else if (lane.residue == 3)
+            lane.side_reference = reference(ReferenceKind::Prototype, lane.quotient, prototypeCount);
+        else if (lane.residue == 5)
+            lane.base_value = static_cast<int64_t>(pc) - lane.quotient;
+        else if (lane.residue == 6)
+            lane.base_value = static_cast<int64_t>(pc) + lane.quotient;
+        return lane;
+    }
+
+    if (lane.residue == 5 || lane.residue == 6)
+    {
+        lane.status = OperandLaneStatus::InvalidResidue;
+        return lane;
+    }
+    if (lane.residue != 3 && lane.residue != 4)
+        return lane;
+    if (pc > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+    {
+        lane.status = OperandLaneStatus::PcOutOfRange;
+        return lane;
+    }
+
+    const int64_t signedPc = static_cast<int64_t>(pc);
+    const bool valid = lane.residue == 3
+        ? checkedSubtract(signedPc, lane.quotient, lane.base_value)
+        : checkedAdd(signedPc, lane.quotient, lane.base_value);
+    if (!valid)
+        lane.status = OperandLaneStatus::ArithmeticOverflow;
 
     return lane;
+}
+
+OperandLane normalizeLane(int64_t rawWord, size_t pc, size_t constantCount, size_t prototypeCount)
+{
+    return normalizeLane(rawWord, pc, constantCount, prototypeCount, InstructionSchema::LegacyV147);
+}
+
+NormalizedInstruction normalizeInstruction(
+    const InstructionMetadata& instruction,
+    size_t constantCount,
+    size_t prototypeCount,
+    InstructionSchema schema)
+{
+    NormalizedInstruction result;
+    result.metadata_index = instruction.index;
+    result.pc = instruction.index + 1;
+    if (schema == InstructionSchema::LuaAuthLphDollar)
+    {
+        result.opcode = instruction.words[0].value;
+        result.D = normalizeLane(instruction.words[2].value, result.pc, constantCount, prototypeCount, schema);
+        result.G = normalizeLane(instruction.words[1].value, result.pc, constantCount, prototypeCount, schema);
+        result.p = normalizeLane(instruction.words[3].value, result.pc, constantCount, prototypeCount, schema);
+    }
+    else
+    {
+        result.opcode = instruction.words[2].value;
+        result.D = normalizeLane(instruction.words[0].value, result.pc, constantCount, prototypeCount, schema);
+        result.G = normalizeLane(instruction.words[1].value, result.pc, constantCount, prototypeCount, schema);
+        result.p = normalizeLane(instruction.words[3].value, result.pc, constantCount, prototypeCount, schema);
+    }
+    result.valid = result.D.status == OperandLaneStatus::Valid &&
+        result.G.status == OperandLaneStatus::Valid && result.p.status == OperandLaneStatus::Valid;
+    return result;
 }
 
 NormalizedInstruction normalizeInstruction(
@@ -153,21 +297,22 @@ NormalizedInstruction normalizeInstruction(
     size_t constantCount,
     size_t prototypeCount)
 {
-    NormalizedInstruction result;
-    result.metadata_index = instruction.index;
-    result.pc = instruction.index + 1;
-    result.opcode = instruction.words[2].value;
-    result.D = normalizeLane(instruction.words[0].value, result.pc, constantCount, prototypeCount);
-    result.G = normalizeLane(instruction.words[1].value, result.pc, constantCount, prototypeCount);
-    result.p = normalizeLane(instruction.words[3].value, result.pc, constantCount, prototypeCount);
-    return result;
+    return normalizeInstruction(
+        instruction, constantCount, prototypeCount, InstructionSchema::LegacyV147);
 }
 
 NormalizedContainer normalizeContainer(const ContainerAnalysis& container)
 {
     NormalizedContainer result;
+    result.schema_selection = selectInstructionSchema(container);
     result.constant_pool_mode = container.constant_pool_mode;
     result.root_wrapper_index = container.root_selector;
+    if (result.schema_selection.status != InstructionSchemaSelectionStatus::Selected)
+    {
+        result.residue_diagnostics.diagnostic =
+            "operand residues were not decoded because instruction schema evidence is invalid";
+        return result;
+    }
     if (container.root_selector >= 1 && container.root_selector <= container.prototypes.size())
     {
         result.root_metadata_index = static_cast<size_t>(container.root_selector - 1);
@@ -183,10 +328,20 @@ NormalizedContainer normalizeContainer(const ContainerAnalysis& container)
         normalized.register_capacity = prototype.final_value;
         normalized.instructions.reserve(prototype.instructions.size());
         for (const InstructionMetadata& instruction : prototype.instructions)
-            normalized.instructions.push_back(
-                normalizeInstruction(instruction, container.constants.size(), container.prototypes.size()));
+        {
+            NormalizedInstruction row = normalizeInstruction(instruction, container.constants.size(),
+                container.prototypes.size(), result.schema_selection.schema);
+            recordResidue(result.residue_diagnostics, row.D, prototype.index, row.pc, NormalizedOperandLane::D);
+            recordResidue(result.residue_diagnostics, row.G, prototype.index, row.pc, NormalizedOperandLane::G);
+            recordResidue(result.residue_diagnostics, row.p, prototype.index, row.pc, NormalizedOperandLane::p);
+            normalized.instructions.push_back(std::move(row));
+        }
         result.prototypes.push_back(std::move(normalized));
     }
+    result.valid = result.residue_diagnostics.invalid_operand_lane_count == 0;
+    result.residue_diagnostics.diagnostic = result.valid
+        ? "all operand residues are valid for the selected instruction schema"
+        : "one or more operand residues are invalid for the selected instruction schema";
     return result;
 }
 
@@ -405,6 +560,7 @@ uint64_t opcodeLaneFingerprintDigest(const std::vector<InstructionShape>& instru
 StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& container)
 {
     StaticPrototypeIndex result;
+    result.schema_selection = selectInstructionSchema(container);
     const auto fail = [&](std::string diagnostic) {
         result.valid = false;
         result.prototypes.clear();
@@ -412,6 +568,9 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
         result.diagnostic = std::move(diagnostic);
         return result;
     };
+
+    if (result.schema_selection.status != InstructionSchemaSelectionStatus::Selected)
+        return fail(result.schema_selection.diagnostic);
 
     if (container.prototype_count != container.prototypes.size() || container.prototypes.empty())
         return fail("static prototype count is inconsistent");
@@ -432,6 +591,13 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
 
     if (container.invalid_prototype_reference_count != 0 || container.invalid_capture_descriptor_count != 0)
         return fail("static graph contains an invalid reference or capture descriptor");
+
+    const NormalizedContainer normalizedContainer = normalizeContainer(container);
+    result.residue_diagnostics = normalizedContainer.residue_diagnostics;
+    if (!normalizedContainer.valid || normalizedContainer.prototypes.size() != container.prototypes.size())
+        return fail(normalizedContainer.residue_diagnostics.diagnostic.empty()
+                ? "static instructions are invalid for the selected instruction schema"
+                : normalizedContainer.residue_diagnostics.diagnostic);
 
     std::vector<std::vector<StaticPrototypeShape::ClosureEdge>> closureEdges(prototypeCount);
     std::vector<std::optional<size_t>> parentClosurePc(prototypeCount);
@@ -530,6 +696,7 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
     for (size_t index = 0; index < prototypeCount; ++index)
     {
         const PrototypeMetadata& prototype = container.prototypes[index];
+        const NormalizedPrototype& normalizedPrototype = normalizedContainer.prototypes[index];
         StaticPrototypeShape row;
         row.metadata_index = index;
         row.wrapper_index = index + 1;
@@ -542,10 +709,9 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
 
         row.fingerprint.is_root = index == *container.root_metadata_index;
         row.fingerprint.instruction_count = prototype.instruction_count;
-        row.fingerprint.opcode_lanes.reserve(prototype.instructions.size());
-        for (const InstructionMetadata& instruction : prototype.instructions)
-            row.fingerprint.opcode_lanes.push_back(instructionShape(normalizeInstruction(
-                instruction, container.constants.size(), container.prototypes.size())));
+        row.fingerprint.opcode_lanes.reserve(normalizedPrototype.instructions.size());
+        for (const NormalizedInstruction& instruction : normalizedPrototype.instructions)
+            row.fingerprint.opcode_lanes.push_back(instructionShape(instruction));
         row.fingerprint.opcode_lane_digest = opcodeLaneFingerprintDigest(row.fingerprint.opcode_lanes);
         bool capturesValid = true;
         row.fingerprint.captures = captureShape(prototype, capturesValid);
@@ -948,6 +1114,38 @@ const char* toString(ReferenceKind kind)
     case ReferenceKind::None: return "none";
     case ReferenceKind::Constant: return "constant";
     case ReferenceKind::Prototype: return "prototype";
+    }
+    return "unknown";
+}
+
+const char* toString(InstructionSchema schema)
+{
+    switch (schema)
+    {
+    case InstructionSchema::LegacyV147: return "legacy_v14_7";
+    case InstructionSchema::LuaAuthLphDollar: return "luaauth_lph_dollar";
+    }
+    return "unknown";
+}
+
+const char* toString(InstructionSchemaSelectionStatus status)
+{
+    switch (status)
+    {
+    case InstructionSchemaSelectionStatus::Selected: return "selected";
+    case InstructionSchemaSelectionStatus::InvalidEvidence: return "invalid_evidence";
+    }
+    return "unknown";
+}
+
+const char* toString(OperandLaneStatus status)
+{
+    switch (status)
+    {
+    case OperandLaneStatus::Valid: return "valid";
+    case OperandLaneStatus::InvalidResidue: return "invalid_residue";
+    case OperandLaneStatus::PcOutOfRange: return "pc_out_of_range";
+    case OperandLaneStatus::ArithmeticOverflow: return "arithmetic_overflow";
     }
     return "unknown";
 }
