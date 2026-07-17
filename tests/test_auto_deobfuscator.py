@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 
@@ -47,6 +49,21 @@ def main() -> int:
     parser.add_argument("--runtime", type=pathlib.Path, default=ROOT / "build" / "rbx_luau_runtime")
     parser.add_argument("--alexfuscator", type=pathlib.Path, default=ROOT / "build" / "alexfuscator")
     args = parser.parse_args()
+
+    spec = importlib.util.spec_from_file_location("alex_auto_deobfuscator_under_test", args.tool)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not import deobfuscator: {args.tool}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    luaauth_fixture = (
+        "la_code=123;la_script_id='sanitized'\n"
+        "-- luaauth.com\n"
+        "return({payload='LPH$abc'}):O()()\n"
+    )
+    adapter, scores = module.detect_adapter(luaauth_fixture)
+    if adapter != "luraph" or not any(row.get("adapter") == "luraph" and row.get("score", 0) > 0 for row in scores):
+        raise RuntimeError(f"LuaAuth LPH$ source was not routed to the native Luraph adapter: {adapter} {scores}")
 
     with tempfile.TemporaryDirectory(prefix="alex-auto-deobf-test-") as temporary:
         root = pathlib.Path(temporary)
@@ -116,7 +133,7 @@ def main() -> int:
         if any(report.get("network_policy") != "offline" for report in (exact, reconstructed, packed)):
             raise RuntimeError("automatic deobfuscation did not default to offline networking")
 
-    print("Auto deobfuscator OK: exact gate, reconstruction, disassembly, blocked mode, artifact graph, offline runtime")
+    print("Auto deobfuscator OK: LPH$ routing, exact gate, reconstruction, disassembly, blocked mode, artifact graph, offline runtime")
     return 0
 
 

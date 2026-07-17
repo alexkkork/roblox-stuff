@@ -291,7 +291,7 @@ class AutoDeobfuscator:
         trace_path = run_dir / "compat_trace.jsonl"
         source_path.write_text(text, encoding="utf-8")
         command = [
-            str(self.args.runtime), "--profile", self.args.profile, "--clock", "virtual",
+            str(self.args.runtime), "--profile", self.args.profile, "--execution-mode", "diagnostic", "--clock", "virtual",
             "--max-virtual-seconds", str(self.args.max_virtual_seconds), "--unsupported", "trace-nil",
             "--network-policy", self.args.network, "--timeout", str(self.args.wall_timeout),
             "--capture-min", "1", "--capture-string-hooks", "--luraph-mode", "auto",

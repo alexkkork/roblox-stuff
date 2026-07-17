@@ -8828,7 +8828,7 @@ std::map<int64_t, LuraphObservationalOpcodeRule> inferLuraphObservationalOpcodeR
                     localDescriptorLanes.insert(structuralLane);
                 for (auto lane = lanes.begin(); lane != lanes.end(); ++lane)
                     if (const std::optional<int64_t> value = luraphObservedInteger(lane.value());
-                        value && *value > 0 && *value != destination)
+                        value && *value > 0)
                         localTargetLanes.insert(lane.key());
             }
             intersectLuraphEvidence(closureDescriptorLaneCandidates, std::move(localDescriptorLanes));
@@ -8840,6 +8840,8 @@ std::map<int64_t, LuraphObservationalOpcodeRule> inferLuraphObservationalOpcodeR
         rule.write_observations = writeObservations;
         rule.unchanged_observations = unchangedObservations;
         rule.sites = sites.size();
+        if (destinationCandidates && destinationCandidates->size() == 1 && closureTargetLaneCandidates)
+            closureTargetLaneCandidates->erase(*destinationCandidates->begin());
         if (closureValid && destinationCandidates && destinationCandidates->size() == 1 &&
             closureDescriptorLaneCandidates && closureDescriptorLaneCandidates->size() == 1 &&
             closureTargetLaneCandidates && closureTargetLaneCandidates->size() == 1 && sites.size() >= 2)
@@ -13665,7 +13667,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeObservedInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_declared_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"static_container_instruction_records", retainedInstructions},
             {"unresolved_operations", runtimeDecoded
@@ -13718,7 +13721,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeObservedInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_declared_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"unresolved_operations", runtimeDecoded
                 ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(nullptr)},

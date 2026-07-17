@@ -877,6 +877,10 @@ void inspectReaderMetadata(
             false,
             observation.first_range,
             observation.definition_range,
+            ReaderEvidenceKind::IdentifierHint,
+            std::nullopt,
+            false,
+            0,
         });
     }
     result.static_decode.reader_metadata_count = result.readers.size();
@@ -1824,9 +1828,12 @@ struct UlebValue
 class ContainerCursor
 {
 public:
-    explicit ContainerCursor(const std::vector<unsigned char>& data)
+    explicit ContainerCursor(const std::vector<unsigned char>& data, size_t offset = 0)
         : data(data)
+        , position(std::min(offset, data.size()))
     {
+        if (offset > data.size())
+            fail(CursorError::Truncated, data.size());
     }
 
     [[nodiscard]] size_t offset() const
@@ -2248,6 +2255,286 @@ bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnaly
     return true;
 }
 
+bool parseLphDollarPrototypeSection(
+    const std::vector<unsigned char>& bytes,
+    size_t sectionBegin,
+    uint64_t prototypeCountBias,
+    uint64_t instructionCountBias,
+    ContainerAnalysis& analysis,
+    const AnalysisLimits& limits,
+    bool retainRecords)
+{
+    ContainerCursor cursor(bytes, sectionBegin);
+    UlebValue prototypeCount;
+    if (!cursor.readUleb(prototypeCount))
+        return setCursorFailure(analysis, cursor);
+    analysis.prototype_count_span = prototypeCount.span;
+    if (!decodeBiasedCount(prototypeCount, prototypeCountBias, limits.max_container_prototypes, analysis.prototype_count, analysis) ||
+        analysis.prototype_count == 0)
+        return false;
+
+    if (retainRecords)
+        analysis.prototypes.reserve(analysis.prototype_count);
+    const size_t prototypesBegin = cursor.offset();
+    size_t rangeMapCount = 0;
+    for (size_t index = 0; index < analysis.prototype_count; ++index)
+    {
+        PrototypeMetadata prototype;
+        prototype.index = index;
+        const size_t recordBegin = cursor.offset();
+
+        UlebValue descriptorCount;
+        if (!cursor.readUleb(descriptorCount))
+            return setCursorFailure(analysis, cursor);
+        prototype.descriptor_count_span = descriptorCount.span;
+        if (descriptorCount.value > limits.max_container_descriptors - analysis.descriptor_count)
+        {
+            analysis.parse_status = ContainerParseStatus::CountLimitExceeded;
+            analysis.parse_error_offset = descriptorCount.span.begin;
+            return false;
+        }
+        prototype.descriptor_count = static_cast<size_t>(descriptorCount.value);
+        if (retainRecords)
+            prototype.descriptors.reserve(prototype.descriptor_count);
+        const size_t descriptorsBegin = cursor.offset();
+        for (size_t descriptor = 0; descriptor < prototype.descriptor_count; ++descriptor)
+        {
+            UlebValue raw;
+            if (!cursor.readUleb(raw))
+                return setCursorFailure(analysis, cursor);
+            if (retainRecords)
+            {
+                prototype.descriptors.push_back(DescriptorMetadata{
+                    descriptor,
+                    raw.value,
+                    static_cast<unsigned int>(raw.value % 4u),
+                    raw.value / 4u,
+                    raw.span,
+                });
+            }
+        }
+        prototype.descriptors_span = ByteSpan{descriptorsBegin, cursor.offset()};
+        analysis.descriptor_count += prototype.descriptor_count;
+
+        UlebValue meta;
+        UlebValue secondaryMeta;
+        if (!cursor.readUleb(meta) || !cursor.readUleb(secondaryMeta))
+            return setCursorFailure(analysis, cursor);
+        prototype.meta = meta.value;
+        prototype.meta_span = meta.span;
+        prototype.secondary_meta = secondaryMeta.value;
+        prototype.secondary_meta_span = secondaryMeta.span;
+
+        uint64_t rawRangeMapCount = 0;
+        if (!cursor.readUnsignedLittle(4, rawRangeMapCount, prototype.range_map_count_span))
+            return setCursorFailure(analysis, cursor);
+        if (rawRangeMapCount > limits.max_container_descriptors - rangeMapCount)
+        {
+            analysis.parse_status = ContainerParseStatus::CountLimitExceeded;
+            analysis.parse_error_offset = prototype.range_map_count_span.begin;
+            return false;
+        }
+        prototype.range_map_count = static_cast<size_t>(rawRangeMapCount);
+        rangeMapCount += prototype.range_map_count;
+        const size_t rangeMapBegin = cursor.offset();
+        for (size_t range = 0; range < prototype.range_map_count; ++range)
+        {
+            uint64_t marker = 0;
+            ByteSpan ignored;
+            if (!cursor.readUnsignedLittle(4, marker, ignored))
+                return setCursorFailure(analysis, cursor);
+            if ((marker & 1u) != 0)
+            {
+                uint64_t first = 0;
+                uint64_t second = 0;
+                if (!cursor.readUnsignedLittle(4, first, ignored) || !cursor.readUnsignedLittle(4, second, ignored))
+                    return setCursorFailure(analysis, cursor);
+            }
+        }
+        prototype.range_map_span = ByteSpan{rangeMapBegin, cursor.offset()};
+
+        UlebValue instructionCount;
+        if (!cursor.readUleb(instructionCount))
+            return setCursorFailure(analysis, cursor);
+        prototype.instruction_count_span = instructionCount.span;
+        const size_t remainingInstructionLimit = limits.max_container_instructions - analysis.instruction_count;
+        if (!decodeBiasedCount(instructionCount, instructionCountBias, remainingInstructionLimit, prototype.instruction_count, analysis))
+            return false;
+        if (retainRecords)
+            prototype.instructions.reserve(prototype.instruction_count);
+        const size_t instructionWordsBegin = cursor.offset();
+        for (size_t instruction = 0; instruction < prototype.instruction_count; ++instruction)
+        {
+            InstructionMetadata metadata;
+            metadata.index = instruction;
+            const size_t instructionBegin = cursor.offset();
+            for (size_t word = 0; word < metadata.words.size(); ++word)
+            {
+                int64_t value = 0;
+                ByteSpan span;
+                if (!cursor.readSignedFold(value, span))
+                    return setCursorFailure(analysis, cursor);
+                // The first signed-fold lane is the serialized opcode byte. This
+                // is a framing invariant; no randomized opcode meaning is assigned.
+                if (word == 0 && (value < 0 || value > 255))
+                    return false;
+                if (retainRecords)
+                    metadata.words[word] = InstructionWordMetadata{value, span};
+            }
+            metadata.span = ByteSpan{instructionBegin, cursor.offset()};
+            if (retainRecords)
+                prototype.instructions.push_back(std::move(metadata));
+        }
+        prototype.instruction_words_span = ByteSpan{instructionWordsBegin, cursor.offset()};
+        analysis.instruction_count += prototype.instruction_count;
+        prototype.span = ByteSpan{recordBegin, cursor.offset()};
+        if (retainRecords)
+            analysis.prototypes.push_back(std::move(prototype));
+    }
+    analysis.prototypes_span = ByteSpan{prototypesBegin, cursor.offset()};
+
+    UlebValue rootSelector;
+    if (!cursor.readUleb(rootSelector))
+        return setCursorFailure(analysis, cursor);
+    if (rootSelector.value == 0 || rootSelector.value > analysis.prototype_count)
+        return false;
+    analysis.root_selector = rootSelector.value;
+    analysis.root_selector_span = rootSelector.span;
+    analysis.trailer_span = ByteSpan{cursor.offset(), bytes.size()};
+    if (cursor.remaining() > limits.max_preserved_trailer_bytes)
+    {
+        analysis.parse_status = ContainerParseStatus::TrailerLimitExceeded;
+        analysis.parse_error_offset = cursor.offset();
+        return false;
+    }
+    if (retainRecords)
+        analysis.trailer_bytes.assign(bytes.begin() + static_cast<std::ptrdiff_t>(cursor.offset()), bytes.end());
+    analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
+    return true;
+}
+
+bool parseLphDollarStructure(
+    const std::vector<unsigned char>& bytes,
+    ContainerAnalysis& analysis,
+    LphDollarSchemaMetadata& schema,
+    const AnalysisLimits& limits)
+{
+    std::vector<uint64_t> biases;
+    for (const RecordLaneMetadata& lane : schema.record_lanes)
+    {
+        if (!lane.numeric_bias || std::find(biases.begin(), biases.end(), *lane.numeric_bias) != biases.end())
+            continue;
+        biases.push_back(*lane.numeric_bias);
+    }
+    // The supported deserializer has one independently observed bias for each
+    // count lane. More candidates are bounded rather than interpreted freely.
+    if (biases.size() < 3 || biases.size() > 8)
+        return false;
+
+    ContainerCursor header(bytes);
+    UlebValue rawConstantCount;
+    if (!header.readUleb(rawConstantCount))
+        return false;
+    unsigned char poolMode = 0;
+    ByteSpan poolModeSpan;
+    if (!header.readByte(poolMode, poolModeSpan))
+        return false;
+    const size_t constantsBegin = header.offset();
+
+    for (size_t constantBiasIndex = 0; constantBiasIndex < biases.size(); ++constantBiasIndex)
+    {
+        const uint64_t constantBias = biases[constantBiasIndex];
+        if (rawConstantCount.value < constantBias || rawConstantCount.value - constantBias > limits.max_container_constants)
+            continue;
+        const size_t constantCount = static_cast<size_t>(rawConstantCount.value - constantBias);
+        if (constantCount > bytes.size() - constantsBegin)
+            continue;
+        const size_t earliestPrototypeSection = constantsBegin + constantCount;
+
+        // The wrapper reads constants before prototypes. Search for the first
+        // section after the minimum one-byte-per-record envelope that validates
+        // every prototype, instruction lane, and one-based root selector.
+        for (size_t sectionBegin = earliestPrototypeSection; sectionBegin < bytes.size(); ++sectionBegin)
+        {
+            for (size_t prototypeBiasIndex = 0; prototypeBiasIndex < biases.size(); ++prototypeBiasIndex)
+            {
+                if (prototypeBiasIndex == constantBiasIndex)
+                    continue;
+                for (size_t instructionBiasIndex = 0; instructionBiasIndex < biases.size(); ++instructionBiasIndex)
+                {
+                    if (instructionBiasIndex == constantBiasIndex || instructionBiasIndex == prototypeBiasIndex)
+                        continue;
+                    ContainerAnalysis validation;
+                    if (!parseLphDollarPrototypeSection(bytes, sectionBegin, biases[prototypeBiasIndex], biases[instructionBiasIndex],
+                            validation, limits, false))
+                        continue;
+
+                    ContainerAnalysis retained;
+                    if (!parseLphDollarPrototypeSection(bytes, sectionBegin, biases[prototypeBiasIndex], biases[instructionBiasIndex],
+                            retained, limits, true))
+                        return false;
+                    analysis.constant_count = constantCount;
+                    analysis.constant_count_span = rawConstantCount.span;
+                    analysis.constant_pool_mode = poolMode;
+                    analysis.constant_pool_mode_span = poolModeSpan;
+                    analysis.constants_span = ByteSpan{constantsBegin, sectionBegin};
+                    analysis.prototype_count = retained.prototype_count;
+                    analysis.prototype_count_span = retained.prototype_count_span;
+                    analysis.prototypes_span = retained.prototypes_span;
+                    analysis.instruction_count = retained.instruction_count;
+                    analysis.descriptor_count = retained.descriptor_count;
+                    analysis.root_selector = retained.root_selector;
+                    analysis.root_selector_span = retained.root_selector_span;
+                    analysis.trailer_span = retained.trailer_span;
+                    analysis.prototypes = std::move(retained.prototypes);
+                    analysis.trailer_bytes = std::move(retained.trailer_bytes);
+                    analysis.randomized_tag_semantics = true;
+                    analysis.tag_semantic_mapping_recovered = false;
+                    analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
+
+                    for (RecordLaneMetadata& lane : schema.record_lanes)
+                    {
+                        if (!lane.numeric_bias)
+                            continue;
+                        if (*lane.numeric_bias == constantBias)
+                        {
+                            lane.kind = RecordLaneKind::ConstantCount;
+                            lane.semantics_known = true;
+                        }
+                        else if (*lane.numeric_bias == biases[prototypeBiasIndex])
+                        {
+                            lane.kind = RecordLaneKind::PrototypeCount;
+                            lane.semantics_known = true;
+                        }
+                        else if (*lane.numeric_bias == biases[instructionBiasIndex])
+                        {
+                            lane.kind = RecordLaneKind::InstructionCount;
+                            lane.semantics_known = true;
+                        }
+                    }
+                    const SourceRange prototypeEvidence = schema.root.evidence_range;
+                    size_t laneOrder = schema.record_lanes.size();
+                    const auto addLane = [&](RecordLaneKind kind, bool repeated) {
+                        schema.record_lanes.push_back(RecordLaneMetadata{
+                            kind, laneOrder++, schema.variable_integer_reader_slot, std::nullopt, repeated, true, prototypeEvidence});
+                    };
+                    addLane(RecordLaneKind::DescriptorCount, true);
+                    addLane(RecordLaneKind::DescriptorRecord, true);
+                    addLane(RecordLaneKind::PrototypeMetadata, true);
+                    schema.record_lanes.push_back(RecordLaneMetadata{
+                        RecordLaneKind::RangeMapCount, laneOrder++, std::nullopt, std::nullopt, true, true, prototypeEvidence});
+                    schema.record_lanes.push_back(RecordLaneMetadata{
+                        RecordLaneKind::RangeMapRecord, laneOrder++, std::nullopt, std::nullopt, true, true, prototypeEvidence});
+                    addLane(RecordLaneKind::InstructionWords, true);
+                    schema.root.selector_value_known = true;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 struct Radix85DecodeResult
 {
     ContainerDecodeStatus status = ContainerDecodeStatus::NotAttempted;
@@ -2473,17 +2760,27 @@ std::optional<size_t> inspectLphContainer(
 
         if (decoded.marker == '$')
         {
-            if (result.lph_dollar_schema.detected)
+            if (result.lph_dollar_schema.detected &&
+                parseLphDollarStructure(decoded.bytes, analysis, result.lph_dollar_schema, limits))
             {
-                analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
+                ++result.container_metrics.structural_count;
+                result.container_metrics.constant_count += analysis.constant_count;
+                result.container_metrics.prototype_count += analysis.prototype_count;
+                result.container_metrics.instruction_count += analysis.instruction_count;
+                result.container_metrics.descriptor_count += analysis.descriptor_count;
+                result.container_metrics.trailer_bytes += analysis.trailer_bytes.size();
                 addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED",
-                    "The LPH$ transport and deserializer structure were recovered; byte records remain unparsed until randomized tag meanings are proven.");
+                    "Parsed the biased LPH$ count lanes, prototype records, instruction words, and one-based root selector; randomized constant and opcode meanings remain opaque.");
+                addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE",
+                    "Delimited the complete constant-record region without assigning randomized tag values to Lua types.");
             }
             else
             {
                 analysis.parse_status = ContainerParseStatus::UnsupportedSchema;
                 addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LPH_DOLLAR_SCHEMA_UNSUPPORTED",
-                    "The LPH$ container bytes were recovered exactly, but its randomized record schema was not structurally verified.");
+                    result.lph_dollar_schema.detected
+                        ? "The LPH$ reader schema was recovered, but no bounded prototype/root framing candidate validated against the decoded carrier."
+                        : "The LPH$ container bytes were recovered exactly, but its randomized record schema was not structurally verified.");
             }
         }
         else if (parseContainerBytes(decoded.bytes, analysis, limits))
@@ -2713,7 +3010,7 @@ void inferStages(EnvelopeAnalysis& result)
         addStage(result, StageKind::EncodedPayload, 0.94,
             result.container_metrics.parsed_count > 0
                 ? "Strict LPH& framing and bounded container records were decoded; VM semantics remain opaque."
-                : result.lph_dollar_schema.detected && result.container_metrics.decoded_count > 0
+                : result.container_metrics.structural_count > 0
                 ? "LPH$ transport, reader bindings, record lanes, and root selection were recovered; randomized tag meanings remain opaque."
                 : result.container_metrics.decoded_count > 0
                 ? "LPH container bytes were decoded exactly; its version-specific record schema remains opaque."
@@ -2910,7 +3207,7 @@ EnvelopeAnalysis analyzeEnvelope(std::string_view source, const AnalysisLimits& 
     {
         result.family_kind = FamilyKind::LuaAuthLphDollar;
         result.version_supported = true; // Legacy adapter-capability flag used by the runtime probe pipeline.
-        result.support_level = result.lph_dollar_schema.detected
+        result.support_level = result.container_metrics.structural_count > 0
             ? SupportLevel::StructuralSchemaRecovered : SupportLevel::TransportDecoded;
     }
     else if (decodedAmpersandCarrier && result.banner.version == "14.7")
@@ -3140,6 +3437,13 @@ std::string_view toString(RecordLaneKind kind)
     case RecordLaneKind::ConstantPayload: return "constant_payload";
     case RecordLaneKind::PrototypeCount: return "prototype_count";
     case RecordLaneKind::PrototypeRecord: return "prototype_record";
+    case RecordLaneKind::DescriptorCount: return "descriptor_count";
+    case RecordLaneKind::DescriptorRecord: return "descriptor_record";
+    case RecordLaneKind::PrototypeMetadata: return "prototype_metadata";
+    case RecordLaneKind::RangeMapCount: return "range_map_count";
+    case RecordLaneKind::RangeMapRecord: return "range_map_record";
+    case RecordLaneKind::InstructionCount: return "instruction_count";
+    case RecordLaneKind::InstructionWords: return "instruction_words";
     case RecordLaneKind::RelocationTriple: return "relocation_triple";
     case RecordLaneKind::RootSelector: return "root_selector";
     }
@@ -3150,6 +3454,7 @@ std::string_view toString(ConstantKind kind)
 {
     switch (kind)
     {
+    case ConstantKind::Opaque: return "opaque";
     case ConstantKind::String: return "string";
     case ConstantKind::Integer: return "integer";
     case ConstantKind::Boolean: return "boolean";

@@ -142,6 +142,13 @@ enum class RecordLaneKind
     ConstantPayload,
     PrototypeCount,
     PrototypeRecord,
+    DescriptorCount,
+    DescriptorRecord,
+    PrototypeMetadata,
+    RangeMapCount,
+    RangeMapRecord,
+    InstructionCount,
+    InstructionWords,
     RelocationTriple,
     RootSelector,
 };
