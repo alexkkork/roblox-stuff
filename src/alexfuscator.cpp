@@ -1719,11 +1719,6 @@ bool v6IsLoadConstant(V6Op op)
     return op == V6Op::LoadConstant || op == V6Op::LoadConstantAlt;
 }
 
-bool v6IsJump(V6Op op)
-{
-    return op == V6Op::Jump || op == V6Op::JumpFalse || op == V6Op::JumpFalseAlt || op == V6Op::JumpTrue || op == V6Op::JumpNil;
-}
-
 bool v6IsTerminator(V6Op op)
 {
     return v6OpInfo(op).terminator;
@@ -5107,7 +5102,7 @@ std::optional<VmEmitResult> tryEmitRegisterVmV6(std::string_view source, const C
         out << "    " << vCompat << "[" << hiddenCompat("setfenv") << "]=function(target,globals) local meta=" << vMetadata << "[target]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("setfenv") << ",target,globals) end; meta.g=globals; return target end\n";
         out << "    " << vCompat << "[" << hiddenCompat("newlclosure") << "]=function(fn) return fn end; " << vCompat << "[" << hiddenCompat("newcclosure") << "]=function(fn) return function(...) return fn(...) end end\n";
         out << "    local " << vSyntheticHash << "=function(fn) local meta=" << vMetadata << "[fn]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("getfunctionhash") << ",fn) end; local value=(meta.proto.id*2654435761+#meta.proto.b*131+#meta.proto.cm*17)%4294967296; return string.format('%08x%08x',value,(value*1103515245+12345)%4294967296) end\n";
-        out << "    " << vCompat << "[" << hiddenCompat("getfunctionhash") << "]=" << vSyntheticHash << "; " << vCompat << "[" << hiddenCompat("getfunctionbytecode") << "]=function(fn) local meta=" << vMetadata << "[fn]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("getfunctionbytecode") << ",fn) end; return string.char(27).." << hiddenCompat("LUAUVM5:") << "..tostring(meta.proto.id)..':'.." << vSyntheticHash << "(fn) end\n";
+        out << "    " << vCompat << "[" << hiddenCompat("getfunctionhash") << "]=" << vSyntheticHash << "; " << vCompat << "[" << hiddenCompat("getfunctionbytecode") << "]=function(fn) local meta=" << vMetadata << "[fn]; if not meta then return " << vNativeCompat << "(" << hiddenCompat("getfunctionbytecode") << ",fn) end; return string.char(27).." << hiddenCompat("ALEXVM6:") << "..tostring(meta.proto.id)..':'.." << vSyntheticHash << "(fn) end\n";
         const std::vector<std::pair<std::string_view, std::string_view>> v6CompatAliases = {
             {"getinfo", "getinfo"}, {"getfuncinfo", "getinfo"}, {"getfunctioninfo", "getinfo"}, {"getconstants", "getconstants"}, {"getconsts", "getconstants"},
             {"getconstant", "getconstant"}, {"getconst", "getconstant"}, {"setconstant", "setconstant"}, {"setconst", "setconstant"}, {"setconsts", "setconstant"},

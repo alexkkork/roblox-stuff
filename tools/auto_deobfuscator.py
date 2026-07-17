@@ -96,7 +96,7 @@ def detect_adapter(source: str) -> tuple[str, list[dict[str, Any]]]:
         "wynfuscate": sum(token in lower for token in ("wynfuscate", "local md=", "local md =", "keytxt_auth")),
         "moonveil": sum(token in lower for token in ("moonveil", "mv2", "ascii85", "z85")),
         "wearedevs": sum(token in lower for token in ("wearedevs.net/obfuscator", "wearedevs", "return(function(...)")),
-        "alexfuscator": sum(token in lower for token in ("alexfuscator", "luauvm5:", "register vm v5")),
+        "alexfuscator": sum(token in lower for token in ("alexfuscator", "alexvm6:", "luauvm5:", "register vm v5")),
     }
     ranked = sorted(({"adapter": name, "score": score} for name, score in scores.items()), key=lambda item: (-item["score"], item["adapter"]))
     selected = ranked[0]["adapter"] if ranked and ranked[0]["score"] > 0 else "generic"

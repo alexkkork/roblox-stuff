@@ -601,6 +601,26 @@ if(TARGET alexfuscator AND TARGET rbx_luau_runtime)
         --alexfuscator "$<TARGET_FILE:alexfuscator>"
         --runtime "$<TARGET_FILE:rbx_luau_runtime>"
     )
+
+    rbx_add_python_test(
+        alexfuscator_semantic_corpus
+        "conformance;alexfuscator"
+        3600
+        run_vnext_differential.py
+        --programs 500
+        --alexfuscator "$<TARGET_FILE:alexfuscator>"
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
+
+    rbx_add_python_test(
+        alexfuscator_vm6_structure
+        "conformance;security;alexfuscator"
+        900
+        test_alexfuscator_v5.py
+        --seeds 100
+        --alexfuscator "$<TARGET_FILE:alexfuscator>"
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
 endif()
 
 rbx_find_host_program(NPM_EXECUTABLE npm npm.cmd)

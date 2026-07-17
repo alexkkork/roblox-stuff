@@ -168,6 +168,29 @@ def main():
         if fixed_a.read_bytes() != fixed_b.read_bytes():
             raise RuntimeError("fixed Alex seed was not byte-identical")
 
+        folded_source = temporary / "folded.alex"
+        folded_source.write_text(
+            'let value = 2 + 3\n'
+            'if false { print("never") }\n'
+            'print("folded", value)\n',
+            encoding="utf-8",
+        )
+        folded_output = temporary / "folded.luau"
+        folded_report = temporary / "folded.json"
+        folded = compile_source(
+            args.alexfuscator, folded_source, folded_output, folded_report,
+            "compatibility", 31337,
+        )
+        if folded.get("constant_fold_count", 0) < 1:
+            raise RuntimeError(f"constant propagation did not report a change: {folded}")
+        if folded.get("branch_fold_count", 0) < 1:
+            raise RuntimeError(f"branch folding did not report a change: {folded}")
+        if folded.get("unreachable_instruction_count", 0) < 1:
+            raise RuntimeError(f"unreachable-code pruning did not report a change: {folded}")
+        folded_stdout = observe(args.runtime, folded_output, temporary, "folded").get("stdout", "")
+        if "folded\t5" not in folded_stdout or "never" in folded_stdout:
+            raise RuntimeError(f"optimized Alex artifact changed behavior: {folded_stdout!r}")
+
         invalid = temporary / "invalid.alex"
         invalid.write_text("let = 3\n", encoding="utf-8")
         failed = run([str(args.alexfuscator), str(invalid), "-o", str(temporary / "invalid.luau"), "--diagnostics-json"], check=False)
