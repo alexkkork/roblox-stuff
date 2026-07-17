@@ -2037,52 +2037,136 @@ bool decodeBiasedCount(
     return true;
 }
 
-void finalizeStaticPrototypeReferences(ContainerAnalysis& analysis)
+void finalizeRootSelector(ContainerAnalysis& analysis)
 {
     analysis.root_selector_in_bounds = analysis.root_selector >= 1 && analysis.root_selector <= analysis.prototypes.size();
     analysis.root_metadata_index = analysis.root_selector_in_bounds
         ? std::optional<size_t>(static_cast<size_t>(analysis.root_selector - 1))
         : std::nullopt;
+}
 
+void finalizeLphDollarPrototypeGraph(ContainerAnalysis& analysis)
+{
+    finalizeRootSelector(analysis);
+    analysis.prototype_reference_count = 0;
+    analysis.valid_prototype_reference_count = 0;
+    analysis.invalid_prototype_reference_count = 0;
     analysis.closure_target_count = 0;
-    analysis.valid_closure_target_count = 0;
-    analysis.invalid_closure_target_count = 0;
-    constexpr std::array<size_t, 3> operandWords = {0, 1, 3};
+    analysis.generic_prototype_reference_count = 0;
+    analysis.prototypes_with_capture_descriptors = 0;
+    analysis.validated_capture_descriptor_count = 0;
+    analysis.invalid_capture_descriptor_count = 0;
+    analysis.prototype_graph_complete = false;
+    analysis.root_selector_graph_validated = false;
+    std::vector<size_t> incoming(analysis.prototypes.size());
+    std::vector<std::vector<size_t>> edges(analysis.prototypes.size());
+
     for (PrototypeMetadata& prototype : analysis.prototypes)
     {
-        prototype.closure_targets.clear();
+        prototype.register_capacity = prototype.secondary_meta;
+        prototype.register_capacity_verified = true;
+        prototype.prototype_references.clear();
+        prototype.incoming_prototype_reference_count = 0;
+        prototype.parent_prototype_index.reset();
+        analysis.prototypes_with_capture_descriptors += prototype.descriptors.empty() ? 0 : 1;
         for (const InstructionMetadata& instruction : prototype.instructions)
         {
-            for (size_t wordIndex : operandWords)
-            {
-                const InstructionWordMetadata& word = instruction.words[wordIndex];
-                int64_t residue = word.value % 8;
-                if (residue < 0)
-                    residue += 8;
-                if (residue != 3)
-                    continue;
+            const InstructionWordMetadata& word = instruction.words[2];
+            int64_t residue = word.value % 8;
+            if (residue < 0)
+                residue += 8;
+            if (residue != 1)
+                continue;
 
-                const int64_t wrapperIndex = (word.value - residue) / 8;
-                const bool inBounds = wrapperIndex >= 1 &&
-                    static_cast<uint64_t>(wrapperIndex) <= analysis.prototypes.size();
-                ClosureTargetMetadata target;
-                target.instruction_index = instruction.index;
-                target.operand_word_index = wordIndex;
-                target.raw_operand = word.value;
-                target.wrapper_index = wrapperIndex;
-                target.in_bounds = inBounds;
-                target.span = word.span;
-                if (inBounds)
-                {
-                    target.metadata_index = static_cast<size_t>(wrapperIndex - 1);
-                    target.capture_descriptor_count = analysis.prototypes[*target.metadata_index].descriptors.size();
-                    ++analysis.valid_closure_target_count;
-                }
-                else
-                    ++analysis.invalid_closure_target_count;
-                prototype.closure_targets.push_back(std::move(target));
-                ++analysis.closure_target_count;
+            const int64_t wrapperIndex = (word.value - residue) / 8;
+            const bool inBounds = wrapperIndex >= 1 &&
+                static_cast<uint64_t>(wrapperIndex) <= analysis.prototypes.size();
+            PrototypeReferenceMetadata target;
+            target.instruction_index = instruction.index;
+            target.operand_word_index = 2;
+            target.raw_operand = word.value;
+            target.wrapper_index = wrapperIndex;
+            target.in_bounds = inBounds;
+            target.opcode = instruction.words[0].value;
+            target.closure_target = target.opcode == 112;
+            target.span = word.span;
+            if (inBounds)
+            {
+                target.metadata_index = static_cast<size_t>(wrapperIndex - 1);
+                target.capture_descriptor_count = analysis.prototypes[*target.metadata_index].descriptors.size();
+                ++incoming[*target.metadata_index];
+                edges[prototype.index].push_back(*target.metadata_index);
+                ++analysis.valid_prototype_reference_count;
             }
+            else
+                ++analysis.invalid_prototype_reference_count;
+            analysis.closure_target_count += target.closure_target ? 1 : 0;
+            analysis.generic_prototype_reference_count += target.closure_target ? 0 : 1;
+            prototype.prototype_references.push_back(std::move(target));
+            ++analysis.prototype_reference_count;
+        }
+    }
+
+    std::optional<size_t> graphRoot;
+    bool uniqueParents = analysis.invalid_prototype_reference_count == 0;
+    for (size_t index = 0; index < analysis.prototypes.size(); ++index)
+    {
+        analysis.prototypes[index].incoming_prototype_reference_count = incoming[index];
+        if (incoming[index] == 0)
+        {
+            if (graphRoot)
+                uniqueParents = false;
+            else
+                graphRoot = index;
+        }
+        else if (incoming[index] == 1)
+        {
+            for (size_t parent = 0; parent < edges.size(); ++parent)
+                if (std::find(edges[parent].begin(), edges[parent].end(), index) != edges[parent].end())
+                {
+                    analysis.prototypes[index].parent_prototype_index = parent;
+                    break;
+                }
+        }
+        else
+            uniqueParents = false;
+    }
+
+    std::vector<bool> reached(analysis.prototypes.size());
+    if (graphRoot)
+    {
+        std::vector<size_t> pending = {*graphRoot};
+        while (!pending.empty())
+        {
+            const size_t current = pending.back();
+            pending.pop_back();
+            if (reached[current])
+                continue;
+            reached[current] = true;
+            pending.insert(pending.end(), edges[current].begin(), edges[current].end());
+        }
+    }
+    const bool allReached = !reached.empty() && std::all_of(reached.begin(), reached.end(), [](bool value) { return value; });
+    analysis.prototype_graph_complete = uniqueParents && graphRoot && allReached &&
+        analysis.valid_prototype_reference_count + 1 == analysis.prototypes.size();
+    analysis.root_selector_graph_validated = analysis.prototype_graph_complete && analysis.root_metadata_index == graphRoot;
+
+    for (PrototypeMetadata& child : analysis.prototypes)
+    {
+        for (DescriptorMetadata& descriptor : child.descriptors)
+        {
+            descriptor.parent_prototype_index = child.parent_prototype_index;
+            if (!child.parent_prototype_index)
+                continue;
+            const PrototypeMetadata& parent = analysis.prototypes[*child.parent_prototype_index];
+            descriptor.source_index_validated = true;
+            descriptor.source_index_in_bounds = descriptor.capture_kind_code <= 1
+                ? descriptor.capture_source_index < parent.register_capacity
+                : descriptor.capture_source_index < parent.descriptors.size();
+            if (descriptor.source_index_in_bounds)
+                ++analysis.validated_capture_descriptor_count;
+            else
+                ++analysis.invalid_capture_descriptor_count;
         }
     }
 }
@@ -2275,13 +2359,15 @@ bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnaly
             UlebValue raw;
             if (!cursor.readUleb(raw))
                 return setCursorFailure(analysis, cursor);
-            prototype.descriptors.push_back(DescriptorMetadata{
-                descriptor,
-                raw.value,
-                static_cast<unsigned int>(raw.value % 4u),
-                raw.value / 4u,
-                raw.span,
-            });
+            DescriptorMetadata metadata;
+            metadata.index = descriptor;
+            metadata.raw_value = raw.value;
+            metadata.kind = static_cast<unsigned int>(raw.value % 4u);
+            metadata.referenced_index = raw.value / 4u;
+            metadata.capture_kind_code = metadata.kind;
+            metadata.capture_source_index = metadata.referenced_index;
+            metadata.span = raw.span;
+            prototype.descriptors.push_back(std::move(metadata));
         }
         prototype.descriptors_span = ByteSpan{descriptorsBegin, cursor.offset()};
         analysis.descriptor_count += prototype.descriptor_count;
@@ -2301,7 +2387,7 @@ bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnaly
         return setCursorFailure(analysis, cursor);
     analysis.root_selector = rootSelector.value;
     analysis.root_selector_span = rootSelector.span;
-    finalizeStaticPrototypeReferences(analysis);
+    finalizeRootSelector(analysis);
     analysis.trailer_span = ByteSpan{cursor.offset(), bytes.size()};
     if (cursor.remaining() > limits.max_preserved_trailer_bytes)
     {
@@ -2363,13 +2449,15 @@ bool parseLphDollarPrototypeSection(
                 return setCursorFailure(analysis, cursor);
             if (retainRecords)
             {
-                prototype.descriptors.push_back(DescriptorMetadata{
-                    descriptor,
-                    raw.value,
-                    static_cast<unsigned int>(raw.value % 4u),
-                    raw.value / 4u,
-                    raw.span,
-                });
+                DescriptorMetadata metadata;
+                metadata.index = descriptor;
+                metadata.raw_value = raw.value;
+                metadata.kind = static_cast<unsigned int>(raw.value % 4u);
+                metadata.referenced_index = raw.value / 4u;
+                metadata.capture_kind_code = metadata.kind;
+                metadata.capture_source_index = metadata.referenced_index;
+                metadata.span = raw.span;
+                prototype.descriptors.push_back(std::move(metadata));
             }
         }
         prototype.descriptors_span = ByteSpan{descriptorsBegin, cursor.offset()};
@@ -2551,7 +2639,7 @@ bool parseLphDollarStructure(
                     analysis.trailer_span = retained.trailer_span;
                     analysis.prototypes = std::move(retained.prototypes);
                     analysis.trailer_bytes = std::move(retained.trailer_bytes);
-                    finalizeStaticPrototypeReferences(analysis);
+                    finalizeLphDollarPrototypeGraph(analysis);
                     analysis.randomized_tag_semantics = true;
                     analysis.tag_semantic_mapping_recovered = false;
                     analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
@@ -2594,6 +2682,7 @@ bool parseLphDollarStructure(
                     addLane(RecordLaneKind::InstructionWords, true, schema.variable_integer_reader_slot);
                     schema.root.selector_value_known = true;
                     schema.root.selector_in_bounds = analysis.root_selector_in_bounds;
+                    schema.root.selector_graph_validated = analysis.root_selector_graph_validated;
                     schema.root.wrapper_index = analysis.root_selector;
                     schema.root.metadata_index = analysis.root_metadata_index;
                     schema.root.selector_span = analysis.root_selector_span;
@@ -2850,9 +2939,13 @@ std::optional<size_t> inspectLphContainer(
                 addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
                     "Resolved serialized root selector " + std::to_string(analysis.root_selector) + " to prototype metadata index " +
                         (analysis.root_metadata_index ? std::to_string(*analysis.root_metadata_index) : std::string("invalid")) +
-                        "; retained " + std::to_string(analysis.valid_closure_target_count) + " in-bounds and " +
-                        std::to_string(analysis.invalid_closure_target_count) +
-                        " out-of-bounds packed prototype-reference operands. Capture descriptors remain numeric kind/index pairs.");
+                        "; recovered " + std::to_string(analysis.valid_prototype_reference_count) + " in-bounds and " +
+                        std::to_string(analysis.invalid_prototype_reference_count) + " out-of-bounds prototype references, including " +
+                        std::to_string(analysis.closure_target_count) + " opcode-112 closure targets. The prototype graph is " +
+                        (analysis.prototype_graph_complete ? std::string("complete") : std::string("incomplete")) + " and the root is " +
+                        (analysis.root_selector_graph_validated ? std::string("graph-validated") : std::string("not graph-validated")) +
+                        "; " + std::to_string(analysis.validated_capture_descriptor_count) + " capture indices validated and " +
+                        std::to_string(analysis.invalid_capture_descriptor_count) + " failed bounds validation.");
             }
             else
             {

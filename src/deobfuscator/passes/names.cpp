@@ -1075,7 +1075,7 @@ private:
 
     void noteFunctionReturnBehavior(Candidate& candidate)
     {
-        if (candidate.function_values.size() != 1)
+        if (!hasDecimalSuffix(candidate.original_name, "function_") || candidate.function_values.size() != 1)
             return;
 
         DirectReturnCollector returns;
@@ -2851,7 +2851,7 @@ ResidualBindingRenameResult renameGeneratedCallbackPurposesImpl(std::string_view
     if (!parsed->result.root || !parsed->result.errors.empty())
         return result;
 
-    BindingCollector bindings(false, true, true);
+    BindingCollector bindings(false, true);
     parsed->result.root->visit(&bindings);
     if (bindings.candidates.empty())
     {

@@ -318,9 +318,10 @@ struct StructuralDollarContainer
     std::string carrier;
     size_t constants_begin = 0;
     size_t prototypes_begin = 0;
+    size_t root_selector_begin = 0;
 };
 
-StructuralDollarContainer structuralDollarContainer()
+StructuralDollarContainer structuralDollarContainer(bool invalidPrototypeReference = false)
 {
     constexpr uint64_t constantBias = 101;
     constexpr uint64_t prototypeBias = 203;
@@ -337,7 +338,7 @@ StructuralDollarContainer structuralDollarContainer()
     appendUleb(fixture.decoded, prototypeBias + 2);
 
     appendUleb(fixture.decoded, 1);
-    appendUleb(fixture.decoded, 6);
+    appendUleb(fixture.decoded, 4);
     appendUleb(fixture.decoded, 7);
     appendUleb(fixture.decoded, 8);
     appendLittle(fixture.decoded, 1, 4);
@@ -346,10 +347,8 @@ StructuralDollarContainer structuralDollarContainer()
     appendLittle(fixture.decoded, 20, 4);
     appendUleb(fixture.decoded, instructionBias + 2);
     for (const std::array<int64_t, 4>& words : std::array{
-             // Operand word 3 encodes one-based prototype 2 (2 * 8 + 3).
-             std::array<int64_t, 4>{5, 1, -2, 19},
-             // Operand word 1 encodes out-of-range prototype 3.
-             std::array<int64_t, 4>{6, 27, 5, -6}})
+             std::array<int64_t, 4>{5, 1, -2, 3},
+             std::array<int64_t, 4>{6, 4, 5, -6}})
         for (int64_t word : words)
             appendUleb(fixture.decoded, signedFold(word));
 
@@ -358,9 +357,12 @@ StructuralDollarContainer structuralDollarContainer()
     appendUleb(fixture.decoded, 10);
     appendLittle(fixture.decoded, 0, 4);
     appendUleb(fixture.decoded, instructionBias + 1);
-    for (int64_t word : std::array<int64_t, 4>{7, -8, 9, 10})
+    // Opcode 112 constructs a closure. Operand word 2 encodes its one-based
+    // prototype target as target * 8 + 1.
+    for (int64_t word : std::array<int64_t, 4>{112, -8, invalidPrototypeReference ? 25 : 9, 10})
         appendUleb(fixture.decoded, signedFold(word));
 
+    fixture.root_selector_begin = fixture.decoded.size();
     appendUleb(fixture.decoded, 2);
     fixture.decoded.insert(fixture.decoded.end(), {0xde, 0xad, 0xbe});
     while (fixture.decoded.size() % 4 != 0)
@@ -623,9 +625,20 @@ int main()
             "LPH$ one-based root or prototype metadata is incorrect");
         ok &= require(parsed.root_selector_in_bounds && parsed.root_metadata_index == std::optional<size_t>(1),
             "LPH$ root selector was not resolved to its zero-based prototype metadata index");
-        ok &= require(parsed.closure_target_count == 2 && parsed.valid_closure_target_count == 1 &&
-                          parsed.invalid_closure_target_count == 1,
-            "LPH$ closure-target bounds metadata is incorrect");
+        ok &= require(parsed.prototype_reference_count == 1 &&
+                          parsed.valid_prototype_reference_count == 1 &&
+                          parsed.invalid_prototype_reference_count == 0 &&
+                          parsed.closure_target_count == 1 && parsed.generic_prototype_reference_count == 0 &&
+                          parsed.prototypes_with_capture_descriptors == 1,
+            "LPH$ prototype-reference and closure-target metadata is incorrect");
+        ok &= require(parsed.prototype_graph_complete && parsed.root_selector_graph_validated &&
+                          parsed.validated_capture_descriptor_count == 1 && parsed.invalid_capture_descriptor_count == 0,
+            "LPH$ prototype graph or capture bounds were not statically validated");
+        ok &= require(structuralDollar.lph_dollar_schema.root.selector_in_bounds &&
+                          structuralDollar.lph_dollar_schema.root.wrapper_index == std::optional<uint64_t>(2) &&
+                          structuralDollar.lph_dollar_schema.root.metadata_index == std::optional<size_t>(1) &&
+                          sameSpan(structuralDollar.lph_dollar_schema.root.selector_span, parsed.root_selector_span),
+            "LPH$ schema root metadata does not match the validated container selector");
         if (parsed.prototypes.size() == 2)
         {
             ok &= require(parsed.prototypes[0].descriptor_count == 1 &&
@@ -635,23 +648,28 @@ int main()
                               parsed.prototypes[1].range_map_count == 0 &&
                               parsed.prototypes[1].instruction_count == 1,
                 "LPH$ prototype subrecords are incorrect");
-            ok &= require(parsed.prototypes[0].descriptors[0].kind == 2 &&
-                              parsed.prototypes[0].descriptors[0].referenced_index == 1,
+            ok &= require(parsed.prototypes[0].descriptors[0].kind == 0 &&
+                              parsed.prototypes[0].descriptors[0].referenced_index == 1 &&
+                              parsed.prototypes[0].descriptors[0].capture_kind_code == 0 &&
+                              parsed.prototypes[0].descriptors[0].capture_source_index == 1 &&
+                              parsed.prototypes[0].descriptors[0].parent_prototype_index == std::optional<size_t>(1) &&
+                              parsed.prototypes[0].descriptors[0].source_index_validated &&
+                              parsed.prototypes[0].descriptors[0].source_index_in_bounds,
                 "LPH$ packed capture descriptor was not split into kind and source index");
-            ok &= require(parsed.prototypes[0].closure_targets.size() == 2 &&
-                              parsed.prototypes[0].closure_targets[0].instruction_index == 0 &&
-                              parsed.prototypes[0].closure_targets[0].operand_word_index == 3 &&
-                              parsed.prototypes[0].closure_targets[0].wrapper_index == 2 &&
-                              parsed.prototypes[0].closure_targets[0].metadata_index == std::optional<size_t>(1) &&
-                              parsed.prototypes[0].closure_targets[0].capture_descriptor_count == 0,
-                "LPH$ valid closure target did not retain its prototype and capture metadata");
-            ok &= require(!parsed.prototypes[0].closure_targets[1].in_bounds &&
-                              parsed.prototypes[0].closure_targets[1].instruction_index == 1 &&
-                              parsed.prototypes[0].closure_targets[1].operand_word_index == 1 &&
-                              !parsed.prototypes[0].closure_targets[1].metadata_index.has_value() &&
-                              parsed.prototypes[0].closure_targets[1].wrapper_index == 3 &&
-                              parsed.prototypes[1].closure_targets.empty(),
-                "LPH$ out-of-range closure target was not retained as invalid evidence");
+            ok &= require(parsed.prototypes[0].prototype_references.empty() &&
+                              parsed.prototypes[0].incoming_prototype_reference_count == 1 &&
+                              parsed.prototypes[0].parent_prototype_index == std::optional<size_t>(1) &&
+                              parsed.prototypes[1].prototype_references.size() == 1 &&
+                              parsed.prototypes[1].prototype_references[0].instruction_index == 0 &&
+                              parsed.prototypes[1].prototype_references[0].operand_word_index == 2 &&
+                              parsed.prototypes[1].prototype_references[0].wrapper_index == 1 &&
+                              parsed.prototypes[1].prototype_references[0].metadata_index == std::optional<size_t>(0) &&
+                              parsed.prototypes[1].prototype_references[0].opcode == 112 &&
+                              parsed.prototypes[1].prototype_references[0].closure_target &&
+                              parsed.prototypes[1].prototype_references[0].capture_descriptor_count == 1 &&
+                              sameSpan(parsed.prototypes[1].prototype_references[0].span,
+                                  parsed.prototypes[1].instructions[0].words[2].span),
+                "LPH$ closure target did not retain its parent, child, capture count, opcode, and byte span");
         }
     }
     ok &= require(structuralDollar.lph_dollar_schema.tags.randomized &&
@@ -671,11 +689,37 @@ int main()
     ok &= require(diagnosticContains(structuralDollar, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
                       "root selector 2 to prototype metadata index 1") &&
                       diagnosticContains(structuralDollar, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
-                          "1 in-bounds and 1 out-of-bounds"),
-        "LPH$ static root and closure-reference diagnostic is inaccurate");
+                          "1 in-bounds and 0 out-of-bounds"),
+        "LPH$ static root and prototype-reference diagnostic is inaccurate");
     ok &= require(diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "all-container") &&
                       diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "not runtime-observed or runtime-reachable"),
         "LPH$ static totals were not distinguished from runtime reachability in diagnostics");
+
+    StructuralDollarContainer invalidRootFixture = structuralDollarFixture;
+    invalidRootFixture.decoded[invalidRootFixture.root_selector_begin] = 3;
+    invalidRootFixture.carrier = radix85DollarCarrier(invalidRootFixture.decoded);
+    const luraph::EnvelopeAnalysis invalidRoot = luraph::analyzeEnvelope(
+        luaAuthStructuralSchemaFixture(longCarrierLiteral(invalidRootFixture.carrier)));
+    ok &= require(invalidRoot.containers.size() == 1 &&
+                      invalidRoot.containers.front().parse_status == luraph::ContainerParseStatus::UnsupportedSchema,
+        "LPH$ framing accepted an out-of-bounds one-based root selector");
+    ok &= require(invalidRoot.container_metrics.structural_count == 0 &&
+                      hasDiagnostic(invalidRoot, "LPH_DOLLAR_SCHEMA_UNSUPPORTED"),
+        "LPH$ invalid-root failure was not kept outside structural recovery metrics");
+
+    const StructuralDollarContainer invalidReferenceFixture = structuralDollarContainer(true);
+    const luraph::EnvelopeAnalysis invalidReference = luraph::analyzeEnvelope(
+        luaAuthStructuralSchemaFixture(longCarrierLiteral(invalidReferenceFixture.carrier)));
+    ok &= require(invalidReference.containers.size() == 1 &&
+                      invalidReference.containers.front().parse_status == luraph::ContainerParseStatus::StructuralMetadataRecovered,
+        "LPH$ framing rejected a structurally valid container with an invalid prototype edge");
+    if (!invalidReference.containers.empty())
+    {
+        const luraph::ContainerAnalysis& parsed = invalidReference.containers.front();
+        ok &= require(parsed.invalid_prototype_reference_count == 1 && !parsed.prototype_graph_complete &&
+                          !parsed.root_selector_graph_validated && parsed.invalid_capture_descriptor_count == 0,
+            "LPH$ invalid prototype edge was presented as a complete root graph");
+    }
 
     const luraph::EnvelopeAnalysis container = luraph::analyzeEnvelope(wrapperFixture(longCarrierLiteral(containerFixture.carrier)));
     ok &= require(container.static_decode.complete, "valid LPH& container decoding should complete");

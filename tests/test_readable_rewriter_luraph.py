@@ -1314,6 +1314,151 @@ return ambiguous_replay()
         self.assertEqual(artifact["metrics"]["residual_reasons"], {"parse_terminator_1": 1})
         self.assertIn("pc = replay_transition(14, 1, {2, 3, 4})", artifact["source"])
 
+    def test_overwritten_nested_dispatcher_write_is_removed(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function touch(_)
+end
+
+local function overwritten(flag)
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(15, pc)
+    if pc == 1 then
+      if flag then
+        touch("taken")
+        pc = (1) + 1;
+      end
+      if flag then
+      else
+      end
+      pc = 3
+    elseif pc == 2 then
+      return "wrong"
+    elseif pc == 3 then
+      return "done"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return overwritten(true)
+"""
+        )
+
+        rewritten = artifact["source"]
+        self.assertEqual(artifact["metrics"]["regions_structured"], 1)
+        self.assertEqual(artifact["metrics"]["dead_assignments_removed"], 1)
+        self.assertNotIn("pc =", rewritten)
+        self.assertIn('touch("taken")', rewritten)
+        self.assertIn('return "done"', rewritten)
+        self.assertNotIn('return "wrong"', rewritten)
+
+    def test_observable_nested_dispatcher_write_keeps_the_region_residual(self) -> None:
+        source = """local function semantic_step(_, _)
+end
+
+local function observe(_)
+end
+
+local function observable(flag)
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(16, pc)
+    if pc == 1 then
+      if flag then
+        pc = 2
+        observe(pc)
+      end
+      pc = 3
+    elseif pc == 2 then
+      return "branch"
+    elseif pc == 3 then
+      return "done"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return observable(true)
+"""
+        artifact = self.rewrite(source)
+
+        self.assertEqual(artifact["metrics"]["regions_structured"], 0)
+        self.assertEqual(artifact["metrics"]["residual_state_machines"], 1)
+        self.assertEqual(artifact["metrics"]["residual_reasons"], {"parse_terminator_1": 1})
+        self.assertIn("observe(pc)", artifact["source"])
+        self.assertIn("local pc = 1", artifact["source"])
+
+    def test_natural_loop_with_three_exits_uses_a_structured_selector(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function three_exit_loop(keep_going, choice)
+  local output = "none"
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(17, pc)
+    if pc == 1 then
+      if keep_going then
+        pc = 2
+      else
+        pc = 4
+      end
+    elseif pc == 2 then
+      if choice == 1 then
+        pc = 5
+      else
+        pc = 3
+      end
+    elseif pc == 3 then
+      if choice == 2 then
+        pc = 6
+      else
+        pc = 1
+      end
+    elseif pc == 4 then
+      output = "done"
+      pc = 7
+    elseif pc == 5 then
+      output = "one"
+      pc = 7
+    elseif pc == 6 then
+      output = "two"
+      pc = 7
+    elseif pc == 7 then
+      return output
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return three_exit_loop
+"""
+        )
+
+        rewritten = artifact["source"]
+        metrics = artifact["metrics"]
+        self.assertEqual(metrics["regions_structured"], 1)
+        self.assertEqual(metrics["blocks_structured"], 7)
+        self.assertEqual(metrics["residual_state_machines"], 0)
+        self.assertNotIn("while pc ~= nil do", rewritten)
+        self.assertIn("local loop_exit_1", rewritten)
+        self.assertIn("if loop_exit_1 == 1 then", rewritten)
+        self.assertIn("elseif loop_exit_1 == 2 then", rewritten)
+        self.assertIn('output = "done"', rewritten)
+        self.assertIn('output = "one"', rewritten)
+        self.assertIn('output = "two"', rewritten)
+
 
 if __name__ == "__main__":
     unittest.main()

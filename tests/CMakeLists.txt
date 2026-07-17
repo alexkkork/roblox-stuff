@@ -185,6 +185,14 @@ rbx_add_python_test(
 
 if(TARGET rbx_luau_runtime)
     rbx_add_python_test(
+        deobfuscator_luraph_semantic_names
+        "unit;integration;deobfuscator"
+        60
+        test_luraph_semantic_names.py
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
+
+    rbx_add_python_test(
         runtime_probe_trace_channel
         "unit;integration;security;deobfuscator"
         30

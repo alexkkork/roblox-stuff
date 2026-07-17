@@ -7095,6 +7095,14 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     recognizeLuraphPreparedRegisterRanges(handlers);
     recognizeLuraphNumericForState(handlers);
     recognizeLuraphVarargCapture(handlers);
+    for (json& row : handlers)
+    {
+        if (row.value("selection_status", "missing") == "exact" ||
+            !row.contains("semantic_operation") || row["semantic_operation"].is_null())
+            continue;
+        row["candidate_semantic_operation"] = row["semantic_operation"];
+        row["semantic_operation"] = nullptr;
+    }
     catalog.available = true;
     catalog.unique_handlers = uniqueRanges.size();
     catalog.document = {
@@ -7335,6 +7343,8 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
             instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+            if (!dynamicGuardConditions.empty())
+                instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
             for (const std::string& lane : laneNames)
             {
                 instrumentation += "do local __alex_lph_operand=type(" + lane + ")==\"table\" and rawget(" + lane + ",__alex_lph_pre_pc) or nil;";
@@ -7359,6 +7369,8 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
         instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+        if (!dynamicGuardConditions.empty())
+            instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
         for (const std::string& lane : laneNames)
         {
             instrumentation += "do local __alex_lph_operand=type(" + lane + ")==\"table\" and rawget(" + lane + ",__alex_lph_pre_pc) or nil;";
@@ -7427,7 +7439,14 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         postInstrumentation += "for __alex_lph_key,__alex_lph_value in __alex_lph_pre_regs do if not __alex_lph_seen_keys[__alex_lph_key] and rawget(" + registersName + ",__alex_lph_key)==nil then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=z:\";end;end;end;";
         postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);";
         if (!guardNames.empty())
-            postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,table.concat(__alex_lph_pre_guards,\"|\"));";
+        {
+            postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op";
+            for (size_t index = 0; index < guardNames.size(); ++index)
+                postInstrumentation += ",__alex_lph_pre_guards[" + std::to_string(index + 1) + "]";
+            postInstrumentation += ");";
+        }
+        if (!dynamicGuardConditions.empty())
+            postInstrumentation += "print(\"@@LPH_GUARD_PATH_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,#__alex_lph_guard_path,__alex_lph_guard_overflow and 1 or 0,table.concat(__alex_lph_guard_path,\"|\"));";
         postInstrumentation += "print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
         insertions.push_back({dispatcherBodyEnd, 0, std::move(postInstrumentation)});
         if (opcodeDispatcher && !guardNames.empty())
@@ -7439,6 +7458,16 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             guardInstrumentation += "end end;";
             insertions.push_back({view.offset(opcodeDispatcher->location.begin), 0, std::move(guardInstrumentation)});
         }
+        for (const LuraphGuardCondition& condition : dynamicGuardConditions)
+        {
+            const size_t begin = view.offset(condition.expression->location.begin);
+            const size_t end = view.offset(condition.expression->location.end);
+            if (begin >= end || begin < dispatcherBodyBegin || end > dispatcherBodyEnd || end > source.size())
+                return fail("guard_condition_offset_invalid");
+            insertions.push_back({end, 0, ")"});
+            insertions.push_back({begin, 0,
+                "__alex_lph_guard_eval(" + std::to_string(begin) + "," + std::to_string(end) + ","});
+        }
     }
     insertions.push_back({fetchEnd, 0, std::move(instrumentation)});
     std::string activation = std::string(
@@ -7446,10 +7475,10 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         "_G.__lph_a=(_G.__lph_a or 0)+1;local __aid=_G.__lph_a;local __argCount=select(\"#\",...);local __alex_lph_args={...};");
     if (dynamicEvidence && fullTraceEnabled)
     {
-        std::string returnTracer = R"LURAPH_RETURN(do local function __alex_lph_encode_return(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;_G.__alex_lph_trace_return=function(__alex_lph_vm_count,__alex_lph_activation,__alex_lph_return_pc,__alex_lph_return_op,...)local __alex_lph_return_count=select("#",...);if __alex_lph_vm_count>=)LURAPH_RETURN";
+        std::string returnTracer = R"LURAPH_RETURN(do local function __alex_lph_encode_return(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;_G.__alex_lph_trace_return=function(__alex_lph_vm_count,__alex_lph_activation,__alex_lph_return_pc,__alex_lph_return_op,__alex_lph_caller_activation,__alex_lph_caller_pc,__alex_lph_caller_op,...)local __alex_lph_return_count=select("#",...);if __alex_lph_vm_count>=)LURAPH_RETURN";
         returnTracer += std::to_string(fullTraceStart);
         returnTracer += " and __alex_lph_vm_count<=" + std::to_string(fullTraceEnd);
-        returnTracer += R"LURAPH_RETURN( then local __alex_lph_return_parts={};local __alex_lph_captured=math.min(__alex_lph_return_count,256);for __alex_lph_index=1,__alex_lph_captured do __alex_lph_return_parts[__alex_lph_index]=__alex_lph_encode_return(select(__alex_lph_index,...));end;print("@@LPH_RETURN_V1@@",__alex_lph_vm_count,__alex_lph_activation,__alex_lph_return_pc,__alex_lph_return_op,__alex_lph_return_count,__alex_lph_captured,table.concat(__alex_lph_return_parts,"|"));end;return ...;end;end;)LURAPH_RETURN";
+        returnTracer += R"LURAPH_RETURN( then local __alex_lph_return_parts={};local __alex_lph_captured=math.min(__alex_lph_return_count,256);for __alex_lph_index=1,__alex_lph_captured do __alex_lph_return_parts[__alex_lph_index]=__alex_lph_encode_return(select(__alex_lph_index,...));end;print("@@LPH_RETURN_V1@@",__alex_lph_vm_count,__alex_lph_activation,__alex_lph_return_pc,__alex_lph_return_op,__alex_lph_return_count,__alex_lph_captured,table.concat(__alex_lph_return_parts,"|"));end;_G.__curAid,_G.__curPc,_G.__curOp=__alex_lph_caller_activation,__alex_lph_caller_pc,__alex_lph_caller_op;return ...;end;end;)LURAPH_RETURN";
         insertions.push_back({0, 0, std::move(returnTracer)});
 
         LuraphDirectReturnCollector returnCollector;
@@ -7463,22 +7492,25 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             if (returnEnd < returnBegin + 6 || returnEnd > source.size() ||
                 source.substr(returnBegin, 6) != "return")
                 return fail("return_instrumentation_offset_invalid");
+            if (!dynamicGuardConditions.empty())
+                insertions.push_back({returnBegin, 2,
+                    "if __alex_lph_step_enabled then print(\"@@LPH_GUARD_PATH_V1@@\",_G.__vmc,__aid," +
+                    pcName + "," + opcodeName + ",#__alex_lph_guard_path,__alex_lph_guard_overflow and 1 or 0,table.concat(__alex_lph_guard_path,\"|\")) end;"});
             if (statement->list.size == 0)
             {
-                insertions.push_back({returnBegin, 0, "if __alex_lph_step_enabled then "});
                 insertions.push_back({returnBegin + 6, 1,
-                    " _G.__alex_lph_trace_return(_G.__vmc,__aid," + pcName + "," + opcodeName + ") end;return"});
+                    " _G.__alex_lph_trace_return(_G.__vmc,__aid," + pcName + "," + opcodeName +
+                    ",__callerAid,__callerPc,__callerOp)"});
             }
             else
             {
                 const size_t expressionEnd = view.offset(statement->list.data[statement->list.size - 1]->location.end);
                 if (expressionEnd <= returnBegin + 6 || expressionEnd > returnEnd)
                     return fail("return_expression_offset_invalid");
-                const std::string expression(source.substr(returnBegin + 6, expressionEnd - (returnBegin + 6)));
-                insertions.push_back({returnBegin, 0, "if __alex_lph_step_enabled then "});
-                insertions.push_back({expressionEnd, 0, ") end;return" + expression});
+                insertions.push_back({expressionEnd, 0, ")"});
                 insertions.push_back({returnBegin + 6, 1,
-                    " _G.__alex_lph_trace_return(_G.__vmc,__aid," + pcName + "," + opcodeName + ","});
+                    " _G.__alex_lph_trace_return(_G.__vmc,__aid," + pcName + "," + opcodeName +
+                    ",__callerAid,__callerPc,__callerOp,"});
             }
         }
     }
@@ -8027,6 +8059,23 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     std::map<LaneSite, std::map<std::string, std::string>> laneTopValues;
     std::map<LaneSite, std::vector<json>> laneTableRows;
     std::map<GuardSite, json> guardStates;
+    std::map<GuardSite, json> guardPaths;
+    std::set<GuardSite> completedStepSites;
+    std::set<std::pair<size_t, size_t>> guardManifest;
+    if (catalog.available && catalog.document.contains("dynamic_guard_conditions") &&
+        catalog.document["dynamic_guard_conditions"].is_array())
+    {
+        for (const json& row : catalog.document["dynamic_guard_conditions"])
+        {
+            if (!row.is_object() || !row.contains("begin") || !row["begin"].is_number_unsigned() ||
+                !row.contains("end") || !row["end"].is_number_unsigned())
+                continue;
+            const size_t begin = row["begin"].get<size_t>();
+            const size_t end = row["end"].get<size_t>();
+            if (begin < end)
+                guardManifest.emplace(begin, end);
+        }
+    }
     std::istringstream input(readFile(path));
     std::string line;
     std::string rowKind = "unknown";
@@ -8424,6 +8473,8 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 markMalformed();
                 continue;
             }
+            const GuardSite guardSite{*vmCount, *activation, *pc, *opcode};
+            const auto guardPath = guardPaths.find(guardSite);
             trace.returns.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -8433,6 +8484,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"captured", *captured},
                 {"complete", *captured == *arity},
                 {"values", std::move(values)},
+                {"guard_path", guardPath != guardPaths.end() ? guardPath->second : json(nullptr)},
             });
             continue;
         }
@@ -8468,40 +8520,43 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 ? parseTraceInteger<int64_t>(fields[4]) : std::nullopt;
             json guards = json::object();
             bool valid = vmCount && activation && pc && opcode && *vmCount > 0 && *activation > 0 && *pc > 0;
-            size_t begin = 0;
-            while (valid && begin <= fields[5].size())
+            for (size_t fieldIndex = 5; valid && fieldIndex < fields.size(); ++fieldIndex)
             {
-                const size_t end = fields[5].find('|', begin);
-                const std::string_view item(fields[5].data() + begin,
-                    (end == std::string::npos ? fields[5].size() : end) - begin);
-                const size_t equal = item.find('=');
-                if (equal == std::string_view::npos || equal == 0 || equal > 64 || equal + 1 >= item.size())
+                size_t begin = 0;
+                while (valid && begin <= fields[fieldIndex].size())
                 {
-                    valid = false;
-                    break;
+                    const size_t end = fields[fieldIndex].find('|', begin);
+                    const std::string_view item(fields[fieldIndex].data() + begin,
+                        (end == std::string::npos ? fields[fieldIndex].size() : end) - begin);
+                    const size_t equal = item.find('=');
+                    if (equal == std::string_view::npos || equal == 0 || equal > 64 || equal + 1 >= item.size())
+                    {
+                        valid = false;
+                        break;
+                    }
+                    const std::string name(item.substr(0, equal));
+                    if (!isIdentifierStart(name.front()) ||
+                        !std::all_of(name.begin() + 1, name.end(), isIdentifier) || guards.contains(name))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    const json value = luraphRuntimeLaneValue(item.substr(equal + 1));
+                    if (!value.is_object() || value.value("type", "invalid") == "invalid")
+                    {
+                        valid = false;
+                        break;
+                    }
+                    guards[name] = value;
+                    if (guards.size() > 32)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    if (end == std::string::npos)
+                        break;
+                    begin = end + 1;
                 }
-                const std::string name(item.substr(0, equal));
-                if (!isIdentifierStart(name.front()) ||
-                    !std::all_of(name.begin() + 1, name.end(), isIdentifier) || guards.contains(name))
-                {
-                    valid = false;
-                    break;
-                }
-                const json value = luraphRuntimeLaneValue(item.substr(equal + 1));
-                if (!value.is_object() || value.value("type", "invalid") == "invalid")
-                {
-                    valid = false;
-                    break;
-                }
-                guards[name] = value;
-                if (guards.size() > 32)
-                {
-                    valid = false;
-                    break;
-                }
-                if (end == std::string::npos)
-                    break;
-                begin = end + 1;
             }
             if (!valid || guards.empty())
             {
@@ -8515,6 +8570,94 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 continue;
             }
             guardStates[site] = std::move(guards);
+            continue;
+        }
+        if (line.starts_with("@@LPH_GUARD_PATH_V1@@\t"))
+        {
+            const std::vector<std::string> fields = splitTraceFields(line);
+            const std::optional<uint64_t> vmCount = fields.size() == 8
+                ? parseTraceInteger<uint64_t>(fields[1]) : std::nullopt;
+            const std::optional<uint64_t> activation = fields.size() == 8
+                ? parseTraceInteger<uint64_t>(fields[2]) : std::nullopt;
+            const std::optional<int64_t> pc = fields.size() == 8
+                ? parseTraceInteger<int64_t>(fields[3]) : std::nullopt;
+            const std::optional<int64_t> opcode = fields.size() == 8
+                ? parseTraceInteger<int64_t>(fields[4]) : std::nullopt;
+            const std::optional<size_t> declared = fields.size() == 8
+                ? parseTraceInteger<size_t>(fields[5]) : std::nullopt;
+            const std::optional<int> overflow = fields.size() == 8
+                ? parseTraceInteger<int>(fields[6]) : std::nullopt;
+            bool valid = vmCount && activation && pc && opcode && declared && overflow &&
+                *vmCount > 0 && *activation > 0 && *pc > 0 && *opcode >= 0 && *opcode <= 255 &&
+                *declared <= 4096 && (*overflow == 0 || *overflow == 1) &&
+                ((*declared == 0 && fields[7].empty()) || (*declared > 0 && !fields[7].empty()));
+            if (valid)
+            {
+                const auto activationRow = trace.activations.find(*activation);
+                const uint64_t prototype = activationRow != trace.activations.end()
+                    ? activationRow->second.value("prototype", uint64_t(0)) : 0;
+                valid = activationRow != trace.activations.end() && prototype != 0 &&
+                    trace.prototypes.contains(prototype);
+            }
+            json decisions = json::array();
+            size_t begin = 0;
+            while (valid && begin < fields[7].size())
+            {
+                const size_t end = fields[7].find('|', begin);
+                const std::string_view item(fields[7].data() + begin,
+                    (end == std::string::npos ? fields[7].size() : end) - begin);
+                const size_t firstColon = item.find(':');
+                const size_t secondColon = firstColon == std::string_view::npos
+                    ? std::string_view::npos : item.find(':', firstColon + 1);
+                const std::optional<size_t> conditionBegin = firstColon == std::string_view::npos
+                    ? std::nullopt : parseTraceInteger<size_t>(item.substr(0, firstColon));
+                const std::optional<size_t> conditionEnd = secondColon == std::string_view::npos
+                    ? std::nullopt : parseTraceInteger<size_t>(item.substr(firstColon + 1, secondColon - firstColon - 1));
+                const std::optional<int> decision = secondColon == std::string_view::npos
+                    ? std::nullopt : parseTraceInteger<int>(item.substr(secondColon + 1));
+                if (!conditionBegin || !conditionEnd || !decision || *conditionBegin >= *conditionEnd ||
+                    (*decision != 0 && *decision != 1) || !guardManifest.contains({*conditionBegin, *conditionEnd}))
+                {
+                    valid = false;
+                    break;
+                }
+                decisions.push_back({
+                    {"ordinal", decisions.size()},
+                    {"begin", *conditionBegin},
+                    {"end", *conditionEnd},
+                    {"decision", *decision != 0},
+                });
+                if (decisions.size() > 4096)
+                {
+                    valid = false;
+                    break;
+                }
+                if (end == std::string::npos)
+                    break;
+                begin = end + 1;
+            }
+            if (!valid || decisions.size() != *declared)
+            {
+                markMalformed();
+                continue;
+            }
+            const GuardSite site{*vmCount, *activation, *pc, *opcode};
+            if (completedStepSites.contains(site))
+            {
+                markMalformed();
+                continue;
+            }
+            json path = {
+                {"complete", *overflow == 0},
+                {"overflow", *overflow != 0},
+                {"decisions", std::move(decisions)},
+            };
+            if (auto existing = guardPaths.find(site); existing != guardPaths.end() && existing->second != path)
+            {
+                markMalformed();
+                continue;
+            }
+            guardPaths[site] = std::move(path);
             continue;
         }
         if (line.starts_with("@@LPH_STEP_V1@@\t"))
@@ -8668,6 +8811,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             }
             const GuardSite guardSite{*vmCount, *activation, *pc, *opcode};
             const auto guardState = guardStates.find(guardSite);
+            const auto guardPath = guardPaths.find(guardSite);
             trace.steps.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -8678,7 +8822,9 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"runtime_lanes", std::move(runtimeLanes)},
                 {"write_origins", std::move(writeOrigins)},
                 {"guard_state", guardState != guardStates.end() ? guardState->second : json::object()},
+                {"guard_path", guardPath != guardPaths.end() ? guardPath->second : json(nullptr)},
             });
+            completedStepSites.insert(guardSite);
             continue;
         }
         if (!line.starts_with("@@LPH_INSN_V1@@\t"))

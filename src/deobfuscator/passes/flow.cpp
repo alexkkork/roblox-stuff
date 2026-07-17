@@ -64,6 +64,7 @@ struct LexicalCaptureIndex
 std::optional<std::vector<ScalarFunctionSpan>> scalarFunctionSpans(const std::vector<OutputLine>& lines);
 LexicalCaptureIndex buildLexicalCaptureIndex(
     const std::vector<OutputLine>& lines, const std::vector<ScalarFunctionSpan>& spans);
+bool containsCallSyntax(std::string_view line);
 
 enum class TerminatorKind
 {
@@ -83,6 +84,7 @@ struct Block
     std::string condition;
     bool explicitReturn = false;
     bool returnsResults = false;
+    size_t deadDispatcherWritesRemoved = 0;
 };
 
 struct Region
@@ -416,6 +418,8 @@ std::optional<int64_t> parseConstantIntegerExpression(std::string_view expressio
 std::optional<int64_t> parsePcTarget(std::string_view statement)
 {
     statement = trimView(statement);
+    if (statement.ends_with(';'))
+        statement = trimView(statement.substr(0, statement.size() - 1));
     constexpr std::string_view Assignment = "pc = ";
     if (!statement.starts_with(Assignment))
         return std::nullopt;
@@ -423,6 +427,57 @@ std::optional<int64_t> parsePcTarget(std::string_view statement)
     if (trimView(statement) == "nil")
         return ExitState;
     return parseConstantIntegerExpression(statement);
+}
+
+bool containsPcIdentifier(std::string_view statement)
+{
+    static const std::regex Identifier(R"((^|[^A-Za-z0-9_])pc([^A-Za-z0-9_]|$))");
+    return std::regex_search(statement.begin(), statement.end(), Identifier);
+}
+
+bool luraphStatementMayCall(std::string_view statement)
+{
+    statement = trimView(statement);
+    if (statement.empty() || statement == "else" || statement == "end")
+        return false;
+    if (statement.starts_with("if ") && statement.ends_with(" then"))
+        statement = trimView(statement.substr(3, statement.size() - 3 - 5));
+    else if (statement.starts_with("elseif ") && statement.ends_with(" then"))
+        statement = trimView(statement.substr(7, statement.size() - 7 - 5));
+    return containsCallSyntax(statement);
+}
+
+size_t removeUnobservedOverwrittenPcWrites(std::vector<SourceLine>& body)
+{
+    size_t removed = 0;
+    for (size_t index = body.size(); index > 0; --index)
+    {
+        SourceLine& candidate = body[index - 1];
+        if (indentation(candidate.text) == 0 || !parsePcTarget(candidate.text))
+            continue;
+
+        bool unobservedBeforeOverwrite = true;
+        for (size_t next = index; next < body.size(); ++next)
+        {
+            const std::string_view statement = trimView(body[next].text);
+            if (containsPcIdentifier(statement) || luraphStatementMayCall(statement))
+            {
+                unobservedBeforeOverwrite = false;
+                break;
+            }
+        }
+        if (!unobservedBeforeOverwrite)
+            continue;
+        candidate.text.clear();
+        ++removed;
+    }
+    return removed;
+}
+
+bool hasResidualPcReference(const Block& block)
+{
+    return std::any_of(block.body.begin(), block.body.end(),
+        [](const SourceLine& line) { return containsPcIdentifier(line.text); });
 }
 
 struct ReplayTransition
@@ -542,7 +597,8 @@ bool parseLuraphTerminator(Block& block)
                 block.condition = condition;
                 block.first = *first;
                 block.second = *second;
-                return true;
+                block.deadDispatcherWritesRemoved += removeUnobservedOverwrittenPcWrites(block.body);
+                return !hasResidualPcReference(block);
             }
         }
     }
@@ -555,12 +611,15 @@ bool parseLuraphTerminator(Block& block)
     {
         block.terminator = TerminatorKind::Return;
         block.explicitReturn = true;
-        return true;
+        return !hasResidualPcReference(block);
     }
     const auto target = parsePcTarget(statement);
     if (target)
     {
         block.body.pop_back();
+        block.deadDispatcherWritesRemoved += removeUnobservedOverwrittenPcWrites(block.body);
+        if (hasResidualPcReference(block))
+            return false;
         if (*target == ExitState)
             block.terminator = TerminatorKind::Return;
         else
@@ -582,7 +641,7 @@ bool parseLuraphTerminator(Block& block)
         block.body.back().text = replay->expression;
         block.terminator = TerminatorKind::Goto;
         block.first = replay->targets.front();
-        return true;
+        return !hasResidualPcReference(block);
     }
 
     const std::string targetName = "replay_target_" + std::to_string(block.state);
@@ -591,7 +650,7 @@ bool parseLuraphTerminator(Block& block)
     block.condition = targetName + " == " + std::to_string(replay->targets.front());
     block.first = replay->targets.front();
     block.second = replay->targets.back();
-    return true;
+    return !hasResidualPcReference(block);
 }
 
 std::optional<int64_t> semanticStepPrototype(std::string_view statement)
@@ -1225,26 +1284,48 @@ private:
         return result;
     }
 
-    std::optional<int64_t> nearestJoin(int64_t first, int64_t second, int64_t branch) const
+    std::optional<int64_t> nearestJoin(const std::vector<int64_t>& entries, int64_t branch) const
     {
-        if (first == second)
-            return first;
-        const auto left = distances(first);
-        const auto right = distances(second);
-        if (auto immediate = immediatePostdominators.find(branch); left.contains(ExitState) && right.contains(ExitState) &&
-            immediate != immediatePostdominators.end() &&
-            immediate->second != branch && left.contains(immediate->second) && right.contains(immediate->second))
+        if (entries.empty())
+            return std::nullopt;
+        if (std::all_of(entries.begin() + 1, entries.end(),
+                [&](int64_t entry) { return entry == entries.front(); }))
+            return entries.front();
+
+        std::vector<std::map<int64_t, size_t>> reachableDistances;
+        reachableDistances.reserve(entries.size());
+        for (int64_t entry : entries)
+            reachableDistances.push_back(distances(entry));
+
+        if (auto immediate = immediatePostdominators.find(branch);
+            immediate != immediatePostdominators.end() && immediate->second != branch &&
+            std::all_of(reachableDistances.begin(), reachableDistances.end(),
+                [&](const auto& distance) { return distance.contains(immediate->second); }))
             return immediate->second;
+
         std::optional<int64_t> best;
         size_t bestMaximum = std::numeric_limits<size_t>::max();
         size_t bestTotal = std::numeric_limits<size_t>::max();
-        for (const auto& [state, leftDistance] : left)
+        for (const auto& [state, firstDistance] : reachableDistances.front())
         {
-            auto other = right.find(state);
-            if (other == right.end() || state == branch)
+            if (state == branch)
                 continue;
-            const size_t maximum = std::max(leftDistance, other->second);
-            const size_t total = leftDistance + other->second;
+            size_t maximum = firstDistance;
+            size_t total = firstDistance;
+            bool common = true;
+            for (size_t index = 1; index < reachableDistances.size(); ++index)
+            {
+                const auto found = reachableDistances[index].find(state);
+                if (found == reachableDistances[index].end())
+                {
+                    common = false;
+                    break;
+                }
+                maximum = std::max(maximum, found->second);
+                total += found->second;
+            }
+            if (!common)
+                continue;
             if (!best || maximum < bestMaximum || (maximum == bestMaximum && total < bestTotal) ||
                 (maximum == bestMaximum && total == bestTotal && state == ExitState))
             {
@@ -1254,6 +1335,11 @@ private:
             }
         }
         return best;
+    }
+
+    std::optional<int64_t> nearestJoin(int64_t first, int64_t second, int64_t branch) const
+    {
+        return nearestJoin(std::vector<int64_t>{first, second}, branch);
     }
 
     void append(std::string_view indent, std::string text, std::optional<size_t> origin = std::nullopt)
@@ -1340,22 +1426,23 @@ private:
                     continue;
                 }
 
-                auto exit = loop->second.exits.begin();
-                const int64_t firstExit = *exit++;
-                const int64_t secondExit = *exit++;
-                if (exit != loop->second.exits.end())
-                    return fail("loop_exit_dispatch_arity_" + std::to_string(loop->first));
-                auto join = nearestJoin(firstExit, secondExit, loop->first);
+                const std::vector<int64_t> exits(loop->second.exits.begin(), loop->second.exits.end());
+                auto join = nearestJoin(exits, loop->first);
                 if (!join)
                     return fail("loop_exit_missing_join_" + std::to_string(loop->first));
                 const std::string selector = "loop_exit_" + std::to_string(loop->first);
-                append(indent, "if " + selector + " == 1 then");
                 const std::string nested = std::string(indent) + "    ";
-                if (!emitSequence(firstExit, join, context, nested, false, clone))
-                    return false;
-                append(indent, "else");
-                if (!emitSequence(secondExit, join, context, nested, false, clone))
-                    return false;
+                for (size_t index = 0; index < exits.size(); ++index)
+                {
+                    if (index == 0)
+                        append(indent, "if " + selector + " == 1 then");
+                    else if (index + 1 == exits.size())
+                        append(indent, "else");
+                    else
+                        append(indent, "elseif " + selector + " == " + std::to_string(index + 1) + " then");
+                    if (!emitSequence(exits[index], join, context, nested, false, clone))
+                        return false;
+                }
                 append(indent, "end");
                 state = *join;
                 continue;
@@ -13853,6 +13940,11 @@ RewriteResult rewriteStateMachinesOnce(
         ++result.regions_structured;
         result.blocks_structured += structurer.blockCount();
         result.reentry_nodes_split += structurer.nodeSplitCount();
+        for (const auto& [state, block] : region->blocks)
+        {
+            (void)state;
+            result.dead_assignments_removed += block.deadDispatcherWritesRemoved;
+        }
         output.insert(output.end(), std::make_move_iterator(structured->begin()), std::make_move_iterator(structured->end()));
         index = region->end;
     }
@@ -13862,7 +13954,7 @@ RewriteResult rewriteStateMachinesOnce(
     result.aliases_propagated = propagation.aliases;
     result.properties_recovered = propagation.properties;
     result.methods_recovered = recoverMethodCalls(output);
-    result.dead_assignments_removed = eliminateDeadAssignments(output);
+    result.dead_assignments_removed += eliminateDeadAssignments(output);
     result.result_returns_collapsed = collapseResultReturns(output);
     result.empty_branches_removed = simplifyEmptyBranches(output);
     result.state_registers_renamed = renameStructuredStateRegisters(output);

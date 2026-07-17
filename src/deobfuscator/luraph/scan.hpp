@@ -315,10 +315,15 @@ struct DescriptorMetadata
     // intentionally preserves the numeric code instead of guessing labels.
     unsigned int kind = 0;
     uint64_t referenced_index = 0;
+    unsigned int capture_kind_code = 0;
+    uint64_t capture_source_index = 0;
+    std::optional<size_t> parent_prototype_index;
+    bool source_index_validated = false;
+    bool source_index_in_bounds = false;
     ByteSpan span;
 };
 
-struct ClosureTargetMetadata
+struct PrototypeReferenceMetadata
 {
     size_t instruction_index = 0;
     size_t operand_word_index = 0;
@@ -326,6 +331,8 @@ struct ClosureTargetMetadata
     int64_t wrapper_index = 0;
     std::optional<size_t> metadata_index;
     bool in_bounds = false;
+    int64_t opcode = 0;
+    bool closure_target = false;
     size_t capture_descriptor_count = 0;
     ByteSpan span;
 };
@@ -351,6 +358,8 @@ struct PrototypeMetadata
     ByteSpan meta_span;
     uint64_t secondary_meta = 0;
     ByteSpan secondary_meta_span;
+    uint64_t register_capacity = 0;
+    bool register_capacity_verified = false;
     size_t range_map_count = 0;
     ByteSpan range_map_count_span;
     ByteSpan range_map_span;
@@ -364,7 +373,9 @@ struct PrototypeMetadata
     ByteSpan final_span;
     std::vector<InstructionMetadata> instructions;
     std::vector<DescriptorMetadata> descriptors;
-    std::vector<ClosureTargetMetadata> closure_targets;
+    std::vector<PrototypeReferenceMetadata> prototype_references;
+    size_t incoming_prototype_reference_count = 0;
+    std::optional<size_t> parent_prototype_index;
 };
 
 struct ContainerAnalysis
@@ -397,10 +408,17 @@ struct ContainerAnalysis
     uint64_t root_selector = 0;
     std::optional<size_t> root_metadata_index;
     bool root_selector_in_bounds = false;
+    bool root_selector_graph_validated = false;
     ByteSpan root_selector_span;
+    size_t prototype_reference_count = 0;
+    size_t valid_prototype_reference_count = 0;
+    size_t invalid_prototype_reference_count = 0;
     size_t closure_target_count = 0;
-    size_t valid_closure_target_count = 0;
-    size_t invalid_closure_target_count = 0;
+    size_t generic_prototype_reference_count = 0;
+    size_t prototypes_with_capture_descriptors = 0;
+    size_t validated_capture_descriptor_count = 0;
+    size_t invalid_capture_descriptor_count = 0;
+    bool prototype_graph_complete = false;
     ByteSpan trailer_span;
     std::vector<ConstantMetadata> constants;
     std::vector<PrototypeMetadata> prototypes;
@@ -478,6 +496,7 @@ struct RootCandidateMetadata
     bool prototype_table_index = false;
     bool selector_value_known = false;
     bool selector_in_bounds = false;
+    bool selector_graph_validated = false;
     std::optional<size_t> reader_slot;
     std::optional<uint64_t> wrapper_index;
     std::optional<size_t> metadata_index;
