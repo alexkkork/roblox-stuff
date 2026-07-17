@@ -1037,6 +1037,7 @@ private:
     struct LoopContext
     {
         int64_t header = 0;
+        const std::set<int64_t>* nodes = nullptr;
         std::set<int64_t> exits;
         std::string exitSelector;
     };
@@ -1106,6 +1107,71 @@ private:
             for (int64_t next : successors(block))
                 if (next != ExitState && reachable.contains(next))
                     predecessors[next].insert(state);
+        }
+
+        std::map<int64_t, size_t> sccIndices;
+        std::map<int64_t, size_t> sccLowLinks;
+        std::vector<int64_t> sccStack;
+        std::set<int64_t> sccOnStack;
+        std::vector<std::set<int64_t>> components;
+        size_t nextSccIndex = 0;
+        std::function<void(int64_t)> visitScc = [&](int64_t state) {
+            const size_t index = nextSccIndex++;
+            sccIndices[state] = index;
+            sccLowLinks[state] = index;
+            sccStack.push_back(state);
+            sccOnStack.insert(state);
+            for (int64_t next : successors(region.blocks.at(state)))
+            {
+                if (next == ExitState || !reachable.contains(next))
+                    continue;
+                if (!sccIndices.contains(next))
+                {
+                    visitScc(next);
+                    sccLowLinks[state] = std::min(sccLowLinks[state], sccLowLinks[next]);
+                }
+                else if (sccOnStack.contains(next))
+                    sccLowLinks[state] = std::min(sccLowLinks[state], sccIndices[next]);
+            }
+            if (sccLowLinks[state] != sccIndices[state])
+                return;
+            std::set<int64_t> component;
+            while (!sccStack.empty())
+            {
+                const int64_t member = sccStack.back();
+                sccStack.pop_back();
+                sccOnStack.erase(member);
+                component.insert(member);
+                if (member == state)
+                    break;
+            }
+            components.push_back(std::move(component));
+        };
+        for (int64_t state : reachable)
+            if (!sccIndices.contains(state))
+                visitScc(state);
+
+        for (const std::set<int64_t>& component : components)
+        {
+            const bool cyclic = component.size() > 1 ||
+                std::any_of(component.begin(), component.end(), [&](int64_t state) {
+                    const std::vector<int64_t> outgoing = successors(region.blocks.at(state));
+                    return std::find(outgoing.begin(), outgoing.end(), state) != outgoing.end();
+                });
+            if (!cyclic)
+                continue;
+            std::set<int64_t> entries;
+            if (component.contains(region.entry))
+                entries.insert(region.entry);
+            for (int64_t state : component)
+                for (int64_t predecessor : predecessors[state])
+                    if (!component.contains(predecessor))
+                        entries.insert(state);
+            if (entries.size() > 1)
+            {
+                failureReason = "irreducible_loop";
+                return false;
+            }
         }
 
         std::set<int64_t> postdomUniverse = reachable;
@@ -1370,7 +1436,7 @@ private:
         if (loop.exits.size() > 1)
             append(indent, "local " + exitSelector);
         append(indent, "while true do");
-        const LoopContext context{loop.header, loop.exits, exitSelector};
+        const LoopContext context{loop.header, &loop.nodes, loop.exits, exitSelector};
         const std::string nested = std::string(indent) + "    ";
         if (region.semanticPrototype)
             append(nested, "semantic_step(" + std::to_string(*region.semanticPrototype) + ", " +
@@ -1416,6 +1482,10 @@ private:
             auto loop = loops.find(state);
             if (loop != loops.end() && (!context || loop->first != context->header))
             {
+                if (context && !std::includes(context->nodes->begin(), context->nodes->end(),
+                                   loop->second.nodes.begin(), loop->second.nodes.end()))
+                    return fail("non_nested_loop_" + std::to_string(loop->first) + "_inside_" +
+                        std::to_string(context->header));
                 if (!emitLoop(loop->second, context, indent, clone))
                     return false;
                 if (loop->second.exits.empty())
@@ -1430,6 +1500,8 @@ private:
                 auto join = nearestJoin(exits, loop->first);
                 if (!join)
                     return fail("loop_exit_missing_join_" + std::to_string(loop->first));
+                const bool joinLeavesCurrentLoop = context && !context->nodes->contains(*join);
+                const std::optional<int64_t> exitStop = joinLeavesCurrentLoop ? std::nullopt : join;
                 const std::string selector = "loop_exit_" + std::to_string(loop->first);
                 const std::string nested = std::string(indent) + "    ";
                 for (size_t index = 0; index < exits.size(); ++index)
@@ -1440,10 +1512,12 @@ private:
                         append(indent, "else");
                     else
                         append(indent, "elseif " + selector + " == " + std::to_string(index + 1) + " then");
-                    if (!emitSequence(exits[index], join, context, nested, false, clone))
+                    if (!emitSequence(exits[index], exitStop, context, nested, false, clone))
                         return false;
                 }
                 append(indent, "end");
+                if (joinLeavesCurrentLoop)
+                    return true;
                 state = *join;
                 continue;
             }
@@ -1485,6 +1559,8 @@ private:
             if (!join)
                 return fail("emit_missing_join_" + std::to_string(state) + "_" +
                     std::to_string(block.first) + "_" + std::to_string(block.second));
+            const bool joinLeavesCurrentLoop = context && !context->nodes->contains(*join);
+            const std::optional<int64_t> branchStop = joinLeavesCurrentLoop ? std::nullopt : join;
             if (region.discardSafeEmptyBranches && block.first == block.second &&
                 safelyDiscardableCondition(block.condition))
             {
@@ -1495,12 +1571,12 @@ private:
             append(indent, "if " + block.condition + " then");
             const std::string nested = std::string(indent) + "    ";
             branchPath.push_back(state * 2);
-            if (!emitSequence(block.first, join, context, nested, false, clone))
+            if (!emitSequence(block.first, branchStop, context, nested, false, clone))
                 return false;
             branchPath.back() = state * 2 + 1;
             const bool emptyFirst = output.size() == branchBegin + 1;
             append(indent, "else");
-            if (!emitSequence(block.second, join, context, nested, false, clone))
+            if (!emitSequence(block.second, branchStop, context, nested, false, clone))
                 return false;
             branchPath.pop_back();
             const bool emptySecond = output.size() == branchBegin + 2;
@@ -1512,6 +1588,8 @@ private:
                 continue;
             }
             append(indent, "end");
+            if (joinLeavesCurrentLoop)
+                return true;
             state = *join;
         }
     }

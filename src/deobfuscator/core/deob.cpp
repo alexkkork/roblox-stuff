@@ -9551,7 +9551,8 @@ json luraphPrototypeCorrespondenceArtifact(
     for (size_t containerIndex = 0; containerIndex < analysis.containers.size(); ++containerIndex)
     {
         const luraph::ContainerAnalysis& container = analysis.containers[containerIndex];
-        if (container.parse_status != luraph::ContainerParseStatus::Parsed)
+        if (container.parse_status != luraph::ContainerParseStatus::Parsed &&
+            container.parse_status != luraph::ContainerParseStatus::StructuralMetadataRecovered)
             continue;
         const luraph::vm::StaticPrototypeIndex staticIndex = luraph::vm::buildStaticPrototypeIndex(container);
         const luraph::vm::PrototypeCorrespondenceResult result =
