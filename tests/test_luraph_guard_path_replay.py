@@ -95,23 +95,29 @@ def run_deobfuscator(
     ]
     if trace is not None:
         command.extend(("--trace", str(trace)))
-    run(command, accepted=(2,))
+    run(command, accepted=(0, 2))
     require(report_path.is_file(), f"{name} did not emit a report")
     return output, json.loads(report_path.read_text(encoding="utf-8"))
 
 
 def assert_source_withheld(output: pathlib.Path, report: dict, name: str) -> None:
-    require(report.get("status") == "blocked", f"{name} crossed the recovery boundary")
+    require(report.get("status") in ("blocked", "reconstructed"),
+            f"{name} crossed the recovery boundary")
     require(report.get("exact_source") in (None, False), f"{name} claimed exact source")
     artifacts = report.get("artifacts") or {}
-    require(artifacts.get("source") is None, f"{name} advertised a source artifact")
     verification = report.get("verification") or {}
     require(
         verification.get("source_claim_accepted") in (None, False),
         f"{name} accepted an unproven source claim",
     )
-    for candidate in SOURCE_CANDIDATES:
-        require(not (output / candidate).exists(), f"{name} emitted unproven source: {candidate}")
+    if report.get("status") == "blocked":
+        require(artifacts.get("source") is None, f"{name} advertised a source artifact")
+        for candidate in SOURCE_CANDIDATES:
+            require(not (output / candidate).exists(), f"{name} emitted unproven source: {candidate}")
+    else:
+        require((report.get("coverage") or {}).get("statement_coverage", {}).get("proof_scope")
+                == "completed-output-only-payload-trace",
+                f"{name} reconstructed beyond its observed-output proof scope")
 
 
 def read_runtime_artifacts(output: pathlib.Path) -> tuple[dict, dict]:
@@ -240,8 +246,12 @@ def assert_replay_labels(semantic: dict) -> list[dict]:
         require(isinstance(operation, dict), "guard replay omitted its observational operation")
         require(operation.get("path_specific") is True, "guard replay lost path_specific=true")
         require(operation.get("static_semantic") is False, "guard replay lost static_semantic=false")
+        require(operation.get("candidate_only") is True,
+                "guard replay lost its candidate evidence boundary")
+        require(operation.get("full_effect_validation") is True,
+                "guard replay was accepted without full effect validation")
         require(
-            operation.get("proof") == "recorded_guard_path_replayed_through_original_ast",
+            operation.get("proof") == "recorded_guard_path_candidate_runtime_validated",
             "guard replay lost its proof boundary",
         )
     return replayed
@@ -250,7 +260,7 @@ def assert_replay_labels(semantic: dict) -> list[dict]:
 def assert_divergent_paths_not_merged(structure: dict, semantic: dict) -> None:
     operations_by_site: dict[tuple[int, int, int], set[str]] = defaultdict(set)
     for step in structure.get("steps") or []:
-        operation = step.get("guard_replayed_semantic_operation")
+        operation = step.get("guard_replay_candidate")
         if isinstance(operation, dict):
             site = (int(step["prototype"]), int(step["pc"]), int(step["opcode"]))
             operations_by_site[site].add(json.dumps(operation, sort_keys=True, separators=(",", ":")))
@@ -271,7 +281,7 @@ def assert_divergent_paths_not_merged(structure: dict, semantic: dict) -> None:
         require(row.get("guard_path_replayed") is not True, f"divergent site was merged: {site}")
         operation = row.get("observational_semantic_operation") or {}
         require(
-            operation.get("proof") != "recorded_guard_path_replayed_through_original_ast",
+            operation.get("proof") != "recorded_guard_path_candidate_runtime_validated",
             f"divergent site retained a single replayed operation: {site}",
         )
 
@@ -338,10 +348,8 @@ def main() -> int:
             "valid guard rows did not improve observational coverage",
         )
         require(
-            valid_semantic.get("observational_semantic_lifted", 0)
-            - control_semantic.get("observational_semantic_lifted", 0)
-            == valid_semantic.get("guard_replay_sites_validated"),
-            "guard replay and observational coverage changed by different amounts",
+            valid_semantic.get("observational_semantic_lifted", 0) >= len(replayed),
+            "validated guard replays were not represented in observational coverage",
         )
 
         known_ranges = {

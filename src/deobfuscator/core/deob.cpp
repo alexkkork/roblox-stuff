@@ -11008,10 +11008,16 @@ json luraphRuntimeSemanticDispatchArtifact(
                         operation["runtime_validation"] = *validation;
                         operation["full_effect_validation"] = true;
                         operation["guard_replay_observations"] = observedSite->second.size();
-                        row["guard_replay_validated_effect"] = std::move(operation);
+                        row["guard_replay_validated_effect"] = operation;
+                        row["observational_semantic_operation"] = std::move(operation);
                         row["guard_path_replayed"] = true;
                         row["guard_replay_validation"] = *validation;
                         ++guardReplaySitesValidated;
+                        ++observationalSemanticLifted;
+                        const std::string family = row["observational_semantic_operation"].value(
+                            "semantic_family", row["observational_semantic_operation"].value("kind", "unknown"));
+                        observationalOperationCounts[family] =
+                            observationalOperationCounts.value(family, size_t(0)) + 1;
                     }
                     else
                     {
@@ -11031,10 +11037,15 @@ json luraphRuntimeSemanticDispatchArtifact(
             {
                 json candidate = materializeLuraphSemanticOperation(
                     handler->second["candidate_semantic_operation"], effectiveLanes);
-                if (std::optional<json> validation = validateLuraphObservedCandidate(
+                std::optional<json> validation;
+                const bool completePath = handler->second.value("executed_path_complete", false) &&
+                    handler->second.value("full_effect_normalization", false);
+                if (completePath)
+                    validation = validateLuraphObservedCandidate(
                         candidate, observedSite->second, pc,
                         observedReturnsForSite != returnsBySite.end()
-                            ? &observedReturnsForSite->second : nullptr))
+                            ? &observedReturnsForSite->second : nullptr);
+                if (validation)
                 {
                     candidate["static_semantic"] = false;
                     candidate["path_specific"] = true;
@@ -11053,6 +11064,9 @@ json luraphRuntimeSemanticDispatchArtifact(
                 else
                 {
                     row["rejected_candidate_semantic_operation"] = std::move(candidate);
+                    row["candidate_rejection_reason"] = completePath
+                        ? "runtime_effect_validation_failed"
+                        : "incomplete_executed_statement_path";
                     ++guardedCandidatesRejected;
                 }
             }

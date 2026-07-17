@@ -37,6 +37,27 @@ void addInstructions(luraph::PrototypeMetadata& prototype, size_t count)
         prototype.instructions.push_back(instruction(index, {0, 0, 0, 0}));
 }
 
+vm::NormalizedPrototype normalizedPrototype(
+    size_t metadataIndex,
+    const std::vector<std::array<int64_t, 3>>& lanes)
+{
+    vm::NormalizedPrototype prototype;
+    prototype.metadata_index = metadataIndex;
+    prototype.wrapper_index = metadataIndex + 1;
+    prototype.instructions.reserve(lanes.size());
+    for (size_t index = 0; index < lanes.size(); ++index)
+    {
+        vm::NormalizedInstruction instruction;
+        instruction.metadata_index = index;
+        instruction.pc = index + 1;
+        instruction.D.base_value = lanes[index][0];
+        instruction.G.base_value = lanes[index][1];
+        instruction.p.base_value = lanes[index][2];
+        prototype.instructions.push_back(instruction);
+    }
+    return prototype;
+}
+
 luraph::DescriptorMetadata captureDescriptor(
     size_t index,
     size_t parent,
@@ -222,6 +243,70 @@ int main()
     const vm::NormalizedContainer invalidRoot = vm::normalizeContainer(container);
     ok &= require(!invalidRoot.root_valid && !invalidRoot.root_metadata_index.has_value(), "invalid root selector was accepted");
 
+    vm::NormalizedContainer projectionStatic;
+    projectionStatic.prototypes.push_back(normalizedPrototype(0, {
+        {11, 21, 31},
+        {12, 22, 32},
+    }));
+    projectionStatic.prototypes.push_back(normalizedPrototype(1, {
+        {13, 23, 33},
+        {14, 24, 34},
+        {15, 25, 35},
+    }));
+    const std::vector<vm::RuntimeOperandLaneAnchor> uniqueLaneAnchors{
+        {2, {
+            {"S", {11, 12}},
+            {"V", {21, 22}},
+            {"Z", {31, 32}},
+            {"g", {41, 42}},
+            {"r", {51, 52}},
+            {"v", {61, 62}},
+        }},
+        {3, {
+            {"S", {13, 14, 15}},
+            {"V", {23, 24, 25}},
+            {"Z", {33, 34, 35}},
+            {"g", {43, 44, 45}},
+            {"r", {53, 54, 55}},
+            {"v", {63, 64, 65}},
+        }},
+    };
+    vm::OperandLaneProjection expectedProjection;
+    expectedProjection.bindings = {{
+        {"S", vm::NormalizedOperandLane::D},
+        {"V", vm::NormalizedOperandLane::G},
+        {"Z", vm::NormalizedOperandLane::p},
+    }};
+    const vm::OperandLaneProjectionResult uniqueProjection =
+        vm::inferOperandLaneProjection(projectionStatic, uniqueLaneAnchors);
+    ok &= require(uniqueProjection.status == vm::OperandLaneProjectionStatus::Unique &&
+                      uniqueProjection.uniquely_matched_anchor_count == 2 &&
+                      uniqueProjection.anchor_metadata_indices == std::vector<size_t>({0, 1}) &&
+                      uniqueProjection.candidates == std::vector<vm::OperandLaneProjection>({expectedProjection}),
+        "exact multi-anchor operand lanes did not produce the unique S/V/Z to D/G/p projection");
+
+    std::vector<vm::RuntimeOperandLaneAnchor> ambiguousLaneAnchors = uniqueLaneAnchors;
+    ambiguousLaneAnchors[0].lanes[5].values = ambiguousLaneAnchors[0].lanes[0].values;
+    ambiguousLaneAnchors[1].lanes[5].values = ambiguousLaneAnchors[1].lanes[0].values;
+    const vm::OperandLaneProjectionResult ambiguousProjection =
+        vm::inferOperandLaneProjection(projectionStatic, ambiguousLaneAnchors);
+    ok &= require(ambiguousProjection.status == vm::OperandLaneProjectionStatus::Ambiguous &&
+                      ambiguousProjection.candidates.size() == 2 &&
+                      ambiguousProjection.candidates[0].bindings[0].runtime_name == "S" &&
+                      ambiguousProjection.candidates[1].bindings[0].runtime_name == "v" &&
+                      ambiguousProjection.candidates[0].bindings[1].runtime_name == "V" &&
+                      ambiguousProjection.candidates[1].bindings[2].runtime_name == "Z",
+        "multiple exact operand-lane projections were not preserved as explicit ambiguity");
+
+    std::vector<vm::RuntimeOperandLaneAnchor> contradictoryLaneAnchors = uniqueLaneAnchors;
+    contradictoryLaneAnchors[1].lanes[0].values.back() = 999;
+    const vm::OperandLaneProjectionResult contradictoryProjection =
+        vm::inferOperandLaneProjection(projectionStatic, contradictoryLaneAnchors);
+    ok &= require(contradictoryProjection.status == vm::OperandLaneProjectionStatus::Contradictory &&
+                      contradictoryProjection.uniquely_matched_anchor_count == 2 &&
+                      contradictoryProjection.candidates.empty(),
+        "a one-value contradiction in a later anchor was accepted as a lane projection");
+
     const luraph::ContainerAnalysis exactShape = starContainer(399, 265, true);
     const vm::StaticPrototypeIndex staticIndex = vm::buildStaticPrototypeIndex(exactShape);
     ok &= require(staticIndex.valid && staticIndex.prototypes.size() == 399 &&
@@ -339,6 +424,9 @@ int main()
     ok &= require(!unprovedIndex.valid && unprovedIndex.prototypes.empty(),
         "unproved static graph was accepted for runtime correspondence");
     ok &= require(std::string_view(vm::toString(vm::CorrespondenceStatus::Ambiguous)) == "ambiguous" &&
+                      std::string_view(vm::toString(vm::NormalizedOperandLane::p)) == "p" &&
+                      std::string_view(vm::toString(vm::OperandLaneProjectionStatus::Contradictory)) ==
+                          "contradictory" &&
                       std::string_view(vm::toString(vm::CorrespondenceProof::ExactOpcodeLaneFingerprint)) ==
                           "exact_opcode_lane_fingerprint" &&
                       std::string_view(vm::toString(vm::CorrespondenceProof::ParentClosureEdge)) ==

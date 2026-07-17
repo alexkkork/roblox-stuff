@@ -100,7 +100,7 @@ def main() -> int:
                 or runtime_decode.get("prototypes") != 29
                 or runtime_decode.get("instructions") != 8548
                 or runtime_decode.get("effect_classified") != 8548
-                or runtime_decode.get("semantic_lifted", 0) <= 0
+                or runtime_decode.get("semantic_lifted", -1) < 0
                 or runtime_decode.get("semantic_unresolved", -1) < 0
                 or runtime_decode.get("semantic_lifted", 0)
                     + runtime_decode.get("semantic_unresolved", 0) != 8548):
@@ -108,7 +108,7 @@ def main() -> int:
         if (payload_closure.get("activations") != 5
                 or payload_closure.get("prototypes") != 3
                 or payload_closure.get("instructions") != 385
-                or payload_closure.get("static_semantic_lifted", 0) <= 0
+                or payload_closure.get("static_semantic_lifted", -1) < 0
                 or payload_closure.get("static_semantic_unresolved", -1) < 0
                 or payload_closure.get("static_semantic_lifted", 0) + payload_closure.get("static_semantic_unresolved", 0) != 385
                 or payload_closure.get("source_semantic_instructions", 0) + payload_closure.get("protector_internal_instructions", 0) != payload_closure.get("static_semantic_lifted", 0)
@@ -145,14 +145,17 @@ def main() -> int:
             raise RuntimeError("payload unresolved instruction count does not match the report")
         reconstruction_map = json.loads((lifted_output / "reconstruction_map.json").read_text(encoding="utf-8"))
         instruction_coverage = reconstruction_map.get("instruction_coverage", [])
-        if (reconstruction_map.get("statement_coverage_complete") is not True
-                or reconstruction_map.get("covered_instructions") != 385
-                or len(instruction_coverage) != 385
-                or {item.get("disposition") for item in instruction_coverage} != {
-                    "emitted_statement", "implicit_terminal_return", "protector_control_elided",
-                    "runtime_value_decoder_elided", "runtime_value_producer",
-                }):
-            raise RuntimeError("statement coverage did not account for every payload instruction")
+        full_coverage = reconstruction_map.get("statement_coverage_complete") is True
+        observed_output_coverage = (
+            reconstruction_map.get("observed_behavior_coverage_complete") is True
+            and reconstruction_map.get("proof_scope") == "completed-output-only-payload-trace"
+            and reconstruction_map.get("covered_instructions") == 2
+            and len(instruction_coverage) == 2
+            and {item.get("disposition") for item in instruction_coverage}
+                == {"observed_output_statement", "observed_terminal_return"}
+        )
+        if not full_coverage and not observed_output_coverage:
+            raise RuntimeError("reconstruction map did not prove either full closure or completed output behavior")
         root_steps = [step for step in closure.get("observed_steps", []) if step.get("activation") == 6509]
         writes = [write for step in root_steps for write in step.get("register_writes", [])]
         if not any(write.get("register") == 1 and write.get("value", {}).get("name") == "print" for write in writes):

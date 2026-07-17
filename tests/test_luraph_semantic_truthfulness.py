@@ -289,6 +289,10 @@ def audit_guarded_runtime_candidate(deobfuscator: pathlib.Path) -> None:
                     "observational candidate lost static_semantic=false")
             require(observational.get("path_specific") is True,
                     "observational candidate lost path_specific=true")
+            require(observational.get("proof") != "runtime_validated_ambiguous_handler_candidate",
+                    "an incomplete ambiguous path was accepted by partial effect validation")
+        require(instruction.get("candidate_rejection_reason") == "incomplete_executed_statement_path",
+                "incomplete ambiguous path was not preserved as rejected evidence")
         require(semantic.get("semantic_lifted_instructions") == 0,
                 "ambiguous runtime evidence increased the static semantic count")
 
