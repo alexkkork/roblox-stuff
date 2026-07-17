@@ -59,7 +59,11 @@ def main() -> int:
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:3\tf:74726163656261636b",
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:4\tx:table",
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:4\tg:737472696e67",
-            "@@LPH_ACT_ARG_TABLE_END_V1@@\t1\t1\t1\t1\t2",
+            *[
+                f"@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:{1000 + index}\tn:{index}"
+                for index in range(257)
+            ],
+            "@@LPH_ACT_ARG_TABLE_END_V1@@\t1\t1\t1\t1\t259",
             "@@LPH_CAPTURE_DOMAIN_V1@@\t1\t1\t1\t1\t0",
             "@@LPH_CAPTURE_VALUE_V1@@\t1\t1\t0\tx:table\tg:6465627567\t7",
             "@@LPH_CAPTURE_DOMAIN_V1@@\t2\t1\t1\t1\t0",
@@ -96,10 +100,11 @@ def main() -> int:
                 or argument_entries["3"]["name"] != "traceback"
                 or argument_entries["4"]["type"] != "global_reference"
                 or argument_entries["4"]["path"] != "string"
+                or argument_entries["1256"]["value"] != "256"
                 or activation["argument_table_domains"] != [{
                     "argument_index": 1,
                     "complete": True,
-                    "observed_entries": 2,
+                    "observed_entries": 259,
                 }]):
             raise RuntimeError(f"activation argument evidence was not preserved: {activation}")
         capture_domain = next(

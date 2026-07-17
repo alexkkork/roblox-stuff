@@ -54,6 +54,7 @@ constexpr size_t kMaxInputBytes = 1536 * 1024;
 constexpr size_t kMaxDecodedConstants = 200000;
 constexpr size_t kMaxCfgStates = 250000;
 constexpr uint64_t kLuraphActivationTraceRowLimit = 262144;
+constexpr size_t kLuraphActivationArgumentTableEntryLimit = 4096;
 
 std::string readFile(const fs::path& path)
 {
@@ -7743,7 +7744,9 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
                     std::string(upvalues->name.value) + " do if type(__alex_lph_capture_key)==\"number\" and __alex_lph_capture_key%1==0 and __alex_lph_capture_key>=0 and __alex_lph_capture_key<=200000 then __alex_lph_capture_keys[#__alex_lph_capture_keys+1]=__alex_lph_capture_key;if #__alex_lph_capture_keys>256 then __alex_lph_capture_complete=false;break;end;else __alex_lph_capture_complete=false;end;end;else __alex_lph_capture_complete=false;end;table.sort(__alex_lph_capture_keys);print(\"@@LPH_CAPTURE_DOMAIN_V1@@\",__aid,__alex_lph_pid,__alex_lph_capture_complete and 1 or 0,#__alex_lph_capture_keys,table.concat(__alex_lph_capture_keys,\",\"));for _,__alex_lph_capture_key in ipairs(__alex_lph_capture_keys) do local __alex_lph_capture_cell=rawget(" +
                     std::string(upvalues->name.value) + ",__alex_lph_capture_key);local __alex_lph_capture_value=__alex_lph_capture_cell;local __alex_lph_capture_slot=nil;if type(__alex_lph_capture_cell)==\"table\" then __alex_lph_capture_slot=rawget(__alex_lph_capture_cell,2);local __alex_lph_capture_storage=rawget(__alex_lph_capture_cell,3);if type(__alex_lph_capture_slot)==\"number\" and type(__alex_lph_capture_storage)==\"table\" then __alex_lph_capture_value=rawget(__alex_lph_capture_storage,__alex_lph_capture_slot);end;end;print(\"@@LPH_CAPTURE_VALUE_V1@@\",__aid,__alex_lph_pid,__alex_lph_capture_key,__alex_lph_encode_activation_arg(__alex_lph_capture_cell),__alex_lph_encode_activation_arg(__alex_lph_capture_value),__alex_lph_capture_slot);end;end;end;";
             }
-            instrumentation += "local __alex_lph_arg_table_seen=_G.__alex_lph_arg_table_seen;if type(__alex_lph_arg_table_seen)~=\"table\" then __alex_lph_arg_table_seen={};_G.__alex_lph_arg_table_seen=__alex_lph_arg_table_seen;end;if not __alex_lph_arg_table_seen[__alex_lph_pid] then __alex_lph_arg_table_seen[__alex_lph_pid]=true;for __alex_lph_arg_index=1,math.min(__argCount,4) do local __alex_lph_arg_value=rawget(__alex_lph_args,__alex_lph_arg_index);if type(__alex_lph_arg_value)==\"table\" then local __alex_lph_entry_count=0;local __alex_lph_arg_table_complete=true;for __alex_lph_key,__alex_lph_value in next,__alex_lph_arg_value do if __alex_lph_entry_count>=256 then __alex_lph_arg_table_complete=false;break end;__alex_lph_entry_count+=1;print(\"@@LPH_ACT_ARG_TABLE_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_encode_activation_arg(__alex_lph_key),__alex_lph_encode_activation_arg(__alex_lph_value));end;print(\"@@LPH_ACT_ARG_TABLE_END_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_arg_table_complete and 1 or 0,__alex_lph_entry_count);end;end;end;__alex_lph_structure_announced=true;end;end;";
+            instrumentation += "local __alex_lph_arg_table_seen=_G.__alex_lph_arg_table_seen;if type(__alex_lph_arg_table_seen)~=\"table\" then __alex_lph_arg_table_seen={};_G.__alex_lph_arg_table_seen=__alex_lph_arg_table_seen;end;if not __alex_lph_arg_table_seen[__alex_lph_pid] then __alex_lph_arg_table_seen[__alex_lph_pid]=true;for __alex_lph_arg_index=1,math.min(__argCount,4) do local __alex_lph_arg_value=rawget(__alex_lph_args,__alex_lph_arg_index);if type(__alex_lph_arg_value)==\"table\" then local __alex_lph_entry_count=0;local __alex_lph_arg_table_complete=true;for __alex_lph_key,__alex_lph_value in next,__alex_lph_arg_value do if __alex_lph_entry_count>=" +
+                std::to_string(kLuraphActivationArgumentTableEntryLimit) +
+                " then __alex_lph_arg_table_complete=false;break end;__alex_lph_entry_count+=1;print(\"@@LPH_ACT_ARG_TABLE_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_encode_activation_arg(__alex_lph_key),__alex_lph_encode_activation_arg(__alex_lph_value));end;print(\"@@LPH_ACT_ARG_TABLE_END_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_arg_table_complete and 1 or 0,__alex_lph_entry_count);end;end;end;__alex_lph_structure_announced=true;end;end;";
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
             instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
@@ -8661,10 +8664,13 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 return 1;
             };
             bool merged = false;
+            size_t entriesForArgument = 0;
             for (json& existing : entries)
             {
-                if (!existing.is_object() || existing.value("argument_index", size_t(0)) != *argumentIndex ||
-                    existing.value("key", json(nullptr)) != observed["key"])
+                if (!existing.is_object() || existing.value("argument_index", size_t(0)) != *argumentIndex)
+                    continue;
+                ++entriesForArgument;
+                if (existing.value("key", json(nullptr)) != observed["key"])
                     continue;
                 if (evidenceQuality(observed["value"]) > evidenceQuality(existing.value("value", json(nullptr))))
                     existing = observed;
@@ -8675,7 +8681,14 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 break;
             }
             if (!merged)
+            {
+                if (entriesForArgument >= kLuraphActivationArgumentTableEntryLimit)
+                {
+                    markMalformed();
+                    continue;
+                }
                 entries.push_back(std::move(observed));
+            }
             continue;
         }
         if (line.starts_with("@@LPH_ACT_ARG_TABLE_END_V1@@\t"))
@@ -8693,7 +8706,8 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 ? parseTraceInteger<size_t>(fields[5]) : std::nullopt;
             if (!activation || !prototype || !argumentIndex || !complete || !observedEntries ||
                 *activation == 0 || *prototype == 0 || *argumentIndex == 0 ||
-                (*complete != 0 && *complete != 1) || *observedEntries > 256 ||
+                (*complete != 0 && *complete != 1) ||
+                *observedEntries > kLuraphActivationArgumentTableEntryLimit ||
                 (trace.activations.contains(*activation) &&
                     trace.activations[*activation].contains("prototype") &&
                     trace.activations[*activation]["prototype"].is_number_integer() &&
