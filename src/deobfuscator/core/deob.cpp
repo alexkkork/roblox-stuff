@@ -12520,6 +12520,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         {"stage", "opcode_handlers"},
         {"ok", opcodeCatalog.available && opcodeCatalog.resolved > 0},
         {"resolved_opcodes", opcodeCatalog.resolved},
+        {"exact_handlers", opcodeCatalog.document.value("exact_handlers", size_t(0))},
+        {"ambiguous_handlers", opcodeCatalog.document.value("ambiguous_handlers", size_t(0))},
+        {"missing_handlers", opcodeCatalog.document.value("missing_handlers", size_t(0))},
         {"total_opcodes", 256},
         {"unique_handlers", opcodeCatalog.unique_handlers},
         {"semantic_classification_complete", false},
@@ -12554,6 +12557,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeObservationalSites = 0;
     size_t runtimeObservationalLifted = 0;
     size_t runtimeObservationalUnresolved = 0;
+    size_t runtimeGuardedCandidatesValidated = 0;
+    size_t runtimeGuardedCandidatesRejected = 0;
     size_t runtimeUnobservedInstructions = 0;
     json runtimeObservationalOperationCounts = json::object();
     json runtimeWriteOriginEvidence = json::object();
@@ -12586,6 +12591,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     runtimeObservationalSites = runtimeSemanticDocument->value("observational_sites", size_t(0));
                     runtimeObservationalLifted = runtimeSemanticDocument->value("observational_semantic_lifted", size_t(0));
                     runtimeObservationalUnresolved = runtimeSemanticDocument->value("observational_semantic_unresolved", size_t(0));
+                    runtimeGuardedCandidatesValidated = runtimeSemanticDocument->value(
+                        "guarded_candidates_validated", size_t(0));
+                    runtimeGuardedCandidatesRejected = runtimeSemanticDocument->value(
+                        "guarded_candidates_rejected", size_t(0));
                     runtimeUnobservedInstructions = runtimeSemanticDocument->value("unobserved_instructions", size_t(0));
                     runtimeObservationalOperationCounts = runtimeSemanticDocument->value(
                         "observational_operation_counts", json::object());
@@ -12630,6 +12639,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"observational_sites", runtimeObservationalSites},
                 {"observational_semantic_lifted", runtimeObservationalLifted},
                 {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"guarded_candidates_validated", runtimeGuardedCandidatesValidated},
+                {"guarded_candidates_rejected", runtimeGuardedCandidatesRejected},
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
@@ -12841,6 +12852,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         (*guardHotspotDocument)["observational_sites"] = runtimeObservationalSites;
         (*guardHotspotDocument)["observational_semantic_lifted"] = runtimeObservationalLifted;
         (*guardHotspotDocument)["observational_semantic_unresolved"] = runtimeObservationalUnresolved;
+        (*guardHotspotDocument)["guarded_candidates_validated"] = runtimeGuardedCandidatesValidated;
+        (*guardHotspotDocument)["guarded_candidates_rejected"] = runtimeGuardedCandidatesRejected;
         (*guardHotspotDocument)["unobserved_instructions"] = runtimeUnobservedInstructions;
         (*guardHotspotDocument)["observational_operation_counts"] = runtimeObservationalOperationCounts;
         (*guardHotspotDocument)["observational_path_specific"] = true;
@@ -12857,6 +12870,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"observational_sites", runtimeObservationalSites},
             {"observational_semantic_lifted", runtimeObservationalLifted},
             {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+            {"guarded_candidates_validated", runtimeGuardedCandidatesValidated},
+            {"guarded_candidates_rejected", runtimeGuardedCandidatesRejected},
             {"unobserved_instructions", runtimeUnobservedInstructions},
             {"observational_operation_counts", runtimeObservationalOperationCounts},
             {"observational_path_specific", true},

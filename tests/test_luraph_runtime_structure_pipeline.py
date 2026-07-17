@@ -35,7 +35,13 @@ def main() -> int:
         report = json.loads(static_report.read_text(encoding="utf-8"))
         handler_pass = next(item for item in report["passes"] if item["stage"] == "opcode_handlers")
         structure_pass = next(item for item in report["passes"] if item["stage"] == "structure_probe")
-        if handler_pass["resolved_opcodes"] != 256 or not structure_pass["ok"]:
+        exact_handlers = handler_pass.get("exact_handlers", 0)
+        ambiguous_handlers = handler_pass.get("ambiguous_handlers", 0)
+        missing_handlers = handler_pass.get("missing_handlers", 0)
+        if (handler_pass["resolved_opcodes"] != exact_handlers
+                or exact_handlers + ambiguous_handlers + missing_handlers != 256
+                or exact_handlers < 200 or missing_handlers != 0
+                or not structure_pass["ok"]):
             raise RuntimeError(f"static handler/probe recovery incomplete: {handler_pass} {structure_pass}")
 
         probe = static_output / "structure_probe.luau"
