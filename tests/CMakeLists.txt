@@ -702,4 +702,12 @@ if(TARGET alex_deobfuscator)
         test_luraph_luaauth_lph_dollar.py
         --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
     )
+    rbx_add_python_test(
+        deobfuscator_luraph_prototype_correspondence
+        "integration;deobfuscator;security;luraph"
+        30
+        test_luraph_luaauth_lph_dollar.py
+        --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+        --prototype-correspondence-only
+    )
 endif()

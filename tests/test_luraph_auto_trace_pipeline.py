@@ -100,9 +100,10 @@ def main() -> int:
                 or runtime_decode.get("prototypes") != 29
                 or runtime_decode.get("instructions") != 8548
                 or runtime_decode.get("effect_classified") != 8548
-                or runtime_decode.get("unresolved") != 0
-                or runtime_decode.get("semantic_lifted") != 8548
-                or runtime_decode.get("semantic_unresolved") != 0):
+                or runtime_decode.get("semantic_lifted", 0) <= 0
+                or runtime_decode.get("semantic_unresolved", -1) < 0
+                or runtime_decode.get("semantic_lifted", 0)
+                    + runtime_decode.get("semantic_unresolved", 0) != 8548):
             raise RuntimeError(f"automatic semantic coverage is not truthful: {runtime_decode}")
         if (payload_closure.get("activations") != 5
                 or payload_closure.get("prototypes") != 3

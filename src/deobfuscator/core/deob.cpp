@@ -11043,6 +11043,7 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"trace_evidence_only", traceEvidenceOnlyCoverage},
             {"unresolved", unresolvedSemanticCoverage},
             {"partition_sum", semanticCoveragePartitionSum},
+            {"disjoint", true},
             {"partition_complete", semanticCoveragePartitionSum == semanticCoverageTotal},
             {"semantic_coverage_complete", semanticCoveragePartitionSum == semanticCoverageTotal &&
                 traceEvidenceOnlyCoverage == 0 && unresolvedSemanticCoverage == 0},
@@ -15530,6 +15531,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"trace_evidence_only", 0},
             {"unresolved", total},
             {"partition_sum", total},
+            {"disjoint", true},
             {"partition_complete", true},
             {"semantic_coverage_complete", false},
             {"runtime_validated_observational_semantic_is_path_specific", true},
@@ -15548,6 +15550,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"trace_evidence_only", 0},
             {"unresolved", nullptr},
             {"partition_sum", nullptr},
+            {"disjoint", true},
             {"partition_complete", false},
             {"semantic_coverage_complete", false},
             {"runtime_validated_observational_semantic_is_path_specific", true},

@@ -14,6 +14,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "luraph_luaauth" / "lph_dollar_generation.json"
+AMBIGUOUS_STRUCTURAL_DECODED_SHA256 = (
+    "26e35a770e1511ad88942981a3e61a91ce024effc8bb0a5576a58d9bebbfcd16"
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -155,6 +158,10 @@ def build_ambiguous_structural_subject() -> str:
     decoded.extend((0xDE, 0xAD, 0xBE))
     while len(decoded) % 4:
         decoded.append(0xEF)
+    require(
+        hashlib.sha256(decoded).hexdigest() == AMBIGUOUS_STRUCTURAL_DECODED_SHA256,
+        "prototype correspondence fixture bytes drifted",
+    )
     carrier = radix85_dollar_carrier(decoded)
     return (
         "la_code=271828182;la_script_id='structural_schema_fixture'\n"
@@ -354,12 +361,30 @@ def assert_ambiguous_prototype_correspondence(report: dict, output: pathlib.Path
         "prototype correspondence fixture did not reach StructuralMetadataRecovered",
     )
 
+    runtime = read_json(output / "runtime_prototypes.json")
+    require(runtime.get("complete") is False, "incomplete correspondence evidence was marked complete")
+    require(runtime.get("prototype_count") == 2, "correspondence runtime prototype count drifted")
+    runtime_prototypes = runtime.get("prototypes") or []
+    require(len(runtime_prototypes) == 2, "correspondence runtime prototype rows are missing")
+    for prototype in runtime_prototypes:
+        require(prototype.get("complete") is False, "incomplete runtime prototype was marked complete")
+        require(
+            prototype.get("declared_instruction_count") == 1
+            and prototype.get("observed_instruction_count") == 0,
+            "correspondence fixture no longer carries incomplete 0/1 runtime evidence",
+        )
+
     artifacts = report.get("artifacts") or {}
     require(
         artifacts.get("prototype_correspondence") == "prototype_correspondence.json",
         "structural metadata was not accepted for prototype correspondence",
     )
     correspondence = read_json(output / "prototype_correspondence.json")
+    container_reports = correspondence.get("containers") or []
+    require(
+        len(container_reports) == 1,
+        "StructuralMetadataRecovered container was omitted from prototype correspondence",
+    )
     require(correspondence.get("status") == "partial", "ambiguous correspondence was not partial")
     require(correspondence.get("complete") is False, "ambiguous correspondence was falsely complete")
     require(
@@ -371,8 +396,6 @@ def assert_ambiguous_prototype_correspondence(report: dict, output: pathlib.Path
         "incomplete runtime evidence produced a complete container match",
     )
 
-    container_reports = correspondence.get("containers") or []
-    require(len(container_reports) == 1, "structural correspondence report omitted its container")
     container = container_reports[0]
     require(container.get("container_index") == 0, "structural correspondence index drifted")
     require(container.get("static_evidence_valid") is True, "structural static evidence was rejected")
@@ -405,6 +428,27 @@ def assert_ambiguous_prototype_correspondence(report: dict, output: pathlib.Path
     require(correspondence_pass.get("ok") is False, "partial correspondence pass was marked successful")
     require(correspondence_pass.get("ambiguity_preserved") is True, "report pass hid ambiguity")
     require(correspondence_pass.get("selected_container_index") is None, "report pass claimed a mapping")
+
+
+def run_ambiguous_prototype_correspondence(deobfuscator: pathlib.Path, root: pathlib.Path) -> None:
+    subject = root / "ambiguous_structural_subject.luau"
+    trace = root / "ambiguous_correspondence_trace.log"
+    output = root / "prototype-correspondence"
+    subject.write_text(build_ambiguous_structural_subject(), encoding="utf-8")
+    trace.write_text(build_ambiguous_correspondence_trace(), encoding="utf-8")
+    completed, report = run_deobfuscator(
+        deobfuscator,
+        subject,
+        output,
+        root / "prototype-correspondence-report.json",
+        trace,
+    )
+    require(
+        completed.returncode == 2,
+        f"prototype correspondence boundary returned {completed.returncode}",
+    )
+    assert_source_withheld(report, output, "ambiguous prototype correspondence")
+    assert_ambiguous_prototype_correspondence(report, output)
 
 
 def assert_partial_trace(
@@ -492,11 +536,24 @@ def main() -> int:
         action="store_true",
         help="fail on known top-level 268/25,215 coverage-reporting gaps",
     )
+    parser.add_argument(
+        "--prototype-correspondence-only",
+        action="store_true",
+        help="run only the structural prototype-correspondence regression",
+    )
     args = parser.parse_args()
     spec = read_json(FIXTURE)
 
     with tempfile.TemporaryDirectory(prefix="luraph-luaauth-lph-dollar-") as temporary:
         root = pathlib.Path(temporary)
+        if args.prototype_correspondence_only:
+            run_ambiguous_prototype_correspondence(args.deobfuscator.resolve(), root)
+            print(
+                "LuaAuth LPH$ prototype correspondence OK: structural metadata accepted; "
+                "ambiguity retained without a mapping claim"
+            )
+            return 0
+
         subject = root / "sanitized_subject.luau"
         trace = root / "partial_semantic_trace.log"
         subject.write_text(build_sanitized_subject(spec), encoding="utf-8")
@@ -558,30 +615,9 @@ def main() -> int:
             strict_reporting=args.require_complete_reporting,
         )
 
-        correspondence_subject = root / "ambiguous_structural_subject.luau"
-        correspondence_trace = root / "ambiguous_correspondence_trace.log"
-        correspondence_subject.write_text(build_ambiguous_structural_subject(), encoding="utf-8")
-        correspondence_trace.write_text(build_ambiguous_correspondence_trace(), encoding="utf-8")
-        correspondence_output = root / "prototype-correspondence"
-        correspondence_completed, correspondence_report = run_deobfuscator(
-            args.deobfuscator.resolve(),
-            correspondence_subject,
-            correspondence_output,
-            root / "prototype-correspondence-report.json",
-            correspondence_trace,
-        )
-        require(
-            correspondence_completed.returncode == 2,
-            f"prototype correspondence boundary returned {correspondence_completed.returncode}",
-        )
-        assert_source_withheld(
-            correspondence_report, correspondence_output, "ambiguous prototype correspondence"
-        )
-        assert_ambiguous_prototype_correspondence(correspondence_report, correspondence_output)
-
     print(
         "LuaAuth LPH$ regression OK: exact carrier framing decoded; "
-        "268/25,215 runtime evidence retained as partial, and ambiguous prototype correspondence withheld"
+        "268/25,215 runtime evidence retained as partial, path-specific IR with source withheld"
     )
     return 0
 

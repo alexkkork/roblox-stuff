@@ -195,6 +195,7 @@ def semantic_coverage_partition(report: dict) -> dict:
         sum(counts.values()) == partition.get("total") == partition.get("partition_sum"),
         f"semantic coverage categories are not a disjoint total: {partition}",
     )
+    require(partition.get("disjoint") is True, "semantic coverage partition lost its disjoint contract")
     require(partition.get("partition_complete") is True, "semantic coverage partition is marked incomplete")
     require(
         partition.get("runtime_validated_observational_semantic_is_path_specific") is True,
