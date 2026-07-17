@@ -342,6 +342,13 @@ uint64_t positiveUnsignedField(const json& object, std::string_view key)
     return 0;
 }
 
+std::optional<int64_t> integerField(const json& object, std::string_view key)
+{
+    if (!object.is_object() || !object.contains(std::string(key)))
+        return std::nullopt;
+    return primitiveIntegerValue(object[std::string(key)]);
+}
+
 const json& directSequenceTerminal(const json& operation)
 {
     const json* terminal = &operation;
@@ -586,9 +593,9 @@ public:
         {
             for (const json& capture : rootDescriptor["captures"])
             {
-                const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
-                const int64_t kind = capture.value("capture_kind", int64_t(-1));
-                const int64_t slot = capture.value("slot", int64_t(-1));
+                const int64_t captureIndex = integerField(capture, "capture_index").value_or(-1);
+                const int64_t kind = integerField(capture, "capture_kind").value_or(-1);
+                const int64_t slot = integerField(capture, "slot").value_or(-1);
                 if (captureIndex < 0 || slot < 0)
                 {
                     ++result.unresolved_closure_descriptors;
@@ -1375,9 +1382,9 @@ private:
             return;
         for (const json& capture : descriptor["captures"])
         {
-            const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
-            const int64_t captureKind = capture.value("capture_kind", int64_t(-1));
-            const int64_t parentKey = capture.value("slot", int64_t(-1));
+            const int64_t captureIndex = integerField(capture, "capture_index").value_or(-1);
+            const int64_t captureKind = integerField(capture, "capture_kind").value_or(-1);
+            const int64_t parentKey = integerField(capture, "slot").value_or(-1);
             if (captureKind == 2 && captureIndex >= 0 && parentKey >= 0)
                 inheritedCaptureCells.insert({parentPrototype, childPrototype, captureIndex, parentKey});
         }
@@ -1408,7 +1415,7 @@ private:
         {
             for (const json& capture : descriptor["captures"])
             {
-                const int64_t index = capture.value("capture_index", int64_t(-1));
+                const int64_t index = integerField(capture, "capture_index").value_or(-1);
                 if (index < 0 || !indices.insert(index).second)
                 {
                     complete = false;
@@ -2395,7 +2402,8 @@ private:
                         const uint64_t target = positiveUnsignedField(descriptor, "target_prototype");
                         addCaptureDomain(target, descriptor);
                         recordInheritedCaptureCells(prototype, descriptor);
-                        const int64_t destination = descriptor.value("destination_register", int64_t(-1));
+                        const int64_t destination = integerField(
+                            descriptor, "destination_register").value_or(-1);
                         if (target != 0 && destination >= 0)
                             closureRegisterTargets[prototype][destination].insert(target);
                         if (const json* semantic = semanticOperationForInstruction(instruction); target != 0 && semantic)
@@ -2427,9 +2435,9 @@ private:
                         continue;
                     for (const json& capture : descriptor["captures"])
                     {
-                        const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
-                        const int64_t kind = capture.value("capture_kind", int64_t(-1));
-                        const int64_t slot = capture.value("slot", int64_t(-1));
+                        const int64_t captureIndex = integerField(capture, "capture_index").value_or(-1);
+                        const int64_t kind = integerField(capture, "capture_kind").value_or(-1);
+                        const int64_t slot = integerField(capture, "slot").value_or(-1);
                         if (captureIndex < 0 || slot < 0 || (kind != 0 && kind != 1))
                             continue;
                         const auto producer = closureRegisterTargets[prototype].find(slot);
@@ -3768,7 +3776,7 @@ private:
                     descriptor["target_prototype"].get<int64_t>() > 0
                 ? static_cast<uint64_t>(descriptor["target_prototype"].get<int64_t>())
                 : uint64_t(0);
-        const int64_t destination = descriptor.value("destination_register", int64_t(-1));
+        const int64_t destination = integerField(descriptor, "destination_register").value_or(-1);
         const bool deferredStaticTarget = targetPrototype == 0 && destination >= 0 &&
             descriptor.contains("static_target_wrapper_index") &&
             descriptor["static_target_wrapper_index"].is_number_unsigned() &&
@@ -3803,9 +3811,9 @@ private:
         std::set<int64_t> captureIndices;
         for (const json& capture : descriptor["captures"])
         {
-            const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
-            const int64_t kind = capture.value("capture_kind", int64_t(-1));
-            const int64_t slot = capture.value("slot", int64_t(-1));
+            const int64_t captureIndex = integerField(capture, "capture_index").value_or(-1);
+            const int64_t kind = integerField(capture, "capture_kind").value_or(-1);
+            const int64_t slot = integerField(capture, "slot").value_or(-1);
             if (captureIndex < 0 || !captureIndices.insert(captureIndex).second ||
                 kind < 0 || kind > 2 || slot < 0)
             {
@@ -3821,9 +3829,9 @@ private:
         append(prefix + "  local callback_captures = {\n");
         for (const json& capture : descriptor["captures"])
         {
-            const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
-            const int64_t kind = capture.value("capture_kind", int64_t(-1));
-            const int64_t slot = capture.value("slot", int64_t(-1));
+            const int64_t captureIndex = integerField(capture, "capture_index").value_or(-1);
+            const int64_t kind = integerField(capture, "capture_kind").value_or(-1);
+            const int64_t slot = integerField(capture, "slot").value_or(-1);
             std::string source;
             if (kind == 0)
                 source = "capture_register_cell(open_cells, registers, " + std::to_string(slot) + ")";

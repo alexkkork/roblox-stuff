@@ -55,6 +55,8 @@ def main() -> int:
             "@@LPH_PROTO_OBJECT_V1@@\t1\t101",
             "@@LPH_PROTO_V1@@\t2\t1\tR,D",
             "@@LPH_PROTO_OBJECT_V1@@\t2\t202",
+            "@@LPH_PROTO_V1@@\t3\t1\tR,D",
+            "@@LPH_PROTO_OBJECT_V1@@\t3\t303",
             "@@LPH_ACT_ARG_OBJECT_V1@@\t1\t1\t1\t700",
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t2\t1\ts:6869|z:\t123",
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:3\tf:74726163656261636b",
@@ -73,6 +75,7 @@ def main() -> int:
             "@@LPH_INSN_V1@@\t1\t1\t77\tR=n:40|D=x:table",
             "@@LPH_INSN_V1@@\t1\t2\t22\tR=n:50|D=x:table",
             "@@LPH_INSN_V1@@\t2\t1\t1\tR=z:|D=z:",
+            "@@LPH_INSN_V1@@\t3\t1\t1\tR=z:|D=z:",
             "@@LPH_LANE_TOP_V1@@\t1\t1\tD\tn:4\tn:4",
             "@@LPH_LANE_TOP_V1@@\t1\t1\tD\tn:5\tt:303",
             "@@LPH_LANE_TOP_V1@@\t1\t1\tD\tn:9\tt:202",
@@ -82,11 +85,19 @@ def main() -> int:
             "@@LPH_LANE_TOP_V1@@\t1\t2\tD\tn:4\tn:5",
             "@@LPH_LANE_TOP_V1@@\t1\t2\tD\tn:5\tt:305",
             "@@LPH_LANE_TOP_V1@@\t1\t2\tD\tn:9\tt:999",
+            "@@LPH_LANE_TOP_V1@@\t2\t1\tD\tn:4\tn:6",
+            "@@LPH_LANE_TOP_V1@@\t2\t1\tD\tn:5\tt:306",
+            "@@LPH_LANE_TOP_V1@@\t2\t1\tD\tn:9\tt:303",
+            "@@LPH_ACTIVATION@@\t125\t1\t0\t0\t0\t2",
+            "@@LPH_CALL_V2@@\t126\t1\t0\t0\t0\t1\t77\t9\tprint\t1\ts:6869\tD",
+            "hi",
+            "@@LPH_VM@@\t127\t1\t0\t0\t0\t2\t22",
             "",
         ]), encoding="utf-8")
 
         output = root / "parsed"
-        parsed = run_deobfuscator(args.deobfuscator, output, root / "parsed-report.json", trace)
+        parsed_report_path = root / "parsed-report.json"
+        parsed = run_deobfuscator(args.deobfuscator, output, parsed_report_path, trace)
         if parsed.returncode != 2:
             raise RuntimeError(f"descriptor parsing unexpectedly exited {parsed.returncode}:\n{parsed.stderr}")
         runtime_ir = json.loads((output / "runtime_prototypes.json").read_text(encoding="utf-8"))
@@ -156,7 +167,60 @@ def main() -> int:
                 or unresolved["target_prototype"] is not None or unresolved["complete"]):
             raise RuntimeError(f"unresolved closure target identity was not retained: {unresolved}")
 
-    print("Luraph closure descriptor trace OK: capture-only, structural, unresolved-target coverage passed")
+        transitive = descriptors.get((2, 1))
+        if (not transitive or transitive["target_prototype"] != 3
+                or transitive["destination_register"] != 6
+                or transitive["captures"] != [] or not transitive["complete"]):
+            raise RuntimeError(f"transitive inactive closure descriptor was not recovered: {transitive}")
+
+        activated_prototypes = {
+            row["prototype"] for row in runtime_ir["activations"]
+        }
+        if activated_prototypes != {1}:
+            raise RuntimeError(f"inactive closure targets unexpectedly had activations: {activated_prototypes}")
+
+        payload_closure = json.loads(
+            (output / "payload_closure_ir.json").read_text(encoding="utf-8")
+        )
+        payload_prototypes = {
+            row["runtime_id"] for row in payload_closure["prototypes"]
+        }
+        if (payload_closure["activation_count"] != 1
+                or payload_closure["activated_prototype_count"] != 1
+                or payload_closure["closure_expanded_prototype_count"] != 2
+                or payload_closure["closure_expansion_edge_count"] != 2
+                or payload_closure["prototype_count"] != 3
+                or payload_prototypes != {1, 2, 3}):
+            raise RuntimeError(f"payload closure did not expand transitively: {payload_closure}")
+
+        reachable = json.loads(
+            (output / "payload_reachable_ir.json").read_text(encoding="utf-8")
+        )
+        reachable_prototypes = {
+            row["runtime_id"] for row in reachable["prototypes"]
+        }
+        reachable_descriptors = {
+            (row["prototype"], row["pc"]): row
+            for row in reachable["closure_descriptors"]
+        }
+        if (reachable["prototype_count"] != 3
+                or reachable_prototypes != {1, 2, 3}
+                or reachable_descriptors[(2, 1)]["target_prototype"] != 3
+                or not reachable_descriptors[(2, 1)]["complete"]):
+            raise RuntimeError(f"reachable IR lost an inactive closure target: {reachable}")
+
+        report = json.loads(parsed_report_path.read_text(encoding="utf-8"))
+        payload_pass = next(
+            row for row in report["passes"] if row["stage"] == "payload_slice"
+        )
+        if (payload_pass["activations"] != 1
+                or payload_pass["activated_prototypes"] != 1
+                or payload_pass["closure_expanded_prototypes"] != 2
+                or payload_pass["closure_expansion_edges"] != 2
+                or payload_pass["prototypes"] != 3):
+            raise RuntimeError(f"payload slice report disagreed with its artifact: {payload_pass}")
+
+    print("Luraph closure descriptor trace OK: structural and transitive inactive targets passed")
     return 0
 
 
