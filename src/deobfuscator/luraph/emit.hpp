@@ -51,6 +51,9 @@ struct SemanticCandidate
     size_t path_specific_calls = 0;
     size_t path_specific_returns = 0;
     size_t path_specific_closures = 0;
+    size_t path_specific_argument_loads = 0;
+    size_t fixed_argument_loads = 0;
+    size_t variadic_argument_captures = 0;
     size_t unsupported_path_specific_operations = 0;
     nlohmann::json path_specific_operation_provenance = nlohmann::json::array();
     nlohmann::json unknown_operations = nlohmann::json::array();

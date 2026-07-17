@@ -1404,6 +1404,103 @@ bool testPathSpecificWritesCallAndReturnRenderCleanly()
     return ok;
 }
 
+bool testFixedArgumentLoadUsesProvenRegisterDestinations()
+{
+    const json bindings = json::array({
+        {{"argument_index", 1}, {"destination_register", 7}, {"proof", "write_origin"}},
+        {{"argument_index", 3}, {"destination_register", 2}, {"proof", "write_origin"}},
+    });
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "load_arguments"},
+            {"semantic_family", "arguments"},
+            {"observation_count", 2},
+            {"observed_argument_arities", json::array({3})},
+            {"write_count", 4},
+            {"argument_bindings", bindings},
+        }),
+    }), 0);
+
+    bool mappedProvenance = false;
+    for (const json& row : candidate.mapping)
+        if (row.value("prototype", 0) == 2 && row.value("pc_start", 0) == 1)
+        {
+            const json records = row.value("path_specific_operation_provenance", json::array());
+            mappedProvenance = records.size() == 1 &&
+                records[0]["operation"].value("argument_bindings", json::array()) == bindings;
+        }
+
+    return require(candidate.source.find("if argument_count ~= 3 then") != std::string::npos,
+               "fixed argument load did not guard its proven arity") &&
+        require(candidate.source.find("registers[7] = select_value(1, ...);") != std::string::npos &&
+                candidate.source.find("registers[2] = select_value(3, ...);") != std::string::npos,
+            "fixed argument load did not preserve its argument-to-register destinations") &&
+        require(candidate.fixed_argument_loads == 1 && candidate.variadic_argument_captures == 0 &&
+                candidate.path_specific_argument_loads == 1 && candidate.unsupported_operations == 0,
+            "fixed argument load metrics were not recorded cleanly") &&
+        require(candidate.path_specific_operation_provenance.size() == 1 && mappedProvenance,
+            "fixed argument load provenance was not retained in the candidate and block map");
+}
+
+bool testArgumentLoadSeparatesVariadicAndIncompleteShapes()
+{
+    const SemanticCandidate varyingFixed = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "load_arguments"},
+            {"observation_count", 2},
+            {"observed_argument_arities", json::array({1, 3})},
+            {"write_count", 2},
+            {"argument_bindings", json::array({{
+                {"argument_index", 1}, {"destination_register", 9},
+            }})},
+        }),
+    }), 0);
+    const SemanticCandidate aggregateOnly = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "load_arguments"},
+            {"observation_count", 2},
+            {"observed_argument_arities", json::array({2})},
+            {"write_count", 4},
+        }),
+    }), 0);
+    const SemanticCandidate variadic = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "capture_varargs"},
+            {"observed_argument_arities", json::array({1, 3})},
+            {"values_slot", "incoming_values"},
+            {"count_slot", "incoming_count"},
+        }),
+    }), 0);
+    const SemanticCandidate incompleteVariadic = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "capture_varargs"},
+            {"observation_count", 2},
+            {"observed_argument_arities", json::array({1, 3})},
+            {"write_count", 2},
+        }),
+    }), 0);
+
+    return require(varyingFixed.source.find("load_arguments requires exactly one observed fixed arity") !=
+                std::string::npos && varyingFixed.unsupported_path_specific_operations == 1 &&
+                varyingFixed.fixed_argument_loads == 0 && !varyingFixed.fully_rendered(),
+               "varying arity was guessed as a fixed argument load") &&
+        require(aggregateOnly.source.find("load_arguments has no proven argument-to-register bindings") !=
+                std::string::npos && aggregateOnly.unsupported_path_specific_operations == 1 &&
+                aggregateOnly.path_specific_operation_provenance.size() == 1,
+            "aggregate-only argument evidence did not remain a provenance-bearing recovery boundary") &&
+        require(variadic.source.find("state[\"incoming_values\"] = {...};") != std::string::npos &&
+                variadic.source.find("state[\"incoming_count\"] = select_value(\"#\", ...);") !=
+                    std::string::npos &&
+                variadic.variadic_argument_captures == 1 && variadic.fixed_argument_loads == 0 &&
+                variadic.unsupported_operations == 0,
+            "variadic argument capture was conflated with fixed-arity loading") &&
+        require(incompleteVariadic.source.find(
+                    "variadic capture state destinations are incomplete or conflicting") != std::string::npos &&
+                incompleteVariadic.unsupported_path_specific_operations == 1 &&
+                incompleteVariadic.variadic_argument_captures == 0,
+            "incomplete variadic capture guessed default state destinations");
+}
+
 bool testPathSpecificClosureAndJumpUseRecoveredMetadata()
 {
     json childDescriptor = descriptor(3, 7, 1);
@@ -1717,6 +1814,8 @@ int main()
     ok &= testCompleteRootArgumentTableProvesAbsentSlotsAreNil();
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
+    ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
+    ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
     ok &= testPathSpecificClosureAndJumpUseRecoveredMetadata();
     ok &= testConditionlessPathSpecificBranchUsesOrderedReplay();
     ok &= testIncompletePathSpecificCallStopsExplicitly();

@@ -4633,6 +4633,8 @@ struct LuraphExecutedStatementPath
 
 using LuraphBranchDecision = std::function<std::optional<bool>(Luau::AstStatIf*)>;
 
+// A selected branch resumes in each enclosing block. Retain those continuations
+// so normalization and validation see every statement executed by the handler.
 bool accumulateLuraphExecutedStatements(
     Luau::AstStat* statement,
     const LuraphBranchDecision& decide,
@@ -4715,7 +4717,7 @@ LuraphExecutedStatementPath selectLuraphExecutedStatementPath(
     return path;
 }
 
-Luau::AstStatBlock luraphExecutedStatementBlock(const LuraphExecutedStatementPath& path)
+Luau::AstStatBlock luraphExecutedStatementBlock(LuraphExecutedStatementPath& path)
 {
     Luau::Location location;
     if (!path.statements.empty())
@@ -4724,8 +4726,7 @@ Luau::AstStatBlock luraphExecutedStatementBlock(const LuraphExecutedStatementPat
         location.end = path.statements.back()->location.end;
     }
     return Luau::AstStatBlock(location,
-        Luau::AstArray<Luau::AstStat*>{
-            const_cast<Luau::AstStat**>(path.statements.data()), path.statements.size()});
+        Luau::AstArray<Luau::AstStat*>{path.statements.data(), path.statements.size()});
 }
 
 json luraphExecutedStatementRanges(const LuraphExecutedStatementPath& path, const SourceView& view)
@@ -9517,6 +9518,59 @@ std::optional<int64_t> luraphRuntimeNumericLane(const json& instruction, std::st
     return parseTraceInteger<int64_t>(value["value"].get<std::string>());
 }
 
+std::vector<luraph::vm::RuntimeOperandLaneAnchor> luraphRuntimeOperandLaneAnchors(
+    const LuraphRuntimeStructureTrace& trace)
+{
+    std::vector<luraph::vm::RuntimeOperandLaneAnchor> anchors;
+    anchors.reserve(trace.prototypes.size());
+    for (const auto& [id, prototype] : trace.prototypes)
+    {
+        (void)id;
+        if (prototype.declared_instruction_count == 0 ||
+            prototype.instructions.size() != prototype.declared_instruction_count ||
+            prototype.lane_names.size() < 3)
+            continue;
+
+        luraph::vm::RuntimeOperandLaneAnchor anchor;
+        anchor.instruction_count = prototype.declared_instruction_count;
+        bool complete = true;
+        for (const std::string& laneName : prototype.lane_names)
+        {
+            luraph::vm::NamedRuntimeOperandLaneSequence lane;
+            lane.name = laneName;
+            lane.values.reserve(anchor.instruction_count);
+            for (size_t pc = 1; pc <= anchor.instruction_count; ++pc)
+            {
+                const auto instruction = prototype.instructions.find(pc);
+                const std::optional<int64_t> value = instruction != prototype.instructions.end()
+                    ? luraphRuntimeNumericLane(instruction->second, laneName) : std::nullopt;
+                if (!value)
+                {
+                    complete = false;
+                    break;
+                }
+                lane.values.push_back(*value);
+            }
+            if (!complete)
+                break;
+            anchor.lanes.push_back(std::move(lane));
+        }
+        if (complete)
+            anchors.push_back(std::move(anchor));
+    }
+    return anchors;
+}
+
+std::optional<std::string_view> luraphProjectedRuntimeLane(
+    const luraph::vm::OperandLaneProjection& projection,
+    luraph::vm::NormalizedOperandLane normalizedLane)
+{
+    for (const luraph::vm::OperandLaneProjectionBinding& binding : projection.bindings)
+        if (binding.normalized_lane == normalizedLane)
+            return binding.runtime_name;
+    return std::nullopt;
+}
+
 std::optional<std::vector<luraph::vm::CaptureDescriptorShape>> luraphRuntimeCaptureShape(
     const json& descriptor)
 {
@@ -9542,7 +9596,8 @@ std::optional<std::vector<luraph::vm::CaptureDescriptorShape>> luraphRuntimeCapt
 }
 
 std::vector<luraph::vm::RuntimePrototypeRecord> luraphRuntimePrototypeRecords(
-    const LuraphRuntimeStructureTrace& trace)
+    const LuraphRuntimeStructureTrace& trace,
+    const std::optional<luraph::vm::OperandLaneProjection>& laneProjection = std::nullopt)
 {
     std::vector<luraph::vm::RuntimePrototypeRecord> records;
     records.reserve(trace.prototypes.size());
@@ -9554,11 +9609,21 @@ std::vector<luraph::vm::RuntimePrototypeRecord> luraphRuntimePrototypeRecords(
         record.instruction_count = prototype.declared_instruction_count;
         bool complete = prototype.instructions.size() == prototype.declared_instruction_count;
         record.opcode_lanes.reserve(prototype.instructions.size());
+        const std::optional<std::string_view> dLane = laneProjection
+            ? luraphProjectedRuntimeLane(*laneProjection, luraph::vm::NormalizedOperandLane::D)
+            : std::optional<std::string_view>("D");
+        const std::optional<std::string_view> gLane = laneProjection
+            ? luraphProjectedRuntimeLane(*laneProjection, luraph::vm::NormalizedOperandLane::G)
+            : std::optional<std::string_view>("G");
+        const std::optional<std::string_view> pLane = laneProjection
+            ? luraphProjectedRuntimeLane(*laneProjection, luraph::vm::NormalizedOperandLane::p)
+            : std::optional<std::string_view>("p");
+        complete = complete && dLane && gLane && pLane;
         for (const auto& [pc, instruction] : prototype.instructions)
         {
-            const std::optional<int64_t> D = luraphRuntimeNumericLane(instruction, "D");
-            const std::optional<int64_t> G = luraphRuntimeNumericLane(instruction, "G");
-            const std::optional<int64_t> p = luraphRuntimeNumericLane(instruction, "p");
+            const std::optional<int64_t> D = dLane ? luraphRuntimeNumericLane(instruction, *dLane) : std::nullopt;
+            const std::optional<int64_t> G = gLane ? luraphRuntimeNumericLane(instruction, *gLane) : std::nullopt;
+            const std::optional<int64_t> p = pLane ? luraphRuntimeNumericLane(instruction, *pLane) : std::nullopt;
             if (!instruction.is_object() || instruction.value("pc", size_t(0)) != pc ||
                 pc != record.opcode_lanes.size() + 1 || !instruction.contains("opcode") ||
                 !instruction["opcode"].is_number_integer() || !D || !G || !p)

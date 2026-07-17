@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <optional>
@@ -371,6 +372,18 @@ struct PrototypeCfg
     uint64_t id = 0;
     size_t entry = 1;
     std::vector<Block> blocks;
+};
+
+struct ArgumentBinding
+{
+    size_t argument = 0;
+    int64_t destination = -1;
+};
+
+struct LoadArgumentsShape
+{
+    size_t arity = 0;
+    std::vector<ArgumentBinding> bindings;
 };
 
 class Emitter
@@ -1829,6 +1842,8 @@ private:
             ++result.path_specific_returns;
         if (containsOperationKind(value, "closure"))
             ++result.path_specific_closures;
+        if (containsOperationKind(value, "load_arguments") || containsOperationKind(value, "capture_varargs"))
+            ++result.path_specific_argument_loads;
 
         result.path_specific_operation_provenance.push_back({
             {"prototype", context.prototype},
@@ -2959,6 +2974,207 @@ private:
             "_pc" + std::to_string(context.pc) + "_op" + std::to_string(operationId);
     }
 
+    static std::optional<uint64_t> nonnegativeInteger(const json& value)
+    {
+        if (value.is_number_unsigned())
+            return value.get<uint64_t>();
+        if (value.is_number_integer())
+        {
+            const int64_t number = value.get<int64_t>();
+            if (number >= 0)
+                return static_cast<uint64_t>(number);
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<uint64_t> bindingInteger(
+        const json& binding, std::initializer_list<std::string_view> names)
+    {
+        if (!binding.is_object())
+            return std::nullopt;
+        for (std::string_view name : names)
+        {
+            const auto value = binding.find(std::string(name));
+            if (value != binding.end())
+                return nonnegativeInteger(*value);
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<int64_t> destinationFromKey(const std::string& value)
+    {
+        try
+        {
+            size_t consumed = 0;
+            const long long destination = std::stoll(value, &consumed, 10);
+            if (consumed == value.size() && destination >= 0)
+                return static_cast<int64_t>(destination);
+        }
+        catch (...)
+        {
+        }
+        return std::nullopt;
+    }
+
+    static bool appendArgumentBinding(LoadArgumentsShape& shape, uint64_t argument,
+        uint64_t destination, std::set<int64_t>& destinations, std::string& reason)
+    {
+        if (argument == 0 || argument > shape.arity)
+        {
+            reason = "argument binding is outside the fixed arity";
+            return false;
+        }
+        if (destination > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        {
+            reason = "argument register destination is out of range";
+            return false;
+        }
+        const int64_t registerIndex = static_cast<int64_t>(destination);
+        if (!destinations.insert(registerIndex).second)
+        {
+            reason = "argument register destinations are not unique";
+            return false;
+        }
+        shape.bindings.push_back({static_cast<size_t>(argument), registerIndex});
+        return true;
+    }
+
+    static std::optional<LoadArgumentsShape> loadArgumentsShape(
+        const json& value, std::string& reason)
+    {
+        if (!value.contains("observed_argument_arities") ||
+            !value["observed_argument_arities"].is_array() ||
+            value["observed_argument_arities"].size() != 1)
+        {
+            reason = "load_arguments requires exactly one observed fixed arity";
+            return std::nullopt;
+        }
+        const std::optional<uint64_t> arity = nonnegativeInteger(
+            value["observed_argument_arities"].front());
+        if (!arity || *arity > std::numeric_limits<size_t>::max())
+        {
+            reason = "observed fixed argument arity is invalid";
+            return std::nullopt;
+        }
+
+        LoadArgumentsShape shape;
+        shape.arity = static_cast<size_t>(*arity);
+        std::set<int64_t> destinations;
+        const json* bindings = nullptr;
+        for (std::string_view name : {"argument_bindings", "argument_writes", "register_writes"})
+        {
+            const auto candidate = value.find(std::string(name));
+            if (candidate != value.end())
+            {
+                if (!candidate->is_array())
+                {
+                    reason = std::string(name) + " must be an array";
+                    return std::nullopt;
+                }
+                bindings = &*candidate;
+                break;
+            }
+        }
+
+        if (bindings)
+        {
+            for (const json& binding : *bindings)
+            {
+                const std::optional<uint64_t> argument = bindingInteger(
+                    binding, {"argument_index", "argument", "source_argument"});
+                const std::optional<uint64_t> destination = bindingInteger(
+                    binding, {"destination_register", "register"});
+                if (!argument || !destination)
+                {
+                    reason = "argument binding lacks an explicit source argument or register destination";
+                    return std::nullopt;
+                }
+                if (!appendArgumentBinding(shape, *argument, *destination, destinations, reason))
+                    return std::nullopt;
+            }
+        }
+        else
+        {
+            const json* orderedDestinations = nullptr;
+            for (std::string_view name : {"argument_registers", "destination_registers"})
+            {
+                const auto candidate = value.find(std::string(name));
+                if (candidate != value.end())
+                {
+                    if (!candidate->is_array())
+                    {
+                        reason = std::string(name) + " must be an array";
+                        return std::nullopt;
+                    }
+                    orderedDestinations = &*candidate;
+                    break;
+                }
+            }
+            if (orderedDestinations)
+            {
+                for (size_t index = 0; index < orderedDestinations->size(); ++index)
+                {
+                    const std::optional<uint64_t> destination = nonnegativeInteger((*orderedDestinations)[index]);
+                    if (!destination)
+                    {
+                        reason = "ordered argument register destination is invalid";
+                        return std::nullopt;
+                    }
+                    if (!appendArgumentBinding(shape, index + 1, *destination, destinations, reason))
+                        return std::nullopt;
+                }
+            }
+            else if (value.contains("write_origins"))
+            {
+                const json& origins = value["write_origins"];
+                if (!origins.is_object())
+                {
+                    reason = "write_origins must be an object";
+                    return std::nullopt;
+                }
+                for (auto origin = origins.begin(); origin != origins.end(); ++origin)
+                {
+                    const std::optional<int64_t> destination = destinationFromKey(origin.key());
+                    if (!destination || !origin.value().is_array() || origin.value().size() != 1 ||
+                        !origin.value().front().is_object() ||
+                        origin.value().front().value("kind", "") != "argument")
+                    {
+                        reason = "write origin does not prove one argument and register destination";
+                        return std::nullopt;
+                    }
+                    const std::optional<uint64_t> argument = bindingInteger(
+                        origin.value().front(), {"index", "argument_index", "argument"});
+                    if (!argument || !appendArgumentBinding(shape, *argument,
+                            static_cast<uint64_t>(*destination), destinations, reason))
+                    {
+                        if (reason.empty())
+                            reason = "write origin lacks an explicit source argument";
+                        return std::nullopt;
+                    }
+                }
+            }
+        }
+
+        if (shape.bindings.empty())
+        {
+            reason = "load_arguments has no proven argument-to-register bindings";
+            return std::nullopt;
+        }
+        if (value.contains("write_count"))
+        {
+            const std::optional<uint64_t> writeCount = nonnegativeInteger(value["write_count"]);
+            const uint64_t observations = positiveUnsignedField(value, "observation_count");
+            if (!writeCount || observations == 0 ||
+                shape.bindings.size() > std::numeric_limits<uint64_t>::max() / observations ||
+                *writeCount != observations * shape.bindings.size())
+            {
+                reason = "write_count is inconsistent with the proven argument bindings";
+                return std::nullopt;
+            }
+        }
+        return shape;
+    }
+
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
     {
         ++result.operations;
@@ -3129,10 +3345,47 @@ private:
             append(prefix + "end\n");
             return;
         }
+        if (kind == "load_arguments")
+        {
+            std::string reason;
+            const std::optional<LoadArgumentsShape> shape = loadArgumentsShape(value, reason);
+            if (!shape)
+            {
+                unsupportedOperation(kind, reason, depth, context);
+                return;
+            }
+            append(prefix + "if argument_count ~= " + std::to_string(shape->arity) + " then\n");
+            append(prefix + "  unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+                std::to_string(context.pc) + ", \"load_arguments\", \"fixed argument arity mismatch: expected " +
+                std::to_string(shape->arity) + ", got \" .. tostring(argument_count))\n");
+            append(prefix + "end\n");
+            for (const ArgumentBinding& binding : shape->bindings)
+                append(prefix + "registers[" + std::to_string(binding.destination) + "] = select_value(" +
+                    std::to_string(binding.argument) + ", ...);\n");
+            ++result.fixed_argument_loads;
+            return;
+        }
         if (kind == "capture_varargs")
         {
-            append(prefix + "state[" + quoteLuau(value.value("values_slot", "varargs")) + "] = {...};\n");
-            append(prefix + "state[" + quoteLuau(value.value("count_slot", "vararg_count")) + "] = select_value(\"#\", ...);\n");
+            const std::string valuesSlot = jsonStringOr(value, "values_slot");
+            const std::string countSlot = jsonStringOr(value, "count_slot");
+            if (valuesSlot.empty() || countSlot.empty() || valuesSlot == countSlot)
+            {
+                unsupportedOperation(kind,
+                    "variadic capture state destinations are incomplete or conflicting", depth, context);
+                return;
+            }
+            if (context.path_specific && value.contains("observed_argument_arities") &&
+                (!value["observed_argument_arities"].is_array() ||
+                    value["observed_argument_arities"].size() < 2))
+            {
+                unsupportedOperation(kind,
+                    "variadic capture does not contain varying argument arity evidence", depth, context);
+                return;
+            }
+            append(prefix + "state[" + quoteLuau(valuesSlot) + "] = {...};\n");
+            append(prefix + "state[" + quoteLuau(countSlot) + "] = select_value(\"#\", ...);\n");
+            ++result.variadic_argument_captures;
             return;
         }
         if (kind == "close_upvalues")
