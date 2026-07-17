@@ -10900,6 +10900,207 @@ json inferLuraphObservationalSiteOperation(
     return operation;
 }
 
+json luraphOpcode8RangeArtifact(
+    const luraph::call_semantics::RegisterRange& range)
+{
+    return {
+        {"begin", range.begin},
+        {"end_exclusive", range.end_exclusive ? json(*range.end_exclusive) : json(nullptr)},
+        {"dynamic_end", !range.end_exclusive.has_value()},
+    };
+}
+
+json luraphOpcode8CallArtifact(
+    const luraph::call_semantics::Opcode8CallSemantics& semantics,
+    luraph::call_semantics::GuardPathProof proof,
+    size_t observationCount)
+{
+    const bool pathSpecific = proof == luraph::call_semantics::GuardPathProof::RuntimeObserved;
+    json operation = {
+        {"kind", "call"},
+        {"semantic_family", "call"},
+        {"opcode", 8},
+        {"source_semantic", true},
+        {"static_semantic", !pathSpecific},
+        {"path_specific", pathSpecific},
+        {"proof", pathSpecific
+            ? "complete_runtime_guard_path_and_packed_handler_shape"
+            : "complete_static_guard_path_and_packed_handler_shape"},
+        {"guard_path_proof", luraph::call_semantics::toString(proof)},
+        {"function_register", semantics.function_register},
+        {"result_base_register", semantics.result_base_register},
+        {"callee", {
+            {"kind", "register_read"},
+            {"index", semantics.function_register},
+        }},
+        {"encoded_argument_count", semantics.encoded_argument_count},
+        {"encoded_result_count", semantics.encoded_result_count},
+        {"argument_pack", {
+            {"mode", luraph::call_semantics::toString(semantics.arguments.mode)},
+            {"registers", luraphOpcode8RangeArtifact(semantics.arguments.registers)},
+            {"count", semantics.arguments.count ? json(*semantics.arguments.count) : json(nullptr)},
+        }},
+        {"result_placement", {
+            {"mode", luraph::call_semantics::toString(semantics.results.mode)},
+            {"actual_result_arity", semantics.results.actual_result_arity
+                ? json(*semantics.results.actual_result_arity) : json(nullptr)},
+            {"requested_count", semantics.results.requested_count
+                ? json(*semantics.results.requested_count) : json(nullptr)},
+            {"logical_registers", luraphOpcode8RangeArtifact(semantics.results.logical_registers)},
+            {"assignment_registers", luraphOpcode8RangeArtifact(semantics.results.assignment_registers)},
+            {"assignment_count", semantics.results.assignment_count
+                ? json(*semantics.results.assignment_count) : json(nullptr)},
+            {"top_after", semantics.results.top_after ? json(*semantics.results.top_after) : json(nullptr)},
+            {"nil_pads_missing_values", semantics.results.nil_pads_missing_values},
+            {"truncates_extra_values", semantics.results.truncates_extra_values},
+            {"encoded_one_loop_bound_anomaly", semantics.results.encoded_one_loop_bound_anomaly},
+        }},
+        // The current source emitter has no sound lowering for a dynamic register
+        // result range. Keeping its legacy `arguments` field absent makes it fail
+        // closed until the result-placement contract is implemented there.
+        {"emission_status", "requires_register_call_result_lowering"},
+        {"runtime_validated", semantics.runtime_validated},
+        {"observation_count", observationCount},
+    };
+    if (pathSpecific)
+        operation["candidate_only"] = true;
+    return operation;
+}
+
+struct LuraphOpcode8PipelineRecognition
+{
+    json operation = nullptr;
+    bool static_semantic = false;
+    size_t validated_observations = 0;
+    std::string status = "not_attempted";
+    std::string diagnostic;
+};
+
+LuraphOpcode8PipelineRecognition recognizeLuraphOpcode8PipelineCall(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphOpcode8PipelineRecognition output;
+    const json shape = handler.value("opcode8_call_shape", json(nullptr));
+    if (!shape.is_object() || !shape.value("verified", false))
+    {
+        output.status = "insufficient_evidence";
+        output.diagnostic = "packed opcode-8 handler shape is not structurally verified";
+        return output;
+    }
+    const auto laneInteger = [&](std::string_view field) -> std::optional<int64_t> {
+        if (!shape.contains(std::string(field)) || !shape[std::string(field)].is_string())
+            return std::nullopt;
+        const std::string lane = shape[std::string(field)].get<std::string>();
+        if (!effectiveLanes.is_object() || !effectiveLanes.contains(lane))
+            return std::nullopt;
+        return luraphObservedInteger(effectiveLanes[lane]);
+    };
+    const std::optional<int64_t> base = laneInteger("base_register_lane");
+    const std::optional<int64_t> argumentCount = laneInteger("encoded_argument_count_lane");
+    const std::optional<int64_t> resultCount = laneInteger("encoded_result_count_lane");
+    if (!base || !argumentCount || !resultCount)
+    {
+        output.status = "invalid_evidence";
+        output.diagnostic = "opcode-8 operand lanes are not complete non-negative integers";
+        return output;
+    }
+
+    const auto recognize = [&](luraph::call_semantics::GuardPathProof proof,
+                               const std::vector<int64_t>& changedRegisters) {
+        luraph::call_semantics::Opcode8CallEvidence evidence;
+        evidence.opcode = 8;
+        evidence.packed_handler_shape_verified = true;
+        evidence.guard_path_proof = proof;
+        evidence.guard_path_complete = true;
+        evidence.base_register = *base;
+        evidence.encoded_argument_count = *argumentCount;
+        evidence.encoded_result_count = *resultCount;
+        evidence.observed_changed_registers = changedRegisters;
+        return luraph::call_semantics::recognizeOpcode8Call(evidence);
+    };
+
+    if (shape.value("static_guard_path_complete", false))
+    {
+        const auto recognized = recognize(luraph::call_semantics::GuardPathProof::StaticallyProven, {});
+        output.status = luraph::call_semantics::toString(recognized.status);
+        output.diagnostic = recognized.diagnostic;
+        if (recognized.semantics)
+        {
+            output.operation = luraphOpcode8CallArtifact(
+                *recognized.semantics, luraph::call_semantics::GuardPathProof::StaticallyProven, 0);
+            output.static_semantic = true;
+        }
+        return output;
+    }
+
+    if (!observations || observations->empty())
+    {
+        output.status = "insufficient_evidence";
+        output.diagnostic = "opcode-8 site has neither a static proof nor runtime observations";
+        return output;
+    }
+
+    std::optional<luraph::call_semantics::Opcode8CallSemantics> retained;
+    for (const json& observation : *observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        if (!guardPath.is_object() || !guardPath.value("complete", false) ||
+            !guardPath.contains("decisions") || !guardPath["decisions"].is_array() ||
+            guardPath["decisions"].empty())
+        {
+            output.status = "insufficient_evidence";
+            output.diagnostic = "an observed opcode-8 execution lacks a complete guard path";
+            return output;
+        }
+        const json writes = observation.value("register_writes", json::array());
+        if (!writes.is_array())
+        {
+            output.status = "invalid_evidence";
+            output.diagnostic = "opcode-8 changed-register evidence is not an array";
+            return output;
+        }
+        std::vector<int64_t> changedRegisters;
+        changedRegisters.reserve(writes.size());
+        for (const json& write : writes)
+        {
+            if (!write.is_object() || !write.contains("register") || !write["register"].is_number_integer())
+            {
+                output.status = "invalid_evidence";
+                output.diagnostic = "opcode-8 changed-register evidence has an invalid destination";
+                return output;
+            }
+            changedRegisters.push_back(write["register"].get<int64_t>());
+        }
+        const auto recognized = recognize(
+            luraph::call_semantics::GuardPathProof::RuntimeObserved, changedRegisters);
+        if (!recognized.semantics)
+        {
+            output.status = luraph::call_semantics::toString(recognized.status);
+            output.diagnostic = recognized.diagnostic;
+            return output;
+        }
+        if (retained && (retained->function_register != recognized.semantics->function_register ||
+                retained->encoded_argument_count != recognized.semantics->encoded_argument_count ||
+                retained->encoded_result_count != recognized.semantics->encoded_result_count))
+        {
+            output.status = "contradictory_evidence";
+            output.diagnostic = "opcode-8 operand semantics changed across observations of one site";
+            return output;
+        }
+        retained = *recognized.semantics;
+        ++output.validated_observations;
+    }
+
+    output.status = "recognized";
+    output.diagnostic = "all observed opcode-8 executions have complete guard-path and write-range evidence";
+    output.operation = luraphOpcode8CallArtifact(
+        *retained, luraph::call_semantics::GuardPathProof::RuntimeObserved,
+        output.validated_observations);
+    return output;
+}
+
 json luraphRuntimeSemanticDispatchArtifact(
     const LuraphRuntimeStructureTrace& trace,
     const LuraphOpcodeCatalog& catalog,
@@ -11172,6 +11373,13 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t guardReplaySitesValidated = 0;
     size_t guardReplaySitesRejected = 0;
     size_t guardReplaySitesDivergent = 0;
+    size_t opcode8CallSitesTotal = 0;
+    size_t opcode8CallSitesStatic = 0;
+    size_t opcode8CallSitesObservational = 0;
+    size_t opcode8CallSitesRejected = 0;
+    size_t opcode8CallObservationsValidated = 0;
+    size_t opcode8EncodedOneQuirkSites = 0;
+    json opcode8RecognitionStatusCounts = json::object();
     json observationalOperationCounts = json::object();
 
     json prototypes = json::array();
@@ -11298,7 +11506,47 @@ json luraphRuntimeSemanticDispatchArtifact(
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
             const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
-            if (!semanticAccepted && observedSite != observationsBySite.end())
+            if (!semanticAccepted && opcode == 8 && handler != handlers.end())
+            {
+                ++opcode8CallSitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphOpcode8PipelineRecognition recognized = recognizeLuraphOpcode8PipelineCall(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode8_call_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.static_semantic},
+                };
+                opcode8RecognitionStatusCounts[recognized.status] =
+                    opcode8RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode8CallObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    if (recognized.operation.value("encoded_result_count", int64_t(-1)) == 1)
+                        ++opcode8EncodedOneQuirkSites;
+                    if (recognized.static_semantic)
+                    {
+                        row["semantic_operation"] = std::move(recognized.operation);
+                        semanticAccepted = true;
+                        ++semanticLifted;
+                        ++opcode8CallSitesStatic;
+                    }
+                    else
+                    {
+                        row["observational_semantic_operation"] = std::move(recognized.operation);
+                        ++observationalSemanticLifted;
+                        ++opcode8CallSitesObservational;
+                        observationalOperationCounts["call"] =
+                            observationalOperationCounts.value("call", size_t(0)) + 1;
+                    }
+                }
+                else
+                    ++opcode8CallSitesRejected;
+            }
+            if (!semanticAccepted && observedSite != observationsBySite.end() &&
+                row["observational_semantic_operation"].is_null())
             {
                 std::optional<json> replayed;
                 bool completeReplay = !observedSite->second.empty();
@@ -11550,6 +11798,21 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"guard_replay_sites_validated", guardReplaySitesValidated},
         {"guard_replay_sites_rejected", guardReplaySitesRejected},
         {"guard_replay_sites_divergent", guardReplaySitesDivergent},
+        {"opcode8_call_coverage", {
+            {"available", opcode8CallSitesTotal > 0},
+            {"scope", "runtime-decoded-opcode-8-instruction-sites"},
+            {"sites_total", opcode8CallSitesTotal},
+            {"static_semantic_sites", opcode8CallSitesStatic},
+            {"runtime_observational_sites", opcode8CallSitesObservational},
+            {"unresolved_sites", opcode8CallSitesTotal - opcode8CallSitesStatic - opcode8CallSitesObservational},
+            {"rejected_sites", opcode8CallSitesRejected},
+            {"validated_runtime_executions", opcode8CallObservationsValidated},
+            {"encoded_one_quirk_sites", opcode8EncodedOneQuirkSites},
+            {"recognition_status_counts", std::move(opcode8RecognitionStatusCounts)},
+            {"static_requires_complete_guard_path", true},
+            {"runtime_evidence_is_path_specific", true},
+            {"encoded_one_quirk_preserved", true},
+        }},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
         {"structurally_missing_instructions", declaredInstructionCount > effectClassified + unresolved
@@ -14356,6 +14619,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeUnobservedInstructions = 0;
     json runtimeObservationalOperationCounts = json::object();
     json runtimeWriteOriginEvidence = json::object();
+    json runtimeOpcode8CallCoverage = json{{"available", false}};
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -14404,6 +14668,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "observational_operation_counts", json::object());
                     runtimeWriteOriginEvidence = runtimeSemanticDocument->value(
                         "write_origin_evidence", json::object());
+                    runtimeOpcode8CallCoverage = runtimeSemanticDocument->value(
+                        "opcode8_call_coverage", json{{"available", false}});
                 }
                 catch (const std::exception& error)
                 {
@@ -14451,6 +14717,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"guard_replay_sites_divergent", runtimeGuardReplaySitesDivergent},
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
+                {"opcode8_call_coverage", runtimeOpcode8CallCoverage},
                 {"trace_specialized_is_path_specific", true},
                 {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved_instructions", runtimeUnresolved},
@@ -16082,6 +16349,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"runtime_validated_observational_semantic_is_path_specific", true},
             {"trace_evidence_only_is_semantic", false},
         };
+    report["coverage"]["opcode8_calls"] = runtimeOpcode8CallCoverage;
     const bool staticContainerCountsAvailable = decodedContainer &&
         (analysis.container_metrics.prototype_count > 0 || analysis.container_metrics.instruction_count > 0 ||
             analysis.container_metrics.constant_count > 0 || analysis.container_metrics.descriptor_count > 0);
