@@ -1490,6 +1490,138 @@ bool testIncompletePathSpecificCallStopsExplicitly()
             "candidate with an incomplete path-specific call claimed full rendering");
 }
 
+bool testPathSpecificJumpUsesExactAdjustment()
+{
+    const auto emitJump = [](int adjustment) {
+        json instruction = pathSpecificInstruction(1, {
+            {"kind", "jump"},
+            {"target", {{"kind", "operand"}, {"lane", "G"}, {"adjustment", adjustment}}},
+        });
+        instruction["lanes"] = {{"G", number(5)}};
+        return emitWithTarget(json::array({std::move(instruction)}), 0, 1,
+            json::array(), json::array(), json::array(), {
+                {"runtime_id", 2}, {"entry_pc", 1}, {"blocks", json::array({{
+                    {"id", "p2_b1"}, {"start_pc", 1}, {"end_pc", 1}, {"reachable", true},
+                    {"successors", json::array()}, {"terminator", "observed_transfer"},
+                }})},
+            });
+    };
+    const SemanticCandidate noAdjustment = emitJump(0);
+    const SemanticCandidate plusOne = emitJump(1);
+    return require(noAdjustment.source.find("pc = 5\n") != std::string::npos,
+               "zero-adjustment observed jump was shifted by one") &&
+        require(noAdjustment.source.find("pc = (5 + (1))") == std::string::npos,
+            "zero-adjustment observed jump used the legacy VM conversion") &&
+        require(plusOne.source.find("pc = (5 + (1))\n") != std::string::npos,
+            "one-adjustment observed jump did not preserve its proven conversion");
+}
+
+bool testPathSpecificMethodCallPreservesReceiver()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "call"},
+            {"method", true},
+            {"function", {
+                {"kind", "index_read"},
+                {"table", {{"kind", "register_read"}, {"index", immediate("D", 1)}}},
+                {"index", {{"kind", "constant"}, {"value", "DoThing"}}},
+            }},
+            {"arguments", json::array({
+                {{"kind", "register_read"}, {"index", immediate("D", 2)}},
+            })},
+        }),
+    }), 0);
+    return require(candidate.source.find("(registers[1]):DoThing(registers[2]);") != std::string::npos,
+               "path-specific method call lost receiver syntax") &&
+        require(candidate.path_specific_calls == 1 && candidate.unsupported_expressions == 0,
+            "complete path-specific method call was not rendered cleanly");
+}
+
+bool testStaticSemanticOperationPrecedesPathSpecificCandidate()
+{
+    json instruction = pathSpecificInstruction(1, {
+        {"kind", "register_write"},
+        {"register", immediate("D", 2)},
+        {"value", {{"kind", "constant"}, {"value", 22}}},
+    });
+    instruction["semantic_operation"] = {
+        {"kind", "register_write"},
+        {"register", immediate("D", 1)},
+        {"value", {{"kind", "constant"}, {"value", 11}}},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({std::move(instruction)}), 0);
+    bool mappingStatic = false;
+    for (const json& row : candidate.mapping)
+        if (row.value("prototype", 0) == 2 && row.value("pc_start", 0) == 1)
+            mappingStatic = !row.value("path_specific", true) &&
+                row.value("path_specific_pcs", json::array()).empty();
+    return require(candidate.source.find("registers[1] = 11;") != std::string::npos,
+               "static semantic operation was not emitted") &&
+        require(candidate.source.find("registers[2] = 22;") == std::string::npos,
+            "weaker path-specific candidate overrode static semantics") &&
+        require(candidate.path_specific_operations == 0 && mappingStatic,
+            "static-over-observational precedence was not reflected in metrics and mapping");
+}
+
+bool testVerifiedOpcode112ClosureDescriptorRenders()
+{
+    json instruction = closureInstruction(1, descriptor(3, 7, 0));
+    instruction["opcode"] = 112;
+    const SemanticCandidate candidate = emitWithTarget(json::array({std::move(instruction)}), 0, 1,
+        json::array({prototype(3, json::array({
+            {{"pc", 1}, {"opcode", 31}, {"semantic_operation", {
+                {"kind", "return"}, {"values", json::array()},
+            }}},
+        }))}), json::array({cfgPrototype(3, 1)}));
+    return require(candidate.source.find("local recovered_callback_2_1 = function(...)") != std::string::npos,
+               "verified opcode-112 closure descriptor was ignored") &&
+        require(candidate.unresolved_closure_descriptors == 0,
+            "verified opcode-112 closure descriptor was marked unresolved");
+}
+
+bool testCaptureKindThreeRemainsExplicitlyUnsupported()
+{
+    json unsupportedDescriptor = descriptor(3, 7, 1);
+    unsupportedDescriptor["captures"][0] = {
+        {"capture_index", 0}, {"capture_kind", 3}, {"slot", 0},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "closure"}, {"descriptor", unsupportedDescriptor},
+        }),
+    }), 1, 1, json::array({prototype(3, json::array({
+        {{"pc", 1}, {"opcode", 31}, {"semantic_operation", {
+            {"kind", "return"}, {"values", json::array()},
+        }}},
+    }))}), json::array({cfgPrototype(3, 1)}));
+    return require(candidate.source.find("capture kind 3 remains distinct and is not semantically proven") !=
+               std::string::npos,
+               "capture kind three was silently treated as an inherited kind-two cell") &&
+        require(candidate.unresolved_closure_descriptors == 1 &&
+                candidate.unsupported_path_specific_operations == 1,
+            "unsupported capture kind was not retained as a recovery boundary") &&
+        require(!candidate.fully_rendered(),
+            "candidate with unsupported capture kind three claimed full rendering");
+}
+
+bool testUnsupportedPathSpecificExpressionFailsClosed()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "register_write"},
+            {"register", immediate("D", 1)},
+            {"value", {{"kind", "unproven_expression"}}},
+        }),
+    }), 0);
+    return require(candidate.source.find(
+               "unsupported_semantic_operation(2, 1, \"expression\", \"unsupported expression kind: unproven_expression\")") !=
+               std::string::npos,
+               "unsupported expression silently became nil") &&
+        require(candidate.unsupported_expressions == 1 && !candidate.fully_rendered(),
+            "unsupported expression was not counted as an incomplete reconstruction");
+}
+
 } // namespace
 
 int main()
@@ -1526,6 +1658,12 @@ int main()
     ok &= testPathSpecificClosureAndJumpUseRecoveredMetadata();
     ok &= testConditionlessPathSpecificBranchUsesOrderedReplay();
     ok &= testIncompletePathSpecificCallStopsExplicitly();
+    ok &= testPathSpecificJumpUsesExactAdjustment();
+    ok &= testPathSpecificMethodCallPreservesReceiver();
+    ok &= testStaticSemanticOperationPrecedesPathSpecificCandidate();
+    ok &= testVerifiedOpcode112ClosureDescriptorRenders();
+    ok &= testCaptureKindThreeRemainsExplicitlyUnsupported();
+    ok &= testUnsupportedPathSpecificExpressionFailsClosed();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
     return ok ? 0 : 1;

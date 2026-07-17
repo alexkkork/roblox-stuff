@@ -92,6 +92,25 @@ void addProof(std::vector<CorrespondenceProof>& proofs, CorrespondenceProof proo
         proofs.push_back(proof);
 }
 
+bool validInstructionShapes(const std::vector<InstructionShape>& instructions, size_t instructionCount)
+{
+    if (instructions.size() != instructionCount)
+        return false;
+    for (size_t index = 0; index < instructions.size(); ++index)
+        if (instructions[index].pc != index + 1)
+            return false;
+    return true;
+}
+
+InstructionShape instructionShape(const NormalizedInstruction& instruction)
+{
+    return {
+        instruction.pc,
+        instruction.opcode,
+        {instruction.D.base_value, instruction.G.base_value, instruction.p.base_value},
+    };
+}
+
 } // namespace
 
 OperandLane normalizeLane(int64_t rawWord, size_t pc, size_t constantCount, size_t prototypeCount)
@@ -163,9 +182,10 @@ NormalizedContainer normalizeContainer(const ContainerAnalysis& container)
 uint64_t fingerprintDigest(const PrototypeStructuralFingerprint& fingerprint)
 {
     uint64_t hash = 1469598103934665603ull;
-    hashByte(hash, 1);
+    hashByte(hash, 2);
     hashByte(hash, fingerprint.is_root ? 1 : 0);
     hashWord(hash, fingerprint.instruction_count);
+    hashWord(hash, fingerprint.opcode_lane_digest);
     hashWord(hash, fingerprint.captures.size());
     for (const CaptureDescriptorShape& capture : fingerprint.captures)
     {
@@ -183,6 +203,21 @@ uint64_t fingerprintDigest(const PrototypeStructuralFingerprint& fingerprint)
             hashWord(hash, capture.kind_code);
             hashWord(hash, capture.source_index);
         }
+    }
+    return hash;
+}
+
+uint64_t opcodeLaneFingerprintDigest(const std::vector<InstructionShape>& instructions)
+{
+    uint64_t hash = 1469598103934665603ull;
+    hashByte(hash, 1);
+    hashWord(hash, instructions.size());
+    for (const InstructionShape& instruction : instructions)
+    {
+        hashWord(hash, instruction.pc);
+        hashWord(hash, static_cast<uint64_t>(instruction.opcode));
+        for (int64_t lane : instruction.lanes)
+            hashWord(hash, static_cast<uint64_t>(lane));
     }
     return hash;
 }
@@ -212,12 +247,19 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
     const size_t prototypeCount = container.prototypes.size();
     std::vector<std::vector<StaticPrototypeShape::ClosureEdge>> closureEdges(prototypeCount);
     std::vector<std::optional<size_t>> parentClosurePc(prototypeCount);
+    std::vector<size_t> actualIncoming(prototypeCount, 0);
+    size_t actualReferenceCount = 0;
+    size_t actualClosureCount = 0;
+    size_t actualCaptureCount = 0;
 
     for (size_t index = 0; index < prototypeCount; ++index)
     {
         const PrototypeMetadata& prototype = container.prototypes[index];
         if (prototype.index != index || prototype.instruction_count != prototype.instructions.size())
             return fail("static prototype metadata or instruction count is inconsistent");
+        for (size_t instructionIndex = 0; instructionIndex < prototype.instructions.size(); ++instructionIndex)
+            if (prototype.instructions[instructionIndex].index != instructionIndex)
+                return fail("static prototype instruction order is inconsistent");
         if (index == *container.root_metadata_index)
         {
             if (prototype.parent_prototype_index || prototype.incoming_prototype_reference_count != 0)
@@ -234,27 +276,49 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
         (void)captureShape(prototype, capturesValid);
         if (!capturesValid)
             return fail("static prototype has an unverified capture descriptor");
+        actualCaptureCount += prototype.descriptors.size();
 
         std::set<size_t> closurePcs;
         for (const PrototypeReferenceMetadata& reference : prototype.prototype_references)
         {
             if (!reference.in_bounds || !reference.metadata_index || *reference.metadata_index >= prototypeCount)
                 return fail("static prototype reference is not in bounds");
+            if (reference.instruction_index >= prototype.instruction_count || reference.operand_word_index >= 4)
+                return fail("static prototype reference has an invalid instruction location");
+            const size_t target = *reference.metadata_index;
+            if (container.prototypes[target].parent_prototype_index != std::optional<size_t>(index))
+                return fail("static prototype reference disagrees with the proven parent graph");
+            ++actualIncoming[target];
+            ++actualReferenceCount;
             if (!reference.closure_target)
                 continue;
-            const size_t target = *reference.metadata_index;
+            if (reference.opcode != 112)
+                return fail("static closure target does not use the proven opcode-112 layout");
             const size_t sourcePc = reference.instruction_index + 1;
             if (sourcePc == 0 || sourcePc > prototype.instruction_count || !closurePcs.insert(sourcePc).second)
                 return fail("static closure target has an invalid or duplicate source PC");
-            if (container.prototypes[target].parent_prototype_index != std::optional<size_t>(index) ||
-                reference.capture_descriptor_count != container.prototypes[target].descriptors.size())
+            if (reference.capture_descriptor_count != container.prototypes[target].descriptors.size())
                 return fail("static closure target disagrees with the proven prototype graph");
             closureEdges[index].push_back({sourcePc, target});
+            ++actualClosureCount;
             if (parentClosurePc[target] && *parentClosurePc[target] != sourcePc)
                 return fail("static child has multiple closure-construction sites");
             parentClosurePc[target] = sourcePc;
         }
     }
+
+    for (size_t index = 0; index < prototypeCount; ++index)
+    {
+        const size_t expectedIncoming = index == *container.root_metadata_index ? 0 : 1;
+        if (actualIncoming[index] != expectedIncoming ||
+            actualIncoming[index] != container.prototypes[index].incoming_prototype_reference_count)
+            return fail("static incoming prototype edges are inconsistent");
+    }
+    if (actualReferenceCount != container.prototype_reference_count ||
+        actualReferenceCount != container.valid_prototype_reference_count ||
+        actualClosureCount != container.closure_target_count ||
+        actualCaptureCount != container.validated_capture_descriptor_count)
+        return fail("static graph aggregate counts are inconsistent");
 
     std::vector<std::vector<size_t>> children(prototypeCount);
     for (size_t child = 0; child < prototypeCount; ++child)
@@ -290,6 +354,11 @@ StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& containe
 
         row.fingerprint.is_root = index == *container.root_metadata_index;
         row.fingerprint.instruction_count = prototype.instruction_count;
+        row.fingerprint.opcode_lanes.reserve(prototype.instructions.size());
+        for (const InstructionMetadata& instruction : prototype.instructions)
+            row.fingerprint.opcode_lanes.push_back(instructionShape(normalizeInstruction(
+                instruction, container.constants.size(), container.prototypes.size())));
+        row.fingerprint.opcode_lane_digest = opcodeLaneFingerprintDigest(row.fingerprint.opcode_lanes);
         bool capturesValid = true;
         row.fingerprint.captures = captureShape(prototype, capturesValid);
         for (const StaticPrototypeShape::ClosureEdge& edge : row.closure_edges)
@@ -318,7 +387,9 @@ std::optional<PrototypeStructuralFingerprint> buildRuntimePrototypeFingerprint(
     const RuntimePrototypeRecord& prototype,
     const std::vector<RuntimePrototypeRecord>& runtimePrototypes)
 {
-    if (prototype.runtime_id == 0 || !prototype.is_root || !prototype.captures_complete ||
+    if (prototype.runtime_id == 0 || !prototype.is_root || !prototype.opcode_lanes_complete ||
+        !validInstructionShapes(prototype.opcode_lanes, prototype.instruction_count) ||
+        !prototype.captures_complete ||
         !prototype.closure_targets_complete)
         return std::nullopt;
 
@@ -330,6 +401,8 @@ std::optional<PrototypeStructuralFingerprint> buildRuntimePrototypeFingerprint(
     PrototypeStructuralFingerprint result;
     result.is_root = *prototype.is_root;
     result.instruction_count = prototype.instruction_count;
+    result.opcode_lanes = prototype.opcode_lanes;
+    result.opcode_lane_digest = opcodeLaneFingerprintDigest(result.opcode_lanes);
     result.captures = prototype.captures;
     std::set<size_t> sourcePcs;
     for (const RuntimeClosureEvidence& closure : prototype.closure_targets)
@@ -359,17 +432,25 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
     const std::vector<RuntimePrototypeRecord>& runtimePrototypes)
 {
     PrototypeCorrespondenceResult result;
+    const auto appendInvalidRecords = [&]() {
+        std::vector<uint64_t> ids;
+        ids.reserve(runtimePrototypes.size());
+        for (const RuntimePrototypeRecord& row : runtimePrototypes)
+            ids.push_back(row.runtime_id);
+        std::sort(ids.begin(), ids.end());
+        for (uint64_t id : ids)
+        {
+            PrototypeCorrespondence invalid;
+            invalid.runtime_id = id;
+            invalid.status = CorrespondenceStatus::InvalidEvidence;
+            result.records.push_back(std::move(invalid));
+        }
+    };
     result.static_evidence_valid = staticIndex.valid;
     if (!staticIndex.valid || !staticIndex.root_metadata_index || staticIndex.prototypes.empty())
     {
         result.diagnostic = "static prototype evidence is not valid";
-        for (const RuntimePrototypeRecord& row : runtimePrototypes)
-        {
-            PrototypeCorrespondence invalid;
-            invalid.runtime_id = row.runtime_id;
-            invalid.status = CorrespondenceStatus::InvalidEvidence;
-            result.records.push_back(std::move(invalid));
-        }
+        appendInvalidRecords();
         return result;
     }
 
@@ -379,6 +460,9 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
         const StaticPrototypeShape& row = staticIndex.prototypes[index];
         indexedRoots += row.fingerprint.is_root ? 1 : 0;
         if (row.metadata_index != index || row.wrapper_index != index + 1 ||
+            !validInstructionShapes(row.fingerprint.opcode_lanes, row.fingerprint.instruction_count) ||
+            row.fingerprint.opcode_lane_digest !=
+                opcodeLaneFingerprintDigest(row.fingerprint.opcode_lanes) ||
             row.fingerprint.digest != fingerprintDigest(row.fingerprint) ||
             row.fingerprint.is_root != (index == *staticIndex.root_metadata_index) ||
             (row.parent_metadata_index && *row.parent_metadata_index >= staticIndex.prototypes.size()) ||
@@ -386,6 +470,7 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
         {
             result.static_evidence_valid = false;
             result.diagnostic = "static prototype index is internally inconsistent";
+            appendInvalidRecords();
             return result;
         }
         for (size_t edgeIndex = 0; edgeIndex < row.closure_edges.size(); ++edgeIndex)
@@ -403,6 +488,7 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
             {
                 result.static_evidence_valid = false;
                 result.diagnostic = "static closure index is internally inconsistent";
+                appendInvalidRecords();
                 return result;
             }
         }
@@ -411,6 +497,7 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
     {
         result.static_evidence_valid = false;
         result.diagnostic = "static prototype index does not contain exactly one root";
+        appendInvalidRecords();
         return result;
     }
 
@@ -418,13 +505,7 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
         result.runtime_evidence_valid = false;
         result.records.clear();
         result.diagnostic = std::move(diagnostic);
-        for (const RuntimePrototypeRecord& item : runtimePrototypes)
-        {
-            PrototypeCorrespondence invalid;
-            invalid.runtime_id = item.runtime_id;
-            invalid.status = CorrespondenceStatus::InvalidEvidence;
-            result.records.push_back(std::move(invalid));
-        }
+        appendInvalidRecords();
         return result;
     };
 
@@ -435,6 +516,9 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
         if (row.runtime_id == 0 || !runtime.emplace(row.runtime_id, &row).second ||
             (row.parent_closure_pc && !row.parent_runtime_id))
             return invalidRuntime("runtime prototype identifiers or parent evidence are invalid");
+        if (row.opcode_lanes_complete &&
+            !validInstructionShapes(row.opcode_lanes, row.instruction_count))
+            return invalidRuntime("complete runtime opcode/lane fingerprint is malformed");
         explicitRoots += row.is_root == std::optional<bool>(true) ? 1 : 0;
     }
     if (explicitRoots > 1)
@@ -492,6 +576,9 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
         for (const StaticPrototypeShape& staticRow : staticIndex.prototypes)
         {
             if (staticRow.fingerprint.instruction_count != runtimeRow->instruction_count)
+                continue;
+            if (runtimeRow->opcode_lanes_complete &&
+                staticRow.fingerprint.opcode_lanes != runtimeRow->opcode_lanes)
                 continue;
             if (runtimeRow->is_root && staticRow.fingerprint.is_root != *runtimeRow->is_root)
                 continue;
@@ -605,6 +692,9 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
                 });
             if (sameInstructionCount == 1)
                 addProof(row.proof, CorrespondenceProof::UniqueInstructionCount);
+            if (runtimeRow->opcode_lanes_complete &&
+                matched.fingerprint.opcode_lanes == runtimeRow->opcode_lanes)
+                addProof(row.proof, CorrespondenceProof::ExactOpcodeLaneFingerprint);
             if (runtimeRow->captures_complete && matched.fingerprint.captures == runtimeRow->captures)
                 addProof(row.proof, CorrespondenceProof::ExactCaptureShape);
             if (auto fingerprint = buildRuntimePrototypeFingerprint(*runtimeRow, runtimePrototypes);
@@ -666,6 +756,7 @@ const char* toString(CorrespondenceProof proof)
     {
     case CorrespondenceProof::GraphRoot: return "graph_root";
     case CorrespondenceProof::UniqueInstructionCount: return "unique_instruction_count";
+    case CorrespondenceProof::ExactOpcodeLaneFingerprint: return "exact_opcode_lane_fingerprint";
     case CorrespondenceProof::ExactCaptureShape: return "exact_capture_shape";
     case CorrespondenceProof::CompleteStructuralFingerprint: return "complete_structural_fingerprint";
     case CorrespondenceProof::ParentClosureEdge: return "parent_closure_edge";

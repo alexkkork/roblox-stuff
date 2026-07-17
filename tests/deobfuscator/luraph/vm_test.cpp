@@ -122,6 +122,8 @@ std::vector<vm::RuntimePrototypeRecord> runtimeRecords(const vm::StaticPrototype
         vm::RuntimePrototypeRecord row;
         row.runtime_id = runtimeId(prototype.metadata_index);
         row.instruction_count = prototype.fingerprint.instruction_count;
+        row.opcode_lanes = prototype.fingerprint.opcode_lanes;
+        row.opcode_lanes_complete = true;
         row.is_root = prototype.fingerprint.is_root;
         row.captures = prototype.fingerprint.captures;
         row.captures_complete = true;
@@ -233,9 +235,13 @@ int main()
                           std::vector<vm::CaptureDescriptorShape>{{0, 0}},
         "closure targets, parents, or capture descriptors were not retained in the static index");
     const uint64_t firstDigest = staticIndex.prototypes[265].fingerprint.digest;
+    const uint64_t firstOpcodeLaneDigest =
+        staticIndex.prototypes[265].fingerprint.opcode_lane_digest;
     const vm::StaticPrototypeIndex repeatedIndex = vm::buildStaticPrototypeIndex(exactShape);
-    ok &= require(firstDigest != 0 && repeatedIndex.valid &&
-                      repeatedIndex.prototypes[265].fingerprint.digest == firstDigest,
+    ok &= require(firstDigest != 0 && firstOpcodeLaneDigest != 0 && repeatedIndex.valid &&
+                      repeatedIndex.prototypes[265].fingerprint.digest == firstDigest &&
+                      repeatedIndex.prototypes[265].fingerprint.opcode_lane_digest ==
+                          firstOpcodeLaneDigest,
         "structural fingerprint is not deterministic");
 
     const std::vector<vm::RuntimePrototypeRecord> exactRuntime = runtimeRecords(staticIndex);
@@ -251,8 +257,15 @@ int main()
                       std::find(mappedRoot->proof.begin(), mappedRoot->proof.end(),
                           vm::CorrespondenceProof::GraphRoot) != mappedRoot->proof.end() &&
                       std::find(mappedRoot->proof.begin(), mappedRoot->proof.end(),
+                          vm::CorrespondenceProof::ExactOpcodeLaneFingerprint) != mappedRoot->proof.end() &&
+                      std::find(mappedRoot->proof.begin(), mappedRoot->proof.end(),
                           vm::CorrespondenceProof::CompleteStructuralFingerprint) != mappedRoot->proof.end(),
         "runtime root was not mapped to static wrapper selector 266 with explicit proof");
+    ok &= require(std::is_sorted(exactMapping.records.begin(), exactMapping.records.end(),
+                      [](const vm::PrototypeCorrespondence& left, const vm::PrototypeCorrespondence& right) {
+                          return left.runtime_id < right.runtime_id;
+                      }),
+        "runtime input order leaked into correspondence report order");
 
     const luraph::ContainerAnalysis duplicateShape = starContainer(3, 0, false);
     const vm::StaticPrototypeIndex duplicateIndex = vm::buildStaticPrototypeIndex(duplicateShape);
@@ -278,6 +291,36 @@ int main()
     ok &= require(edgeMapping.matched_count == 3 && edgeMapping.ambiguous_count == 0,
         "proven parent closure PCs did not disambiguate duplicate child shapes");
 
+    luraph::ContainerAnalysis opcodeShape = starContainer(3, 0, false);
+    opcodeShape.prototypes[1].instructions[0] = instruction(0, {10, 18, 7, 26});
+    opcodeShape.prototypes[2].instructions[0] = instruction(0, {10, 18, 8, 34});
+    const vm::StaticPrototypeIndex opcodeIndex = vm::buildStaticPrototypeIndex(opcodeShape);
+    vm::RuntimePrototypeRecord opcodeRuntime;
+    opcodeRuntime.runtime_id = 901;
+    opcodeRuntime.instruction_count = 1;
+    opcodeRuntime.opcode_lanes = opcodeIndex.prototypes[2].fingerprint.opcode_lanes;
+    opcodeRuntime.opcode_lanes_complete = true;
+    opcodeRuntime.is_root = false;
+    const vm::PrototypeCorrespondenceResult opcodeMapping =
+        vm::correlateRuntimePrototypes(opcodeIndex, {opcodeRuntime});
+    const vm::PrototypeCorrespondence* opcodeMatch = correspondence(opcodeMapping, 901);
+    ok &= require(opcodeIndex.valid &&
+                      opcodeIndex.prototypes[1].fingerprint.opcode_lane_digest !=
+                          opcodeIndex.prototypes[2].fingerprint.opcode_lane_digest &&
+                      opcodeMatch && opcodeMatch->status == vm::CorrespondenceStatus::Matched &&
+                      opcodeMatch->static_metadata_index == std::optional<size_t>(2) &&
+                      std::find(opcodeMatch->proof.begin(), opcodeMatch->proof.end(),
+                          vm::CorrespondenceProof::ExactOpcodeLaneFingerprint) != opcodeMatch->proof.end(),
+        "exact opcode/lane evidence did not disambiguate equal instruction counts");
+
+    opcodeRuntime.opcode_lanes[0].pc = 2;
+    const vm::PrototypeCorrespondenceResult malformedFingerprint =
+        vm::correlateRuntimePrototypes(opcodeIndex, {opcodeRuntime});
+    ok &= require(!malformedFingerprint.runtime_evidence_valid &&
+                      malformedFingerprint.records.size() == 1 &&
+                      malformedFingerprint.records[0].status == vm::CorrespondenceStatus::InvalidEvidence,
+        "malformed complete opcode/lane evidence was not rejected");
+
     std::vector<vm::RuntimePrototypeRecord> invalidRuntime = edgeRuntime;
     invalidRuntime.push_back(invalidRuntime.front());
     const vm::PrototypeCorrespondenceResult invalidMapping =
@@ -295,6 +338,8 @@ int main()
     ok &= require(!unprovedIndex.valid && unprovedIndex.prototypes.empty(),
         "unproved static graph was accepted for runtime correspondence");
     ok &= require(std::string_view(vm::toString(vm::CorrespondenceStatus::Ambiguous)) == "ambiguous" &&
+                      std::string_view(vm::toString(vm::CorrespondenceProof::ExactOpcodeLaneFingerprint)) ==
+                          "exact_opcode_lane_fingerprint" &&
                       std::string_view(vm::toString(vm::CorrespondenceProof::ParentClosureEdge)) ==
                           "parent_closure_edge",
         "correspondence status or proof labels are unstable");

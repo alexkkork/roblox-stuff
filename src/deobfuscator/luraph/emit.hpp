@@ -52,11 +52,14 @@ struct SemanticCandidate
     size_t path_specific_returns = 0;
     size_t path_specific_closures = 0;
     size_t unsupported_path_specific_operations = 0;
+    nlohmann::json path_specific_operation_provenance = nlohmann::json::array();
+    nlohmann::json unknown_operations = nlohmann::json::array();
 
     bool fully_rendered() const
     {
         return unsupported_expressions == 0 && unsupported_operations == 0 && symbolic_transitions == 0 &&
-            unresolved_closure_descriptors == 0 && unresolved_capture_keys == 0 && return_arity_mismatches == 0;
+            unresolved_closure_descriptors == 0 && unresolved_capture_keys == 0 && return_arity_mismatches == 0 &&
+            unobserved_branch_arms == 0;
     }
 };
 

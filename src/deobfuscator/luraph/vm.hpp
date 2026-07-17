@@ -143,14 +143,17 @@ struct RuntimePrototypeRecord
 {
     uint64_t runtime_id = 0;
     size_t instruction_count = 0;
+    // A complete sequence must contain every PC exactly once in ascending order.
     std::vector<InstructionShape> opcode_lanes;
     bool opcode_lanes_complete = false;
+    // nullopt means the runtime observation did not establish root identity.
     std::optional<bool> is_root;
     std::optional<uint64_t> parent_runtime_id;
     std::optional<size_t> parent_closure_pc;
     std::vector<CaptureDescriptorShape> captures;
     bool captures_complete = false;
     std::vector<RuntimeClosureEvidence> closure_targets;
+    // false means closure_targets is an observed subset, not an empty set.
     bool closure_targets_complete = false;
 };
 
@@ -200,12 +203,20 @@ NormalizedInstruction normalizeInstruction(
     size_t prototypeCount);
 NormalizedContainer normalizeContainer(const ContainerAnalysis& container);
 
+// Digests are stable summary values. Exact field equality, never a digest
+// collision assumption, drives correspondence decisions.
 uint64_t fingerprintDigest(const PrototypeStructuralFingerprint& fingerprint);
 uint64_t opcodeLaneFingerprintDigest(const std::vector<InstructionShape>& instructions);
+// Index construction fails unless the scanner has already proved one complete,
+// rooted static graph and all referenced capture descriptors are in bounds.
 StaticPrototypeIndex buildStaticPrototypeIndex(const ContainerAnalysis& container);
+// A complete runtime fingerprint is available only when every local structural
+// component needed for exact comparison was observed.
 std::optional<PrototypeStructuralFingerprint> buildRuntimePrototypeFingerprint(
     const RuntimePrototypeRecord& prototype,
     const std::vector<RuntimePrototypeRecord>& runtimePrototypes);
+// Singleton matches are produced by exact constraints and graph propagation.
+// Non-unique candidates remain Ambiguous and contradictory evidence is rejected.
 PrototypeCorrespondenceResult correlateRuntimePrototypes(
     const StaticPrototypeIndex& staticIndex,
     const std::vector<RuntimePrototypeRecord>& runtimePrototypes);

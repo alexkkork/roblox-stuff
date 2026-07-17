@@ -132,6 +132,16 @@ std::string primitiveLiteral(const json& value)
     return "nil";
 }
 
+bool supportedPrimitive(const json& value)
+{
+    if (value.is_null() || value.is_boolean() || value.is_number() || value.is_string())
+        return true;
+    if (!value.is_object())
+        return false;
+    const std::string type = jsonStringOr(value, "type");
+    return type == "nil" || type == "boolean" || type == "number" || type == "string";
+}
+
 std::optional<std::string> specializationPrimitiveLiteral(const json& value)
 {
     if (value.is_null() || value.is_boolean() || value.is_number() || value.is_string())
@@ -1793,7 +1803,18 @@ private:
         return nullptr;
     }
 
-    void recordPathSpecificOperation(const json& value)
+    static std::string provenanceCommentLabel(const json& value)
+    {
+        std::string label = value.value("proof", "unspecified");
+        if (label.size() > 96)
+            label.resize(96);
+        for (char& ch : label)
+            if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_' && ch != '-' && ch != '.')
+                ch = '_';
+        return label.empty() ? "unspecified" : label;
+    }
+
+    void recordPathSpecificOperation(const json& value, const Context& context)
     {
         ++result.path_specific_operations;
         if (containsOperationKind(value, "register_write"))
@@ -1808,6 +1829,38 @@ private:
             ++result.path_specific_returns;
         if (containsOperationKind(value, "closure"))
             ++result.path_specific_closures;
+
+        result.path_specific_operation_provenance.push_back({
+            {"prototype", context.prototype},
+            {"pc", context.pc},
+            {"kind", value.value("kind", "unknown")},
+            {"semantic_family", value.value("semantic_family", value.value("kind", "unknown"))},
+            {"proof", value.value("proof", "")},
+            {"observation_count", value.value("observation_count", size_t(0))},
+            {"source_claim", false},
+            {"operation", value},
+        });
+    }
+
+    void recordUnknownOperation(const json& value, std::string_view reason, const Context& context)
+    {
+        result.unknown_operations.push_back({
+            {"prototype", context.prototype},
+            {"pc", context.pc},
+            {"kind", value.value("kind", "unknown")},
+            {"path_specific", context.path_specific},
+            {"proof", value.value("proof", "")},
+            {"reason", reason},
+            {"source_claim", false},
+            {"operation", value},
+        });
+    }
+
+    void emitPathSpecificProvenanceComment(const json& value, size_t depth)
+    {
+        const std::string kind = identifier(value.value("kind", "unknown"));
+        append(indentation(depth) + "-- Path-specific " + kind + "; provenance: " +
+            provenanceCommentLabel(value) + "; not original source.\n");
     }
 
     static bool hasCallableRuntimeResolution(const json& value)
@@ -2558,13 +2611,18 @@ private:
         return std::nullopt;
     }
 
+    std::string unsupportedExpression(const Context& context, std::string_view kind, std::string_view reason)
+    {
+        ++result.unsupported_expressions;
+        return "unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+            std::to_string(context.pc) + ", " + quoteLuau(kind) + ", " + quoteLuau(reason) + ")";
+    }
+
     std::string expression(const json& value, Context& context, size_t depth = 0)
     {
         if (depth > 64 || !value.is_object())
-        {
-            ++result.unsupported_expressions;
-            return "nil";
-        }
+            return unsupportedExpression(context, "expression", depth > 64
+                ? "expression nesting limit exceeded" : "expression object is missing");
         const std::string kind = jsonStringOr(value, "kind");
         if (kind == "immediate")
         {
@@ -2575,7 +2633,9 @@ private:
             if (!lane.empty() && !context.runtime_lanes_variable.empty() &&
                 context.runtime_lane_names.contains(lane))
                 return context.runtime_lanes_variable + "[" + quoteLuau(lane) + "]";
-            return primitiveLiteral(value.value("value", json(nullptr)));
+            const json primitive = value.value("value", json(nullptr));
+            return supportedPrimitive(primitive) ? primitiveLiteral(primitive) :
+                unsupportedExpression(context, "immediate", "immediate value is not a supported primitive");
         }
         if (kind == "operand")
         {
@@ -2592,10 +2652,8 @@ private:
                 source = primitiveLiteral((*context.instruction)["lanes"][lane]);
             if (source.empty())
             {
-                ++result.unsupported_expressions;
-                return "unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
-                    std::to_string(context.pc) + ", \"operand\", \"missing runtime lane " +
-                    identifier(lane.empty() ? "unknown" : lane) + "\")";
+                return unsupportedExpression(context, "operand", "missing runtime lane " +
+                    identifier(lane.empty() ? "unknown" : lane));
             }
             const int64_t adjustment = value.value("adjustment", int64_t(0));
             if (adjustment != 0)
@@ -2603,7 +2661,23 @@ private:
             return source;
         }
         if (kind == "constant")
-            return primitiveLiteral(value.value("value", json(nullptr)));
+        {
+            const json primitive = value.value("value", json(nullptr));
+            return supportedPrimitive(primitive) ? primitiveLiteral(primitive) :
+                unsupportedExpression(context, "constant", "constant value is not a supported primitive");
+        }
+        if (kind == "global")
+        {
+            if (value.contains("key") && value["key"].is_object())
+                return "environment[" + expression(value["key"], context, depth + 1) + "]";
+            return "environment[" + quoteLuau(jsonStringOr(value, "name")) + "]";
+        }
+        if (kind == "global_read")
+            return "environment[" + expression(value.value("key", json::object()), context, depth + 1) + "]";
+        if (kind == "environment")
+            return "environment";
+        if (kind == "current_pc")
+            return "pc";
         if (kind == "observed_register_value")
         {
             if (value.contains("value") && value["value"].is_object() && jsonStringOr(value["value"], "type") == "function")
@@ -2612,7 +2686,9 @@ private:
                 if (!name.empty())
                     return "resolve_named_function(" + quoteLuau(name) + ")";
             }
-            return primitiveLiteral(value.value("value", json(nullptr)));
+            const json primitive = value.value("value", json(nullptr));
+            return supportedPrimitive(primitive) ? primitiveLiteral(primitive) :
+                unsupportedExpression(context, kind, "observed register value is not a stable primitive");
         }
         if (kind == "register_read")
             return "registers[" + expression(value.value("index", json::object()), context, depth + 1) + "]";
@@ -2632,6 +2708,8 @@ private:
             return "helper_values";
         if (kind == "opcode_table")
             return "opcode_values";
+        if (kind == "opcode_read")
+            return "opcode_values[" + expression(value.value("index", json::object()), context, depth + 1) + "]";
         if (kind == "operand_table")
             return "operand_values";
         if (kind == "index_read")
@@ -2669,6 +2747,10 @@ private:
         if (kind == "unary")
             return "(" + jsonStringOr(value, "operator", "not") + " " +
                 expression(value.value("value", json::object()), context, depth + 1) + ")";
+        if (kind == "if_expression")
+            return "(if " + expression(value.value("condition", json::object()), context, depth + 1) +
+                " then " + expression(value.value("then", json::object()), context, depth + 1) +
+                " else " + expression(value.value("else", json::object()), context, depth + 1) + ")";
         if (kind == "table")
         {
             std::string source = "{";
@@ -2699,18 +2781,51 @@ private:
                     joined += ", ";
                 joined += arguments[index];
             }
+            const json function = value.value("function", json::object());
+            if (value.value("method", false))
+            {
+                if (!function.is_object() || function.value("kind", "") != "index_read" ||
+                    !function.contains("table") || !function["table"].is_object() ||
+                    !function.contains("index") || !function["index"].is_object())
+                {
+                    return unsupportedExpression(context, "method_call", "receiver expression is incomplete");
+                }
+                const std::string receiver = expression(function["table"], context, depth + 1);
+                const json& methodIndex = function["index"];
+                const std::string receiverName = "recovered_receiver_" + std::to_string(context.prototype) + "_" +
+                    std::to_string(context.pc);
+                if (!context.callee && methodIndex.value("kind", "") == "constant" &&
+                    methodIndex.contains("value") && methodIndex["value"].is_string() &&
+                    plainIdentifier(methodIndex["value"].get<std::string>()))
+                    return "(" + receiver + "):" + methodIndex["value"].get<std::string>() + "(" + joined + ")";
+
+                const std::string callableName = receiverName + "_method";
+                const std::string method = expression(methodIndex, context, depth + 1);
+                std::string invocation;
+                if (context.callee && !context.callee_consumed)
+                {
+                    context.callee_consumed = true;
+                    ++result.direct_prototype_calls;
+                    invocation = "call_recovered(" + callableName + ", " + prototypeName(*context.callee) +
+                        ", captured_values, " + receiverName + (joined.empty() ? "" : ", " + joined) + ")";
+                }
+                else
+                    invocation = callableName + "(" + receiverName + (joined.empty() ? "" : ", " + joined) + ")";
+                return "(function() local " + receiverName + " = " + receiver + "; local " + callableName +
+                    " = " + receiverName + "[" + method + "]; return " + invocation + " end)()";
+            }
             if (context.callee && !context.callee_consumed)
             {
                 context.callee_consumed = true;
                 ++result.direct_prototype_calls;
-                const std::string callable = expression(value.value("function", json::object()), context, depth + 1);
+                const std::string callable = expression(function, context, depth + 1);
                 return "call_recovered(" + callable + ", " + prototypeName(*context.callee) + ", captured_values" +
                     (joined.empty() ? "" : ", " + joined) + ")";
             }
-            return "(" + expression(value.value("function", json::object()), context, depth + 1) + ")(" + joined + ")";
+            return "(" + expression(function, context, depth + 1) + ")(" + joined + ")";
         }
-        ++result.unsupported_expressions;
-        return "nil";
+        return unsupportedExpression(context, "expression",
+            kind.empty() ? "unknown expression kind" : "unsupported expression kind: " + kind);
     }
 
     std::string target(const json& value, Context& context)
@@ -2795,6 +2910,30 @@ private:
             literals.push_back(*literal);
         }
         return literals;
+    }
+
+    std::optional<std::string> jumpDestination(const json& operation, Context& context)
+    {
+        if (!operation.contains("target") || !operation["target"].is_object())
+            return std::nullopt;
+        json target = operation["target"];
+        std::optional<int64_t> adjustment;
+        if (target.contains("adjustment") && target["adjustment"].is_number_integer())
+        {
+            adjustment = target["adjustment"].get<int64_t>();
+            target.erase("adjustment");
+        }
+        if (!adjustment && operation.contains("runtime_validation") &&
+            operation["runtime_validation"].is_object() &&
+            operation["runtime_validation"].contains("target_adjustment") &&
+            operation["runtime_validation"]["target_adjustment"].is_number_integer())
+            adjustment = operation["runtime_validation"]["target_adjustment"].get<int64_t>();
+        if (!adjustment && !context.path_specific)
+            adjustment = 1;
+        if (!adjustment)
+            return std::nullopt;
+        const std::string base = expression(target, context);
+        return *adjustment == 0 ? base : "(" + base + " + (" + std::to_string(*adjustment) + "))";
     }
 
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
@@ -3009,7 +3148,13 @@ private:
         }
         if (kind == "jump")
         {
-            append(prefix + "pc = (" + expression(value.value("target", json::object()), context) + ") + 1;\n");
+            const std::optional<std::string> destination = jumpDestination(value, context);
+            if (!destination)
+            {
+                unsupportedOperation(kind, "jump adjustment is not proven", depth, context);
+                return;
+            }
+            append(prefix + "pc = " + *destination + ";\n");
             return;
         }
         unsupportedOperation(kind.empty() ? std::string_view("unknown") : std::string_view(kind),
@@ -3031,18 +3176,20 @@ private:
         size_t depth, Context& context)
     {
         const bool semanticClosure = semanticOperation.value("kind", "") == "closure";
-        if (!semanticClosure && instruction.value("opcode", int64_t(-1)) != 22)
-            return false;
         const json* descriptorValue = nullptr;
         if (instruction.contains("closure_descriptor") && instruction["closure_descriptor"].is_object())
             descriptorValue = &instruction["closure_descriptor"];
         else if (semanticClosure && semanticOperation.contains("descriptor") &&
             semanticOperation["descriptor"].is_object())
             descriptorValue = &semanticOperation["descriptor"];
+        if (!descriptorValue && !semanticClosure && instruction.value("opcode", int64_t(-1)) != 22 &&
+            instruction.value("opcode", int64_t(-1)) != 112)
+            return false;
         if (!descriptorValue)
         {
             ++result.unresolved_closure_descriptors;
-            return false;
+            unsupportedOperation("closure", "closure descriptor is unavailable", depth, context);
+            return true;
         }
         const json& descriptor = *descriptorValue;
         const uint64_t targetPrototype = descriptor.contains("target_prototype") &&
@@ -3057,7 +3204,8 @@ private:
             !instructions.contains(targetPrototype) || !descriptor.contains("captures") || !descriptor["captures"].is_array())
         {
             ++result.unresolved_closure_descriptors;
-            return false;
+            unsupportedOperation("closure", "closure descriptor is incomplete or targets an unknown prototype", depth, context);
+            return true;
         }
         const std::string prefix = indentation(depth);
         std::set<int64_t> captureIndices;
@@ -3067,10 +3215,13 @@ private:
             const int64_t kind = capture.value("capture_kind", int64_t(-1));
             const int64_t slot = capture.value("slot", int64_t(-1));
             if (captureIndex < 0 || !captureIndices.insert(captureIndex).second ||
-                kind < 0 || kind > 3 || slot < 0)
+                kind < 0 || kind > 2 || slot < 0)
             {
                 ++result.unresolved_closure_descriptors;
-                return false;
+                unsupportedOperation("closure", kind == 3
+                    ? "capture kind 3 remains distinct and is not semantically proven"
+                    : "capture metadata is invalid or duplicated", depth, context);
+                return true;
             }
         }
 
@@ -3201,6 +3352,8 @@ private:
             append(prefix + "end\n");
             return;
         }
+        if (kind == "branch" && context.path_specific && block.successors.size() == 1)
+            ++result.unobserved_branch_arms;
         if (kind == "generic_for_prepare")
         {
             append(prefix + "pc = (" + expression(terminalOperation.value("loop_target", json::object()), context) + ") + 1\n");
@@ -3260,8 +3413,11 @@ private:
         }
         else if (kind == "jump")
         {
-            append(prefix + "pc = (" + expression(terminalOperation.value("target", json::object()), context) + ") + 1\n");
-            ++result.symbolic_transitions;
+            const std::optional<std::string> destination = jumpDestination(terminalOperation, context);
+            if (destination)
+                append(prefix + "pc = " + *destination + "\n");
+            else
+                unsupportedOperation("jump", "jump adjustment is not proven by runtime evidence or CFG", depth, context);
         }
         else
             append(prefix + "pc = nil\n");

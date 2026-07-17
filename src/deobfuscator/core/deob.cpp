@@ -7369,6 +7369,14 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
         instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+        if (!guardNames.empty())
+        {
+            instrumentation += "if __alex_lph_step_enabled then ";
+            for (const std::string& guard : guardNames)
+                instrumentation += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
+                    quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
+            instrumentation += "end;";
+        }
         if (!dynamicGuardConditions.empty())
             instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
         for (const std::string& lane : laneNames)
@@ -7439,25 +7447,11 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         postInstrumentation += "for __alex_lph_key,__alex_lph_value in __alex_lph_pre_regs do if not __alex_lph_seen_keys[__alex_lph_key] and rawget(" + registersName + ",__alex_lph_key)==nil then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=z:\";end;end;end;";
         postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);";
         if (!guardNames.empty())
-        {
-            postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op";
-            for (size_t index = 0; index < guardNames.size(); ++index)
-                postInstrumentation += ",__alex_lph_pre_guards[" + std::to_string(index + 1) + "]";
-            postInstrumentation += ");";
-        }
+            postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,table.concat(__alex_lph_pre_guards,\"|\"));";
         if (!dynamicGuardConditions.empty())
             postInstrumentation += "print(\"@@LPH_GUARD_PATH_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,#__alex_lph_guard_path,__alex_lph_guard_overflow and 1 or 0,table.concat(__alex_lph_guard_path,\"|\"));";
         postInstrumentation += "print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
         insertions.push_back({dispatcherBodyEnd, 0, std::move(postInstrumentation)});
-        if (opcodeDispatcher && !guardNames.empty())
-        {
-            std::string guardInstrumentation = "do if __alex_lph_step_enabled then ";
-            for (const std::string& guard : guardNames)
-                guardInstrumentation += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
-                    quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
-            guardInstrumentation += "end end;";
-            insertions.push_back({view.offset(opcodeDispatcher->location.begin), 0, std::move(guardInstrumentation)});
-        }
         for (const LuraphGuardCondition& condition : dynamicGuardConditions)
         {
             const size_t begin = view.offset(condition.expression->location.begin);
@@ -9272,7 +9266,7 @@ size_t attachLuraphObservedGuardSemantics(
         Luau::AstStatBlock* leaf = selectLuraphObservedGuardLeaf(
             dispatcher, shape->opcode, opcode, bindings, decisions,
             decisionOffsets, view, decisionsUsed);
-        if (!leaf)
+        if (!leaf || decisionsUsed != path["decisions"].size())
             continue;
         LuraphOpcodeReferenceFinder opcodeReference(shape->opcode);
         leaf->visit(&opcodeReference);
@@ -9285,9 +9279,10 @@ size_t attachLuraphObservedGuardSemantics(
             !normalized.semantic_operation.value("source_semantic", true) ||
             luraphSemanticContainsUnknownState(normalized.semantic_operation))
             continue;
-        step["guard_replayed_semantic_operation"] = normalized.semantic_operation;
+        step["guard_replay_candidate"] = normalized.semantic_operation;
         step["guard_replay"] = {
             {"complete", true},
+            {"candidate_only", true},
             {"decisions_available", path["decisions"].size()},
             {"decisions_used", decisionsUsed},
             {"handler_range", {
@@ -9387,6 +9382,273 @@ json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, st
         {"closure_descriptors", std::move(closureDescriptors)},
         {"observed_capture_domains", std::move(captureDomains)},
         {"prototypes", std::move(prototypes)},
+    };
+}
+
+std::string luraphFingerprintHex(uint64_t value)
+{
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << value;
+    return out.str();
+}
+
+std::optional<int64_t> luraphRuntimeNumericLane(const json& instruction, std::string_view lane)
+{
+    if (!instruction.contains("lanes") || !instruction["lanes"].is_object() ||
+        !instruction["lanes"].contains(std::string(lane)))
+        return std::nullopt;
+    const json& value = instruction["lanes"][std::string(lane)];
+    if (!value.is_object() || !value.value("primitive", false) ||
+        value.value("type", "") != "number" || !value.contains("value") ||
+        !value["value"].is_string())
+        return std::nullopt;
+    return parseTraceInteger<int64_t>(value["value"].get<std::string>());
+}
+
+std::optional<std::vector<luraph::vm::CaptureDescriptorShape>> luraphRuntimeCaptureShape(
+    const json& descriptor)
+{
+    if (!descriptor.value("complete", false) || !descriptor.contains("captures") ||
+        !descriptor["captures"].is_array())
+        return std::nullopt;
+    std::vector<luraph::vm::CaptureDescriptorShape> captures;
+    captures.reserve(descriptor["captures"].size());
+    for (size_t index = 0; index < descriptor["captures"].size(); ++index)
+    {
+        const json& capture = descriptor["captures"][index];
+        if (!capture.is_object() || capture.value("capture_index", std::numeric_limits<size_t>::max()) != index ||
+            !capture.contains("capture_kind") || !capture["capture_kind"].is_number_integer() ||
+            !capture.contains("slot") || !capture["slot"].is_number_integer())
+            return std::nullopt;
+        const int64_t kind = capture["capture_kind"].get<int64_t>();
+        const int64_t slot = capture["slot"].get<int64_t>();
+        if (kind < 0 || static_cast<uint64_t>(kind) > std::numeric_limits<unsigned int>::max() || slot < 0)
+            return std::nullopt;
+        captures.push_back({static_cast<unsigned int>(kind), static_cast<uint64_t>(slot)});
+    }
+    return captures;
+}
+
+std::vector<luraph::vm::RuntimePrototypeRecord> luraphRuntimePrototypeRecords(
+    const LuraphRuntimeStructureTrace& trace)
+{
+    std::vector<luraph::vm::RuntimePrototypeRecord> records;
+    records.reserve(trace.prototypes.size());
+    std::map<uint64_t, size_t> recordById;
+    for (const auto& [id, prototype] : trace.prototypes)
+    {
+        luraph::vm::RuntimePrototypeRecord record;
+        record.runtime_id = id;
+        record.instruction_count = prototype.declared_instruction_count;
+        bool complete = prototype.instructions.size() == prototype.declared_instruction_count;
+        record.opcode_lanes.reserve(prototype.instructions.size());
+        for (const auto& [pc, instruction] : prototype.instructions)
+        {
+            const std::optional<int64_t> D = luraphRuntimeNumericLane(instruction, "D");
+            const std::optional<int64_t> G = luraphRuntimeNumericLane(instruction, "G");
+            const std::optional<int64_t> p = luraphRuntimeNumericLane(instruction, "p");
+            if (!instruction.is_object() || instruction.value("pc", size_t(0)) != pc ||
+                pc != record.opcode_lanes.size() + 1 || !instruction.contains("opcode") ||
+                !instruction["opcode"].is_number_integer() || !D || !G || !p)
+            {
+                complete = false;
+                continue;
+            }
+            record.opcode_lanes.push_back({
+                pc,
+                instruction["opcode"].get<int64_t>(),
+                {*D, *G, *p},
+            });
+        }
+        record.opcode_lanes_complete = complete && record.opcode_lanes.size() == record.instruction_count;
+        if (!record.opcode_lanes_complete)
+            record.opcode_lanes.clear();
+        recordById.emplace(id, records.size());
+        records.push_back(std::move(record));
+    }
+
+    std::set<uint64_t> topLevelPrototypes;
+    for (const auto& [activationId, activation] : trace.activations)
+    {
+        (void)activationId;
+        if (!activation.is_object() || !activation.value("caller_activation", json(nullptr)).is_null() ||
+            !activation.contains("prototype") || !activation["prototype"].is_number_integer())
+            continue;
+        const uint64_t prototype = activation["prototype"].get<uint64_t>();
+        if (recordById.contains(prototype))
+            topLevelPrototypes.insert(prototype);
+    }
+    if (topLevelPrototypes.size() == 1)
+        records[recordById.at(*topLevelPrototypes.begin())].is_root = true;
+
+    std::map<uint64_t, std::pair<uint64_t, size_t>> observedParents;
+    std::set<uint64_t> conflictingCaptures;
+    for (const auto& [site, descriptor] : trace.closure_descriptors)
+    {
+        const auto& [parentId, sourcePc] = site;
+        if (!recordById.contains(parentId) || !descriptor.is_object() ||
+            !descriptor.contains("target_prototype") || !descriptor["target_prototype"].is_number_integer())
+            continue;
+        const uint64_t targetId = descriptor["target_prototype"].get<uint64_t>();
+        if (!recordById.contains(targetId) || targetId == parentId)
+            continue;
+
+        luraph::vm::RuntimeClosureEvidence closure;
+        closure.source_pc = sourcePc;
+        closure.target_runtime_id = targetId;
+        if (const auto captures = luraphRuntimeCaptureShape(descriptor))
+        {
+            closure.captures = *captures;
+            closure.captures_complete = true;
+            luraph::vm::RuntimePrototypeRecord& target = records[recordById.at(targetId)];
+            if (target.captures_complete && target.captures != *captures)
+                conflictingCaptures.insert(targetId);
+            else
+            {
+                target.captures = *captures;
+                target.captures_complete = true;
+            }
+        }
+        records[recordById.at(parentId)].closure_targets.push_back(std::move(closure));
+        auto [parent, inserted] = observedParents.emplace(targetId, site);
+        if (!inserted && parent->second != site)
+            parent->second = {0, 0};
+    }
+    for (luraph::vm::RuntimePrototypeRecord& record : records)
+    {
+        std::sort(record.closure_targets.begin(), record.closure_targets.end(),
+            [](const auto& left, const auto& right) { return left.source_pc < right.source_pc; });
+        if (conflictingCaptures.contains(record.runtime_id))
+        {
+            record.captures.clear();
+            record.captures_complete = false;
+        }
+        if (auto parent = observedParents.find(record.runtime_id);
+            parent != observedParents.end() && parent->second.first != 0)
+        {
+            record.parent_runtime_id = parent->second.first;
+            record.parent_closure_pc = parent->second.second;
+            record.is_root = false;
+        }
+    }
+    return records;
+}
+
+json luraphPrototypeCorrespondenceArtifact(
+    const luraph::EnvelopeAnalysis& analysis,
+    const LuraphRuntimeStructureTrace& trace)
+{
+    const std::vector<luraph::vm::RuntimePrototypeRecord> runtimeRecords =
+        luraphRuntimePrototypeRecords(trace);
+    std::map<uint64_t, const luraph::vm::RuntimePrototypeRecord*> runtimeById;
+    for (const luraph::vm::RuntimePrototypeRecord& record : runtimeRecords)
+        runtimeById.emplace(record.runtime_id, &record);
+
+    json containerReports = json::array();
+    size_t validStaticContainers = 0;
+    size_t completeContainerMatches = 0;
+    std::optional<size_t> completeContainerIndex;
+    for (size_t containerIndex = 0; containerIndex < analysis.containers.size(); ++containerIndex)
+    {
+        const luraph::ContainerAnalysis& container = analysis.containers[containerIndex];
+        if (container.parse_status != luraph::ContainerParseStatus::Parsed)
+            continue;
+        const luraph::vm::StaticPrototypeIndex staticIndex = luraph::vm::buildStaticPrototypeIndex(container);
+        const luraph::vm::PrototypeCorrespondenceResult result =
+            luraph::vm::correlateRuntimePrototypes(staticIndex, runtimeRecords);
+        validStaticContainers += result.static_evidence_valid ? 1 : 0;
+
+        json staticPrototypes = json::array();
+        for (const luraph::vm::StaticPrototypeShape& prototype : staticIndex.prototypes)
+            staticPrototypes.push_back({
+                {"metadata_index", prototype.metadata_index},
+                {"wrapper_index", prototype.wrapper_index},
+                {"instruction_count", prototype.fingerprint.instruction_count},
+                {"opcode_lane_fingerprint", luraphFingerprintHex(prototype.fingerprint.opcode_lane_digest)},
+                {"parent_metadata_index", prototype.parent_metadata_index
+                    ? json(*prototype.parent_metadata_index) : json(nullptr)},
+                {"parent_closure_pc", prototype.parent_closure_pc
+                    ? json(*prototype.parent_closure_pc) : json(nullptr)},
+            });
+
+        json matches = json::array();
+        for (const luraph::vm::PrototypeCorrespondence& match : result.records)
+        {
+            const auto runtime = runtimeById.find(match.runtime_id);
+            json candidates = json::array();
+            for (size_t metadataIndex : match.candidate_metadata_indices)
+                candidates.push_back({
+                    {"metadata_index", metadataIndex},
+                    {"wrapper_index", metadataIndex + 1},
+                });
+            json proof = json::array();
+            for (luraph::vm::CorrespondenceProof item : match.proof)
+                proof.push_back(luraph::vm::toString(item));
+            matches.push_back({
+                {"runtime_id", match.runtime_id},
+                {"instruction_count", runtime != runtimeById.end()
+                    ? json(runtime->second->instruction_count) : json(nullptr)},
+                {"opcode_lane_fingerprint", runtime != runtimeById.end() &&
+                        runtime->second->opcode_lanes_complete
+                    ? json(luraphFingerprintHex(luraph::vm::opcodeLaneFingerprintDigest(
+                        runtime->second->opcode_lanes))) : json(nullptr)},
+                {"status", luraph::vm::toString(match.status)},
+                {"static_metadata_index", match.static_metadata_index
+                    ? json(*match.static_metadata_index) : json(nullptr)},
+                {"static_wrapper_index", match.static_metadata_index
+                    ? json(*match.static_metadata_index + 1) : json(nullptr)},
+                {"candidates", std::move(candidates)},
+                {"proof", std::move(proof)},
+            });
+        }
+        const bool complete = result.static_evidence_valid && result.runtime_evidence_valid &&
+            result.matched_count == runtimeRecords.size() && result.ambiguous_count == 0 &&
+            result.unmatched_count == 0;
+        if (complete)
+        {
+            ++completeContainerMatches;
+            completeContainerIndex = containerIndex;
+        }
+        containerReports.push_back({
+            {"container_index", containerIndex},
+            {"status", !result.static_evidence_valid || !result.runtime_evidence_valid
+                ? "invalid_evidence" : complete ? "complete" : result.matched_count > 0 ? "partial" : "unresolved"},
+            {"complete", complete},
+            {"static_evidence_valid", result.static_evidence_valid},
+            {"runtime_evidence_valid", result.runtime_evidence_valid},
+            {"static_prototype_count", staticIndex.prototypes.size()},
+            {"runtime_prototype_count", runtimeRecords.size()},
+            {"matched", result.matched_count},
+            {"ambiguous", result.ambiguous_count},
+            {"unmatched", result.unmatched_count},
+            {"ambiguity_preserved", result.ambiguous_count > 0},
+            {"diagnostic", result.diagnostic},
+            {"static_prototypes", std::move(staticPrototypes)},
+            {"matches", std::move(matches)},
+        });
+    }
+
+    const bool uniqueCompleteMatch = completeContainerMatches == 1;
+    return {
+        {"version", 1},
+        {"kind", "luraph-static-runtime-prototype-correspondence"},
+        {"scope", "verified-static-container-and-bounded-offline-runtime"},
+        {"status", containerReports.empty() ? "static_evidence_unavailable" :
+            completeContainerMatches > 1 ? "ambiguous_static_container" :
+            uniqueCompleteMatch ? "complete" : "partial"},
+        {"complete", uniqueCompleteMatch},
+        {"selected_container_index", uniqueCompleteMatch
+            ? json(*completeContainerIndex) : json(nullptr)},
+        {"valid_static_container_count", validStaticContainers},
+        {"complete_container_match_count", completeContainerMatches},
+        {"runtime_prototype_count", runtimeRecords.size()},
+        {"evidence", {
+            {"instruction_counts", true},
+            {"ordered_opcode_lane_fingerprints", true},
+            {"observed_parent_child_edges", trace.closure_descriptors.size()},
+            {"hash_only_matching", false},
+        }},
+        {"containers", std::move(containerReports)},
     };
 }
 
@@ -10391,7 +10653,9 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t observationalSemanticLifted = 0;
     size_t guardedCandidatesValidated = 0;
     size_t guardedCandidatesRejected = 0;
+    size_t guardReplaySitesAttached = 0;
     size_t guardReplaySitesValidated = 0;
+    size_t guardReplaySitesRejected = 0;
     size_t guardReplaySitesDivergent = 0;
     json observationalOperationCounts = json::object();
 
@@ -10526,7 +10790,7 @@ json luraphRuntimeSemanticDispatchArtifact(
                 for (const json& observation : observedSite->second)
                 {
                     const json operation = observation.value(
-                        "guard_replayed_semantic_operation", json(nullptr));
+                        "guard_replay_candidate", json(nullptr));
                     if (!operation.is_object())
                     {
                         completeReplay = false;
@@ -10543,22 +10807,34 @@ json luraphRuntimeSemanticDispatchArtifact(
                 }
                 if (completeReplay && replayed)
                 {
+                    ++guardReplaySitesAttached;
                     json operation = materializeLuraphSemanticOperation(*replayed, effectiveLanes);
-                    if (!luraphObservedSemanticContradicts(operation, observedSite->second))
+                    if (std::optional<json> validation = validateLuraphObservedCandidate(
+                            operation, observedSite->second, pc,
+                            observedReturnsForSite != returnsBySite.end()
+                                ? &observedReturnsForSite->second : nullptr))
                     {
                         operation["static_semantic"] = false;
                         operation["path_specific"] = true;
                         operation["candidate_proof"] = operation.value("proof", "");
-                        operation["proof"] = "recorded_guard_path_replayed_through_original_ast";
+                        operation["proof"] = "recorded_guard_path_candidate_runtime_validated";
+                        operation["runtime_validation"] = *validation;
                         operation["guard_replay_observations"] = observedSite->second.size();
                         row["observational_semantic_operation"] = std::move(operation);
                         row["guard_path_replayed"] = true;
+                        row["guard_replay_validation"] = *validation;
                         ++guardReplaySitesValidated;
                         ++observationalSemanticLifted;
                         const std::string family = row["observational_semantic_operation"].value(
                             "semantic_family", row["observational_semantic_operation"].value("kind", "unknown"));
                         observationalOperationCounts[family] =
                             observationalOperationCounts.value(family, size_t(0)) + 1;
+                    }
+                    else
+                    {
+                        row["guard_replay_candidate"] = std::move(operation);
+                        row["guard_replay_rejected"] = true;
+                        ++guardReplaySitesRejected;
                     }
                 }
             }
@@ -10717,7 +10993,9 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"observational_semantic_unresolved", observationalSites.size() - observationalSemanticLifted},
         {"guarded_candidates_validated", guardedCandidatesValidated},
         {"guarded_candidates_rejected", guardedCandidatesRejected},
+        {"guard_replay_sites_attached", guardReplaySitesAttached},
         {"guard_replay_sites_validated", guardReplaySitesValidated},
+        {"guard_replay_sites_rejected", guardReplaySitesRejected},
         {"guard_replay_sites_divergent", guardReplaySitesDivergent},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
@@ -13319,6 +13597,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     const fs::path structureProbePath = options.output_dir / "structure_probe.luau";
     const fs::path opcodeHandlersPath = options.output_dir / "opcode_handlers.json";
     const fs::path runtimePrototypesPath = options.output_dir / "runtime_prototypes.json";
+    const fs::path prototypeCorrespondencePath = options.output_dir / "prototype_correspondence.json";
     const fs::path runtimeSemanticPath = options.output_dir / "runtime_semantic_ir.json";
     const fs::path payloadClosurePath = options.output_dir / "payload_closure_ir.json";
     const fs::path payloadReachableIrPath = options.output_dir / "payload_reachable_ir.json";
@@ -13646,6 +13925,45 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 }},
             });
         }
+    }
+
+    std::optional<json> prototypeCorrespondenceDocument;
+    if (runtimeDecoded && parsedContainer)
+    {
+        prototypeCorrespondenceDocument = luraphPrototypeCorrespondenceArtifact(analysis, *runtimeStructure);
+        writeJson(prototypeCorrespondencePath, *prototypeCorrespondenceDocument);
+        const json* singleContainer = prototypeCorrespondenceDocument->contains("containers") &&
+                (*prototypeCorrespondenceDocument)["containers"].is_array() &&
+                (*prototypeCorrespondenceDocument)["containers"].size() == 1
+            ? &(*prototypeCorrespondenceDocument)["containers"][0] : nullptr;
+        report["passes"].push_back({
+            {"stage", "prototype_correspondence"},
+            {"ok", prototypeCorrespondenceDocument->value("complete", false)},
+            {"status", prototypeCorrespondenceDocument->value("status", "partial")},
+            {"scope", "verified-static-container-and-bounded-offline-runtime"},
+            {"selected_container_index", prototypeCorrespondenceDocument->value(
+                "selected_container_index", json(nullptr))},
+            {"matched", singleContainer ? (*singleContainer)["matched"] : json(nullptr)},
+            {"ambiguous", singleContainer ? (*singleContainer)["ambiguous"] : json(nullptr)},
+            {"unmatched", singleContainer ? (*singleContainer)["unmatched"] : json(nullptr)},
+            {"ambiguity_preserved", singleContainer
+                ? (*singleContainer)["ambiguity_preserved"] : json(nullptr)},
+            {"artifact", prototypeCorrespondencePath.filename().string()},
+        });
+        if (!prototypeCorrespondenceDocument->value("complete", false))
+            report["diagnostics"].push_back({
+                {"stage", "prototype_correspondence"},
+                {"severity", "info"},
+                {"code", "luraph_prototype_correspondence_partial"},
+                {"message", "Static and runtime prototypes were matched only where instruction and graph evidence was unique; unresolved candidates remain explicit in the correspondence artifact."},
+                {"details", {
+                    {"status", prototypeCorrespondenceDocument->value("status", "partial")},
+                    {"valid_static_containers", prototypeCorrespondenceDocument->value(
+                        "valid_static_container_count", size_t(0))},
+                    {"complete_container_matches", prototypeCorrespondenceDocument->value(
+                        "complete_container_match_count", size_t(0))},
+                }},
+            });
     }
 
     std::optional<LuraphDynamicTrace> dynamicTrace;
@@ -14396,6 +14714,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"structure_probe", structureProbeCompiled ? json(structureProbePath.filename().string()) : json(nullptr)},
                 {"runtime_prototypes", runtimeStructure && !runtimeStructure->prototypes.empty()
                     ? json(runtimePrototypesPath.filename().string()) : json(nullptr)},
+                {"prototype_correspondence", prototypeCorrespondenceDocument
+                    ? json(prototypeCorrespondencePath.filename().string()) : json(nullptr)},
                 {"runtime_semantic_ir", runtimeStructure && !runtimeStructure->prototypes.empty()
                     ? json(runtimeSemanticPath.filename().string()) : json(nullptr)},
                 {"payload_closure_ir", payloadClosureMetrics
@@ -15308,6 +15628,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         {"structure_probe", structureProbeCompiled ? json(structureProbePath.filename().string()) : json(nullptr)},
         {"runtime_prototypes", runtimeStructure && !runtimeStructure->prototypes.empty()
             ? json(runtimePrototypesPath.filename().string()) : json(nullptr)},
+        {"prototype_correspondence", prototypeCorrespondenceDocument
+            ? json(prototypeCorrespondencePath.filename().string()) : json(nullptr)},
         {"runtime_semantic_ir", runtimeStructure && !runtimeStructure->prototypes.empty()
             ? json(runtimeSemanticPath.filename().string()) : json(nullptr)},
         {"payload_closure_ir", payloadClosureMetrics
