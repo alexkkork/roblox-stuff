@@ -102,6 +102,14 @@ std::string radix85Carrier(const std::vector<unsigned char>& decoded)
     return carrier;
 }
 
+std::string radix85DollarCarrier(const std::vector<unsigned char>& decoded)
+{
+    std::string carrier = radix85Carrier(decoded);
+    if (!carrier.empty())
+        carrier[3] = '$';
+    return carrier;
+}
+
 std::string longCarrierLiteral(std::string_view carrier)
 {
     return "[========[" + std::string(carrier) + "]========]";
@@ -275,6 +283,27 @@ std::string luaAuthWrapperFixture(std::string_view carrierLiteral)
            "--[[ LuaAuth protected loader. https://luaauth.com ]]\n\n" + body;
 }
 
+std::string luaAuthReaderRoleFixture(std::string_view carrierLiteral)
+{
+    std::string source = "la_code=314159265;la_script_id='reader_role_fixture'\n";
+    source += "--[[ LuaAuth protected loader. https://luaauth.com ]]\n\n";
+    source += "return({";
+    source += "P=function(self)return function(...)return ... end end,";
+    source += "readu8=function(s,i)return string.byte(s,i)end,";
+    source += "readi8=function(s,i)return string.byte(s,i)end,";
+    source += "readu16=function(s,i)return string.byte(s,i)end,";
+    source += "readi16=function(s,i)return string.byte(s,i)end,";
+    source += "readu32=function(s,i)return string.byte(s,i)end,";
+    source += "readi32=function(s,i)return string.byte(s,i)end,";
+    source += "readu64=function(s,i)return string.byte(s,i)end,";
+    source += "readi64=function(s,i)return string.byte(s,i)end,";
+    source += "readf32=function(s,i)return string.byte(s,i)end,";
+    source += "readf64=function(s,i)return string.byte(s,i)end,";
+    source += "payload=" + std::string(carrierLiteral);
+    source += "}):P()(...);";
+    return source;
+}
+
 std::string fixture(std::string_view version)
 {
     std::string source = "-- This file was protected using Luraph Obfuscator v" + std::string(version) + " [https://lura.ph/]\nreturn({";
@@ -367,6 +396,63 @@ int main()
     ok &= require(hasDiagnostic(luaAuth, "LUAAUTH_LAUNCHER_REMOVED"), "LuaAuth launcher-removal diagnostic is missing");
     ok &= require(hasDiagnostic(luaAuth, "LPH_DOLLAR_SCHEMA_UNSUPPORTED"), "LPH$ schema-boundary diagnostic is missing");
 
+    const std::vector<unsigned char> dollarByteOrderFixture = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    const std::string dollarByteOrderCarrier = radix85DollarCarrier(dollarByteOrderFixture);
+    ok &= require(!dollarByteOrderCarrier.empty(), "LPH$ byte-order carrier construction failed");
+    const luraph::EnvelopeAnalysis dollarByteOrder = luraph::analyzeEnvelope(
+        luaAuthWrapperFixture(longCarrierLiteral(dollarByteOrderCarrier)));
+    ok &= require(dollarByteOrder.containers.size() == 1, "LPH$ byte-order container record is missing");
+    if (dollarByteOrder.containers.size() == 1)
+    {
+        const luraph::ContainerAnalysis& decoded = dollarByteOrder.containers.front();
+        ok &= require(decoded.decode_status == luraph::ContainerDecodeStatus::Decoded && decoded.marker == '$',
+            "LPH$ nonzero radix-85 groups were not decoded");
+        ok &= require(decoded.decoded_data == dollarByteOrderFixture,
+            "LPH$ radix-85 groups did not preserve their proven little-endian byte order");
+        ok &= require(decoded.parse_status == luraph::ContainerParseStatus::UnsupportedSchema,
+            "LPH$ byte recovery was incorrectly promoted to record-schema recovery");
+        ok &= require(decoded.constants.empty() && decoded.prototypes.empty() && decoded.root_selector_span.size() == 0,
+            "LPH$ decoding invented record lanes or a root before the randomized schema was proven");
+    }
+
+    const luraph::EnvelopeAnalysis dollarReaders = luraph::analyzeEnvelope(
+        luaAuthReaderRoleFixture(longCarrierLiteral(dollarByteOrderCarrier)));
+    struct ExpectedReaderRole
+    {
+        std::string_view name;
+        luraph::ReaderValueKind kind;
+        size_t bits;
+    };
+    constexpr std::array<ExpectedReaderRole, 8> expectedReaderRoles = {{
+        {"readu8", luraph::ReaderValueKind::UnsignedInteger, 8},
+        {"readu16", luraph::ReaderValueKind::UnsignedInteger, 16},
+        {"readu32", luraph::ReaderValueKind::UnsignedInteger, 32},
+        {"readi8", luraph::ReaderValueKind::SignedInteger, 8},
+        {"readi16", luraph::ReaderValueKind::SignedInteger, 16},
+        {"readi32", luraph::ReaderValueKind::SignedInteger, 32},
+        {"readf32", luraph::ReaderValueKind::FloatingPoint, 32},
+        {"readf64", luraph::ReaderValueKind::FloatingPoint, 64},
+    }};
+    ok &= require(dollarReaders.static_decode.reader_metadata_count == expectedReaderRoles.size(),
+        "LPH$ structural reader-role inventory is incomplete");
+    for (const ExpectedReaderRole& expected : expectedReaderRoles)
+    {
+        const luraph::ReaderMetadata* reader = findReader(dollarReaders, expected.name);
+        ok &= require(reader != nullptr, "LPH$ structural reader role is missing");
+        if (!reader)
+            continue;
+        ok &= require(reader->value_kind == expected.kind && reader->bit_width == expected.bits &&
+                          reader->byte_width == expected.bits / 8,
+            "LPH$ reader role has incorrect type or width metadata");
+        ok &= require(reader->definition_present && reader->definition_range.has_value() && reader->reference_count >= 1,
+            "LPH$ reader role lacks its structural definition evidence");
+        ok &= require(reader->byte_order == luraph::ByteOrder::Unknown && reader->inferred_from_identifier &&
+                          !reader->implementation_verified,
+            "LPH$ reader role was presented as implementation-verified or assigned an unproven byte order");
+    }
+    ok &= require(findReader(dollarReaders, "readu64") == nullptr && findReader(dollarReaders, "readi64") == nullptr,
+        "unsupported reader names were promoted to proven LPH$ roles");
+
     const luraph::ReaderMetadata* readu8 = findReader(supported, "readu8");
     const luraph::ReaderMetadata* readu32 = findReader(supported, "readu32");
     ok &= require(readu8 != nullptr && readu32 != nullptr, "declared reader metadata is missing");
@@ -384,6 +470,30 @@ int main()
 
     const SyntheticContainer containerFixture = syntheticContainer();
     ok &= require(!containerFixture.carrier.empty(), "synthetic radix-85 carrier construction failed");
+    const luraph::EnvelopeAnalysis schemaShapedDollar = luraph::analyzeEnvelope(
+        luaAuthWrapperFixture(longCarrierLiteral(radix85DollarCarrier(containerFixture.decoded))));
+    ok &= require(schemaShapedDollar.containers.size() == 1, "schema-shaped LPH$ container record is missing");
+    if (schemaShapedDollar.containers.size() == 1)
+    {
+        const luraph::ContainerAnalysis& decoded = schemaShapedDollar.containers.front();
+        ok &= require(decoded.decode_status == luraph::ContainerDecodeStatus::Decoded &&
+                          decoded.decoded_data == containerFixture.decoded,
+            "schema-shaped LPH$ bytes were not retained exactly");
+        ok &= require(decoded.parse_status == luraph::ContainerParseStatus::UnsupportedSchema,
+            "LPH&-shaped bytes bypassed the LPH$ schema boundary");
+        ok &= require(decoded.constant_count == 0 && decoded.constants.empty() && decoded.prototype_count == 0 &&
+                          decoded.prototypes.empty() && decoded.instruction_count == 0 && decoded.descriptor_count == 0,
+            "LPH$ bytes inherited LPH& constant, prototype, instruction, or descriptor lanes");
+        ok &= require(decoded.root_selector == 0 && decoded.root_selector_span.size() == 0,
+            "LPH$ bytes inherited an unproven LPH& root selector");
+    }
+    ok &= require(schemaShapedDollar.container_metrics.parsed_count == 0 &&
+                      schemaShapedDollar.container_metrics.constant_count == 0 &&
+                      schemaShapedDollar.container_metrics.prototype_count == 0,
+        "LPH$ aggregate metrics claim randomized tag or key schedule records were parsed");
+    ok &= require(hasDiagnostic(schemaShapedDollar, "LPH_DOLLAR_SCHEMA_UNSUPPORTED"),
+        "schema-shaped LPH$ input did not retain its randomized-schema boundary");
+
     const luraph::EnvelopeAnalysis container = luraph::analyzeEnvelope(wrapperFixture(longCarrierLiteral(containerFixture.carrier)));
     ok &= require(container.static_decode.complete, "valid LPH& container decoding should complete");
     ok &= require(!container.static_decode.payload_decode_attempted && !container.static_decode.payload_decoded,
@@ -415,6 +525,11 @@ int main()
                           parsed.constant_count_span.end == parsed.constant_pool_mode_span.begin &&
                           parsed.constant_pool_mode_span.end == parsed.constants_span.begin,
             "constant pool mode metadata is incorrect");
+        ok &= require(parsed.constants_span.end == parsed.prototype_count_span.begin &&
+                          parsed.prototype_count_span.end == parsed.prototypes_span.begin &&
+                          parsed.prototypes_span.end == parsed.root_selector_span.begin &&
+                          parsed.root_selector_span.end == parsed.trailer_span.begin,
+            "proven LPH& record lanes and root selector are not contiguous");
         if (parsed.constants.size() == 15)
         {
             const std::array<unsigned char, 15> expectedTags = {0, 40, 47, 68, 76, 90, 91, 110, 117, 156, 157, 182, 199, 233, 255};
@@ -468,6 +583,14 @@ int main()
             }
             ok &= require(prototype.descriptor_count == 2 && prototype.descriptors.size() == 2,
                 "prototype descriptor metadata is incorrect");
+            ok &= require(prototype.meta_span.begin == prototype.span.begin &&
+                              prototype.meta_span.end == prototype.instruction_count_span.begin &&
+                              prototype.instruction_count_span.end == prototype.instruction_words_span.begin &&
+                              prototype.instruction_words_span.end == prototype.descriptor_count_span.begin &&
+                              prototype.descriptor_count_span.end == prototype.descriptors_span.begin &&
+                              prototype.descriptors_span.end == prototype.final_span.begin &&
+                              prototype.final_span.end == prototype.span.end,
+                "proven LPH& prototype record lanes are not contiguous");
             if (prototype.descriptors.size() == 2)
             {
                 ok &= require(prototype.descriptors[0].kind == 2 && prototype.descriptors[0].referenced_index == 1,
