@@ -45,9 +45,10 @@ container="$(docker run --detach --rm \
 
 mapping="$(docker port "$container" 8792/tcp | head -n 1)"
 port="${mapping##*:}"
+health=""
 
 for attempt in $(seq 1 30); do
-    if curl --fail --silent --show-error "http://127.0.0.1:$port/health" >"${TMPDIR:-/tmp}/alex-worker-health.json"; then
+    if health="$(curl --fail --silent --show-error "http://127.0.0.1:$port/health")"; then
         break
     fi
     if [ "$attempt" -eq 30 ]; then
@@ -68,5 +69,5 @@ if docker exec "$container" sh -c 'touch /app/worker-write-check' 2>/dev/null; t
     exit 1
 fi
 
-cat "${TMPDIR:-/tmp}/alex-worker-health.json"
+printf '%s\n' "$health"
 printf '\nAlexfuscator VM6 worker image test passed (%s, %s)\n' "$image" "$platform"

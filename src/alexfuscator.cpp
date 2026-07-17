@@ -5408,11 +5408,9 @@ std::pair<int, int> parseStage2ChunkSize(const std::string& value)
 
 FallbackPolicy parseFallbackPolicy(const std::string& value)
 {
-    if (value == "hardened")
-        return FallbackPolicy::Hardened;
     if (value == "fail")
         return FallbackPolicy::Fail;
-    throw std::runtime_error("--fallback-policy expects fail or hardened");
+    throw CliFailure("removed_source_fallback", "--fallback-policy", "source-loader fallback was removed; --fallback-policy only accepts fail");
 }
 
 Config parseArgs(int argc, char** argv)
@@ -5527,11 +5525,16 @@ Config parseArgs(int argc, char** argv)
         }
         else if (arg == "--max-vm-v2" || arg == "--max-vm-v3" || arg == "--max-vm-v4" || arg == "--legacy-vm")
             throw CliFailure("removed_option", arg, arg + " was removed; all production profiles use AlexVM 6");
+        else if (arg == "--vm-version" || arg == "--vm-selector")
+        {
+            (void)needValue(arg);
+            throw CliFailure("removed_option", arg, arg + " was removed; all production profiles use AlexVM 6");
+        }
+        else if (arg == "--source-fallback" || arg == "--allow-source-fallback" || arg == "--native-fallback" || arg == "--ast-vm")
+            throw CliFailure("removed_source_fallback", arg, arg + " was removed; unsupported input now returns a compiler diagnostic");
         else if (arg == "--fallback-policy")
         {
             config.fallbackPolicy = parseFallbackPolicy(needValue(arg));
-            if (config.fallbackPolicy != FallbackPolicy::Fail)
-                throw std::runtime_error("source-loader fallback was removed in vNext; --fallback-policy only accepts fail");
             config.fallbackPolicyExplicit = true;
         }
         else if (arg == "--anti-ai" || arg == "--anti-ai-option" || arg == "--anti-ai1" || arg == "--anti-ai-notice" || arg == "--anti-ai2" || arg == "--anti-ai-decoy")

@@ -7,10 +7,16 @@ import re
 import subprocess
 import tempfile
 
+from test_alexvm6_contract import (
+    FORBIDDEN_VM5_PATTERNS,
+    assert_artifact_contract,
+    assert_report_contract,
+)
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SECRET = "V5_SECRET_LITERAL_9f4d21b63a"
-MARKER = "v5-structure-ok"
+SECRET = "VM6_SECRET_LITERAL_9f4d21b63a"
+MARKER = "vm6-structure-ok"
 SOURCE = f'''local secret = "{SECRET}"
 local captured = 7
 local function noargs() return captured, secret end
@@ -43,7 +49,10 @@ def compile_artifact(binary, source, output, report, profile, seed, *extra):
         "--profile", profile, "--runtime", "universal", "--environment-binding", "portable",
         "--seed", str(seed), "--format", "one-line", "--no-watermark", *extra,
     ])
-    return json.loads(report.read_text(encoding="utf-8"))
+    descriptor = json.loads(report.read_text(encoding="utf-8"))
+    assert_report_contract(descriptor, profile)
+    assert_artifact_contract(output.read_text(encoding="utf-8"), source_marker=SECRET)
+    return descriptor
 
 
 def execute(runtime, artifact, output_dir):
@@ -74,7 +83,7 @@ def main():
     parser.add_argument("--seeds", type=int, default=100)
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory(prefix="alex-v5-structure-") as directory:
+    with tempfile.TemporaryDirectory(prefix="alex-vm6-structure-") as directory:
         temporary = pathlib.Path(directory)
         source = temporary / "source.luau"
         output = temporary / "artifact.luau"
@@ -90,7 +99,7 @@ def main():
             for name in fingerprints:
                 value = descriptor.get(name)
                 if not value:
-                    raise RuntimeError(f"unsafe v5 report omitted {name}")
+                    raise RuntimeError(f"unsafe VM6 report omitted {name}")
                 fingerprints[name].add(value)
             flags = descriptor.get("feature_flags") or {}
             required = (
@@ -103,7 +112,7 @@ def main():
             )
             missing = [name for name in required if flags.get(name) is not True]
             if missing:
-                raise RuntimeError(f"Maximum report omitted active v5 features: {missing}")
+                raise RuntimeError(f"Maximum report omitted active VM6 features: {missing}")
 
         for name in ("opcode_map_fingerprint", "block_order_fingerprint", "constant_layout_fingerprint", "complete_structural_fingerprint"):
             if len(fingerprints[name]) != args.seeds:
@@ -127,13 +136,13 @@ def main():
             raise RuntimeError("automatic seeds produced identical output")
 
         artifact_text = fixed_a.read_text(encoding="utf-8")
-        forbidden = ("loadstring", SECRET, "local captured = 7", "alex_ast_vm_vnext", "hardened_loader_fallback")
+        forbidden = ("loadstring", SECRET, "local captured = 7", *FORBIDDEN_VM5_PATTERNS)
         visible = [value for value in forbidden if value in artifact_text]
         if visible:
-            raise RuntimeError(f"v5 artifact exposed forbidden plaintext: {visible}")
+            raise RuntimeError(f"VM6 artifact exposed forbidden plaintext: {visible}")
         baseline = execute(args.runtime, fixed_a, temporary / "baseline-run")
         if baseline.returncode or MARKER not in baseline.stdout:
-            raise RuntimeError(f"baseline v5 artifact failed: {baseline.stderr}")
+            raise RuntimeError(f"baseline VM6 artifact failed: {baseline.stderr}")
 
         mutated = temporary / "mutated.luau"
         mutated.write_text(mutate_payload(fixed_a), encoding="utf-8")
@@ -179,15 +188,15 @@ def main():
         if notice.get("analysis_notice") is not True or notice.get("analysis_notice_key_bound") is not False:
             raise RuntimeError(f"analysis notice was incorrectly security-bound: {notice}")
 
-        owner_prefix = temporary / "owner-v5"
+        owner_prefix = temporary / "owner-vm6"
         run([
-            str(args.alexfuscator), "--owner-keygen", str(owner_prefix), "--owner-id", "v5-test-owner", "--seed", "5151",
+            str(args.alexfuscator), "--owner-keygen", str(owner_prefix), "--owner-id", "vm6-test-owner", "--seed", "5151",
         ])
         owner_artifact = temporary / "owner-locked.luau"
         owner_descriptor = compile_artifact(
             args.alexfuscator, source, owner_artifact, report, "maximum", 5152,
             "--owner-protect", "sign-and-lock", "--owner-private-key", str(owner_prefix) + ".private",
-            "--owner-id", "v5-test-owner",
+            "--owner-id", "vm6-test-owner",
         )
         if owner_descriptor.get("owner_protect") != "sign-and-lock" or owner_descriptor.get("owner_locked") is not True:
             raise RuntimeError(f"owner protection was not reported accurately: {owner_descriptor}")
@@ -195,7 +204,7 @@ def main():
         if owner_result.returncode or MARKER not in owner_result.stdout:
             raise RuntimeError(f"owner-locked artifact changed semantics: {owner_result.stderr}")
 
-        online_material = "fixture-online-material-v5"
+        online_material = "fixture-online-material-vm6"
         online = temporary / "online.luau"
         run([
             str(args.alexfuscator), str(source), "-o", str(online), "--profile", "maximum", "--runtime", "executor",
@@ -205,7 +214,7 @@ def main():
         good_online = temporary / "online-good.luau"
         bad_online = temporary / "online-bad.luau"
         good_online.write_text(f'request=function(_) return {{Body="{online_material}"}} end\n' + online.read_text(encoding="utf-8"), encoding="utf-8")
-        bad_online.write_text('request=function(_) return {Body="wrong-online-material-v5"} end\n' + online.read_text(encoding="utf-8"), encoding="utf-8")
+        bad_online.write_text('request=function(_) return {Body="wrong-online-material-vm6"} end\n' + online.read_text(encoding="utf-8"), encoding="utf-8")
         good = run([
             str(args.runtime), "--profile", "executor-client", "--luraph-mode", "off", "--analysis-hooks", "off",
             "--network-policy", "offline", "--out", str(temporary / "online-good-run"), str(good_online),
@@ -215,7 +224,7 @@ def main():
             "--network-policy", "offline", "--out", str(temporary / "online-bad-run"), str(bad_online),
         ], check=False)
         if good.returncode or MARKER not in good.stdout:
-            raise RuntimeError(f"online-key v5 success path failed: {good.stderr}")
+            raise RuntimeError(f"online-key VM6 success path failed: {good.stderr}")
         if MARKER in bad.stdout or bad.stderr.strip():
             raise RuntimeError(f"wrong online material did not produce a harmless decoy: {bad.stdout!r} {bad.stderr!r}")
 

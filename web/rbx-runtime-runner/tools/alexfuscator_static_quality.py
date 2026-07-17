@@ -192,8 +192,12 @@ def validate_report(debug):
 
     for count_name, flag_name in COUNT_FLAG_PAIRS:
         count = debug.get(count_name)
-        if is_count(count) and flags.get(flag_name) is not (count > 0):
-            failures.append(f"feature flag {flag_name} disagrees with {count_name}={count}")
+        if is_count(count):
+            expected = count > 0
+            if flags.get(flag_name) is not expected:
+                failures.append(f"feature flag {flag_name} disagrees with {count_name}={count}")
+            if debug.get(flag_name) is not expected:
+                failures.append(f"top-level flag {flag_name} disagrees with {count_name}={count}")
 
     if debug.get("constant_placement_randomized") is False and pass_counts.get("constant_placement") not in (None, 0):
         failures.append("constant_placement claimed changes while randomization was disabled")

@@ -263,6 +263,41 @@ def main():
         if rejected.returncode == 0:
             raise RuntimeError("static scanner accepted a dishonest pass count")
 
+        stale_report = copy.deepcopy(maximum)
+        stale_report.update({
+            "report_version": 3,
+            "mode": "register_vm_v5",
+            "backend": "register_vm_v5",
+            "vm_version": 5,
+            "fallback_used": True,
+        })
+        stale_report_path = temporary / "stale-vm5.json"
+        stale_report_path.write_text(json.dumps(stale_report), encoding="utf-8")
+        stale = run([
+            sys.executable,
+            str(scanner),
+            str(temporary / "maximum.luau"),
+            "--debug-map",
+            str(stale_report_path),
+        ], check=False)
+        if stale.returncode == 0:
+            raise RuntimeError("static scanner accepted a VM5/fallback report")
+
+        weak_artifact = temporary / "legacy-loader.luau"
+        weak_artifact.write_text(
+            'return loadstring("source")() -- LUAUVM5: register_vm_v5\n',
+            encoding="utf-8",
+        )
+        weak = run([
+            sys.executable,
+            str(scanner),
+            str(weak_artifact),
+            "--debug-map",
+            str(temporary / "maximum.json"),
+        ], check=False)
+        if weak.returncode == 0:
+            raise RuntimeError("static scanner accepted a VM5 loadstring artifact")
+
     print(
         "AlexVM6 contract OK: report v4, VM6 marker, no VM5/source fallback, "
         "truthful passes, deterministic fixed seeds, and diverse auto seeds"

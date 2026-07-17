@@ -630,6 +630,15 @@ if(TARGET alexfuscator AND TARGET rbx_luau_runtime)
         --alexfuscator "$<TARGET_FILE:alexfuscator>"
         --runtime "$<TARGET_FILE:rbx_luau_runtime>"
     )
+
+    rbx_add_python_test(
+        alexfuscator_vm6_contract
+        "conformance;security;alexfuscator"
+        300
+        test_alexvm6_contract.py
+        --alexfuscator "$<TARGET_FILE:alexfuscator>"
+        --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+    )
 endif()
 
 rbx_find_host_program(NPM_EXECUTABLE npm npm.cmd)
