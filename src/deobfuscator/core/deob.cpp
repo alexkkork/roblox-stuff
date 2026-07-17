@@ -7730,6 +7730,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "__alex_lph_parts[#__alex_lph_parts+1]=" + quoteLuau(lane + "=") + "..__alex_lph_encoded;end;";
         }
         instrumentation += "local __alex_lph_runtime_opcode=rawget(" + opcodeTableName + ",__alex_lph_ip);print(\"@@LPH_INSN_V1@@\",__alex_lph_pid,__alex_lph_ip,__alex_lph_runtime_opcode,table.concat(__alex_lph_parts,\"|\"));end;end;";
+        instrumentation += "if " + pcName + "==1 then local __alex_lph_argument_object_ids=_G.__alex_lph_object_ids;if type(__alex_lph_argument_object_ids)==\"table\" then for __alex_lph_argument_index=1,math.min(__argCount,4) do local __alex_lph_argument_value=rawget(__alex_lph_args,__alex_lph_argument_index);if type(__alex_lph_argument_value)==\"table\" then local __alex_lph_argument_object_id=__alex_lph_argument_object_ids[__alex_lph_argument_value];if __alex_lph_argument_object_id==nil then _G.__alex_lph_object_count=(_G.__alex_lph_object_count or 0)+1;__alex_lph_argument_object_id=_G.__alex_lph_object_count;__alex_lph_argument_object_ids[__alex_lph_argument_value]=__alex_lph_argument_object_id;end;print(\"@@LPH_ACT_ARG_OBJECT_V1@@\",__aid,__alex_lph_pid,__alex_lph_argument_index,__alex_lph_argument_object_id);end;end;end;end;";
         if (dynamicEvidence && fullTraceEnabled)
         {
             instrumentation += "if _G.__vmc>=" + std::to_string(fullTraceStart) +
@@ -8554,6 +8555,46 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 });
             continue;
         }
+        if (line.starts_with("@@LPH_ACT_ARG_OBJECT_V1@@\t"))
+        {
+            const std::vector<std::string> fields = splitTraceFields(line);
+            const std::optional<uint64_t> activation = fields.size() >= 5
+                ? parseTraceInteger<uint64_t>(fields[1]) : std::nullopt;
+            const std::optional<uint64_t> prototype = fields.size() >= 5
+                ? parseTraceInteger<uint64_t>(fields[2]) : std::nullopt;
+            const std::optional<size_t> argumentIndex = fields.size() >= 5
+                ? parseTraceInteger<size_t>(fields[3]) : std::nullopt;
+            const std::optional<uint64_t> objectId = fields.size() >= 5
+                ? parseTraceInteger<uint64_t>(fields[4]) : std::nullopt;
+            if (!activation || !prototype || !argumentIndex || !objectId || *activation == 0 ||
+                *prototype == 0 || *argumentIndex == 0 || *argumentIndex > 4 || *objectId == 0 ||
+                !trace.prototypes.contains(*prototype))
+            {
+                markMalformed();
+                continue;
+            }
+            json& activationRow = trace.activations[*activation];
+            if (activationRow.contains("prototype") && activationRow["prototype"].is_number_integer() &&
+                activationRow["prototype"].get<uint64_t>() != *prototype)
+            {
+                markMalformed();
+                continue;
+            }
+            activationRow["activation"] = *activation;
+            activationRow["prototype"] = *prototype;
+            json& objects = activationRow["argument_objects"];
+            if (!objects.is_array())
+                objects = json::array();
+            const json observed = {{"argument_index", *argumentIndex}, {"object_id", *objectId}};
+            auto existing = std::find_if(objects.begin(), objects.end(), [&](const json& row) {
+                return row.is_object() && row.value("argument_index", size_t(0)) == *argumentIndex;
+            });
+            if (existing == objects.end())
+                objects.push_back(observed);
+            else if (*existing != observed)
+                activationRow["argument_object_conflict"] = true;
+            continue;
+        }
         if (line.starts_with("@@LPH_ACT_PROTO_V1@@\t"))
         {
             const std::vector<std::string> fields = splitTraceFields(line);
@@ -8615,6 +8656,12 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             if (auto existing = trace.activations.find(*activation); existing != trace.activations.end() &&
                 existing->second.value("argument_table_conflict", false))
                 activationRow["argument_table_conflict"] = true;
+            if (auto existing = trace.activations.find(*activation); existing != trace.activations.end() &&
+                existing->second.contains("argument_objects") && existing->second["argument_objects"].is_array())
+                activationRow["argument_objects"] = existing->second["argument_objects"];
+            if (auto existing = trace.activations.find(*activation); existing != trace.activations.end() &&
+                existing->second.value("argument_object_conflict", false))
+                activationRow["argument_object_conflict"] = true;
             trace.activations[*activation] = std::move(activationRow);
             continue;
         }
