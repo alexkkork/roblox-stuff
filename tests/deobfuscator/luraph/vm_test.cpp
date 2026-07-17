@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <vector>
 #include <string_view>
@@ -133,6 +134,13 @@ luraph::ContainerAnalysis starContainer(size_t prototypeCount, size_t rootIndex,
     return container;
 }
 
+void markValidatedLuaAuthLphDollar(luraph::ContainerAnalysis& container)
+{
+    container.marker = '$';
+    container.decode_status = luraph::ContainerDecodeStatus::Decoded;
+    container.parse_status = luraph::ContainerParseStatus::StructuralMetadataRecovered;
+}
+
 std::vector<vm::RuntimePrototypeRecord> runtimeRecords(const vm::StaticPrototypeIndex& index)
 {
     std::vector<vm::RuntimePrototypeRecord> records;
@@ -222,6 +230,52 @@ int main()
                       !invalidConstant.side_reference.metadata_index.has_value(),
         "out-of-range constant reference was accepted");
 
+    const vm::NormalizedInstruction luaAuthInstruction = vm::normalizeInstruction(
+        instruction(19, {112, 8 * 5 + 7, 8 * 7 + 1, 8 * 9 + 3}),
+        1145, 37, vm::InstructionSchema::LuaAuthLphDollar);
+    ok &= require(luaAuthInstruction.valid && luaAuthInstruction.pc == 20 &&
+                      luaAuthInstruction.opcode == 112 &&
+                      luaAuthInstruction.D.base_value == 7 &&
+                      luaAuthInstruction.G.base_value == 5 &&
+                      luaAuthInstruction.p.base_value == 11,
+        "LuaAuth word layout or PC-relative operand decoding is incorrect");
+    ok &= require(luaAuthInstruction.D.raw_word == 8 * 7 + 1 &&
+                      luaAuthInstruction.G.raw_word == 8 * 5 + 7 &&
+                      luaAuthInstruction.p.raw_word == 8 * 9 + 3 &&
+                      luaAuthInstruction.D.side_reference.kind == vm::ReferenceKind::None &&
+                      luaAuthInstruction.G.side_reference.kind == vm::ReferenceKind::None &&
+                      luaAuthInstruction.p.side_reference.kind == vm::ReferenceKind::None,
+        "LuaAuth operands retained the wrong serialized words or inherited legacy side-reference tags");
+
+    const std::array<int64_t, 8> luaAuthExpected{9, 9, 9, 11, 29, 9, 9, 9};
+    for (unsigned int residue = 0; residue < luaAuthExpected.size(); ++residue)
+    {
+        const vm::OperandLane lane = vm::normalizeLane(
+            8 * 9 + residue, 20, 10, 10, vm::InstructionSchema::LuaAuthLphDollar);
+        if (residue == 5 || residue == 6)
+        {
+            ok &= require(lane.status == vm::OperandLaneStatus::InvalidResidue,
+                "LuaAuth residue 5 or 6 was not rejected");
+        }
+        else
+        {
+            ok &= require(lane.status == vm::OperandLaneStatus::Valid &&
+                              lane.base_value == luaAuthExpected[residue],
+                "LuaAuth direct or relative residue was decoded incorrectly");
+        }
+    }
+    const vm::OperandLane luaAuthNegative = vm::normalizeLane(
+        -5, 20, 10, 10, vm::InstructionSchema::LuaAuthLphDollar);
+    ok &= require(luaAuthNegative.status == vm::OperandLaneStatus::Valid &&
+                      luaAuthNegative.residue == 3 && luaAuthNegative.quotient == -1 &&
+                      luaAuthNegative.base_value == 21,
+        "LuaAuth negative PC-relative operand did not use Euclidean residue splitting");
+    const vm::OperandLane luaAuthOverflow = vm::normalizeLane(
+        8 + 4, static_cast<size_t>(std::numeric_limits<int64_t>::max()), 10, 10,
+        vm::InstructionSchema::LuaAuthLphDollar);
+    ok &= require(luaAuthOverflow.status == vm::OperandLaneStatus::ArithmeticOverflow,
+        "LuaAuth PC-relative arithmetic overflow was accepted");
+
     luraph::ContainerAnalysis container;
     container.constant_pool_mode = 0;
     container.root_selector = 2;
@@ -242,6 +296,135 @@ int main()
     container.root_selector = 0;
     const vm::NormalizedContainer invalidRoot = vm::normalizeContainer(container);
     ok &= require(!invalidRoot.root_valid && !invalidRoot.root_metadata_index.has_value(), "invalid root selector was accepted");
+
+    luraph::ContainerAnalysis markerOnly = starContainer(2, 0, true);
+    markerOnly.marker = '$';
+    const vm::InstructionSchemaSelection markerOnlySelection = vm::selectInstructionSchema(markerOnly);
+    const vm::NormalizedContainer markerOnlyNormalized = vm::normalizeContainer(markerOnly);
+    ok &= require(markerOnlySelection.schema == vm::InstructionSchema::LuaAuthLphDollar &&
+                      markerOnlySelection.status == vm::InstructionSchemaSelectionStatus::InvalidEvidence &&
+                      !markerOnlySelection.transport_validated &&
+                      !markerOnlySelection.structural_metadata_validated &&
+                      markerOnlySelection.static_graph_validated &&
+                      !markerOnlyNormalized.valid && markerOnlyNormalized.prototypes.empty(),
+        "an LPH$ marker selected LuaAuth without validated framing and structural metadata");
+
+    luraph::ContainerAnalysis missingGraph = markerOnly;
+    missingGraph.decode_status = luraph::ContainerDecodeStatus::Decoded;
+    missingGraph.parse_status = luraph::ContainerParseStatus::StructuralMetadataRecovered;
+    missingGraph.prototype_graph_complete = false;
+    missingGraph.root_selector_graph_validated = false;
+    const vm::InstructionSchemaSelection missingGraphSelection = vm::selectInstructionSchema(missingGraph);
+    ok &= require(missingGraphSelection.status == vm::InstructionSchemaSelectionStatus::InvalidEvidence &&
+                      missingGraphSelection.transport_validated &&
+                      missingGraphSelection.structural_metadata_validated &&
+                      !missingGraphSelection.static_graph_validated,
+        "LuaAuth schema was selected without a complete rooted static graph");
+
+    const vm::InstructionSchemaSelection legacySelection = vm::selectInstructionSchema(starContainer(2, 0, true));
+    ok &= require(legacySelection.status == vm::InstructionSchemaSelectionStatus::Selected &&
+                      legacySelection.schema == vm::InstructionSchema::LegacyV147 &&
+                      !legacySelection.lph_dollar_marker,
+        "a non-LPH$ graph selected the LuaAuth instruction schema");
+
+    luraph::ContainerAnalysis luaAuthContainer = starContainer(2, 0, true);
+    markValidatedLuaAuthLphDollar(luaAuthContainer);
+    const std::array<std::array<int64_t, 3>, 3> rootLanes{{
+        {2, 21, 31},
+        {12, 22, 32},
+        {13, 23, 33},
+    }};
+    const std::array<std::array<int64_t, 3>, 2> childLanes{{
+        {14, 24, 34},
+        {15, 25, 35},
+    }};
+    for (size_t pc = 0; pc < rootLanes.size(); ++pc)
+    {
+        const int64_t opcode = pc == 0 ? 112 : static_cast<int64_t>(40 + pc);
+        const unsigned int dResidue = pc == 0 ? 1 : 0;
+        luaAuthContainer.prototypes[0].instructions[pc] = instruction(pc, {
+            opcode,
+            rootLanes[pc][1] * 8,
+            rootLanes[pc][0] * 8 + dResidue,
+            rootLanes[pc][2] * 8,
+        });
+    }
+    for (size_t pc = 0; pc < childLanes.size(); ++pc)
+    {
+        luaAuthContainer.prototypes[1].instructions[pc] = instruction(pc, {
+            static_cast<int64_t>(50 + pc),
+            childLanes[pc][1] * 8,
+            childLanes[pc][0] * 8,
+            childLanes[pc][2] * 8,
+        });
+    }
+
+    const vm::NormalizedContainer normalizedLuaAuth = vm::normalizeContainer(luaAuthContainer);
+    ok &= require(normalizedLuaAuth.valid &&
+                      normalizedLuaAuth.schema_selection.status == vm::InstructionSchemaSelectionStatus::Selected &&
+                      normalizedLuaAuth.schema_selection.schema == vm::InstructionSchema::LuaAuthLphDollar &&
+                      normalizedLuaAuth.residue_diagnostics.operand_lane_count == 15 &&
+                      normalizedLuaAuth.residue_diagnostics.valid_operand_lane_count == 15 &&
+                      normalizedLuaAuth.residue_diagnostics.invalid_operand_lane_count == 0 &&
+                      normalizedLuaAuth.residue_diagnostics.counts[0] == 14 &&
+                      normalizedLuaAuth.residue_diagnostics.counts[1] == 1,
+        "validated LuaAuth container schema or residue diagnostics are incorrect");
+
+    const std::vector<vm::RuntimeOperandLaneAnchor> luaAuthLaneAnchors{
+        {3, {
+            {"S", {2, 12, 13}},
+            {"V", {101, 102, 103}},
+            {"Z", {21, 22, 23}},
+            {"g", {201, 202, 203}},
+            {"r", {31, 32, 33}},
+            {"v", {301, 302, 303}},
+        }},
+        {2, {
+            {"S", {14, 15}},
+            {"V", {104, 105}},
+            {"Z", {24, 25}},
+            {"g", {204, 205}},
+            {"r", {34, 35}},
+            {"v", {304, 305}},
+        }},
+    };
+    vm::OperandLaneProjection expectedLuaAuthProjection;
+    expectedLuaAuthProjection.bindings = {{
+        {"S", vm::NormalizedOperandLane::D},
+        {"Z", vm::NormalizedOperandLane::G},
+        {"r", vm::NormalizedOperandLane::p},
+    }};
+    const vm::OperandLaneProjectionResult luaAuthProjection =
+        vm::inferOperandLaneProjection(normalizedLuaAuth, luaAuthLaneAnchors);
+    ok &= require(luaAuthProjection.status == vm::OperandLaneProjectionStatus::Unique &&
+                      luaAuthProjection.candidates ==
+                          std::vector<vm::OperandLaneProjection>{expectedLuaAuthProjection},
+        "validated LuaAuth operands did not prove S to D, Z to G, and r to p");
+
+    luraph::ContainerAnalysis invalidResidueContainer = luaAuthContainer;
+    invalidResidueContainer.prototypes[1].instructions[1].words[1].value = 8 * 25 + 5;
+    const vm::NormalizedContainer invalidResidueNormalized = vm::normalizeContainer(invalidResidueContainer);
+    const vm::StaticPrototypeIndex invalidResidueIndex = vm::buildStaticPrototypeIndex(invalidResidueContainer);
+    ok &= require(!invalidResidueNormalized.valid &&
+                      invalidResidueNormalized.residue_diagnostics.invalid_operand_lane_count == 1 &&
+                      invalidResidueNormalized.residue_diagnostics.first_invalid_prototype_metadata_index ==
+                          std::optional<size_t>(1) &&
+                      invalidResidueNormalized.residue_diagnostics.first_invalid_pc == std::optional<size_t>(2) &&
+                      invalidResidueNormalized.residue_diagnostics.first_invalid_lane ==
+                          std::optional<vm::NormalizedOperandLane>(vm::NormalizedOperandLane::G) &&
+                      invalidResidueNormalized.residue_diagnostics.first_invalid_residue ==
+                          std::optional<unsigned int>(5) &&
+                      !invalidResidueIndex.valid && invalidResidueIndex.prototypes.empty(),
+        "invalid LuaAuth residue diagnostics or fail-closed static indexing are incorrect");
+
+    const vm::StaticPrototypeIndex luaAuthIndex = vm::buildStaticPrototypeIndex(luaAuthContainer);
+    ok &= require(luaAuthIndex.valid &&
+                      luaAuthIndex.schema_selection.schema == vm::InstructionSchema::LuaAuthLphDollar &&
+                      luaAuthIndex.residue_diagnostics.invalid_operand_lane_count == 0 &&
+                      luaAuthIndex.prototypes[0].fingerprint.opcode_lanes[0].opcode == 112 &&
+                      luaAuthIndex.prototypes[0].fingerprint.opcode_lanes[0].lanes ==
+                          std::array<int64_t, 3>{2, 21, 31},
+        "static prototype fingerprints did not use the selected LuaAuth instruction schema");
 
     vm::NormalizedContainer projectionStatic;
     projectionStatic.prototypes.push_back(normalizedPrototype(0, {
@@ -424,6 +607,12 @@ int main()
     ok &= require(!unprovedIndex.valid && unprovedIndex.prototypes.empty(),
         "unproved static graph was accepted for runtime correspondence");
     ok &= require(std::string_view(vm::toString(vm::CorrespondenceStatus::Ambiguous)) == "ambiguous" &&
+                      std::string_view(vm::toString(vm::InstructionSchema::LuaAuthLphDollar)) ==
+                          "luaauth_lph_dollar" &&
+                      std::string_view(vm::toString(vm::InstructionSchemaSelectionStatus::InvalidEvidence)) ==
+                          "invalid_evidence" &&
+                      std::string_view(vm::toString(vm::OperandLaneStatus::InvalidResidue)) ==
+                          "invalid_residue" &&
                       std::string_view(vm::toString(vm::NormalizedOperandLane::p)) == "p" &&
                       std::string_view(vm::toString(vm::OperandLaneProjectionStatus::Contradictory)) ==
                           "contradictory" &&

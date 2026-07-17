@@ -15,7 +15,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "luraph_luaauth" / "lph_dollar_generation.json"
 AMBIGUOUS_STRUCTURAL_DECODED_SHA256 = (
-    "26e35a770e1511ad88942981a3e61a91ce024effc8bb0a5576a58d9bebbfcd16"
+    "14da0e50e3853eb2696689f75369d58d01aa2a5bf5bc5eab4151548441587870"
 )
 
 
@@ -143,7 +143,7 @@ def build_ambiguous_structural_subject() -> str:
     for value in (1, 1, 10, 20):
         append_little(decoded, value, 4)
     append_uleb(decoded, 307 + 1)
-    for word in (5, 1, -2, 3):
+    for word in (5, 1, -5, 3):
         append_uleb(decoded, signed_fold(word))
 
     append_uleb(decoded, 0)
