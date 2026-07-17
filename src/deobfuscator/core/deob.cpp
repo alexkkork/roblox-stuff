@@ -1702,8 +1702,16 @@ Luau::AstStatBlock* selectLeaf(Luau::AstStatBlock* block, Luau::AstLocal* state,
         if (auto nested = statement->as<Luau::AstStatIf>())
         {
             const std::optional<bool> decision = evaluateStateCondition(nested->condition, state, value);
-            if (decision.has_value())
-                return selectLeaf(nested, state, value);
+            if (!decision.has_value())
+                continue;
+
+            if (*decision)
+                return selectLeaf(nested->thenbody, state, value);
+
+            // A one-sided opcode guard is a sibling leaf, not the end of the
+            // dispatcher. Keep scanning the enclosing block when it misses.
+            if (nested->elsebody)
+                return selectLeaf(nested->elsebody, state, value);
         }
     }
     return block;
