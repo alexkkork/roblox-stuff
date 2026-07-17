@@ -11896,19 +11896,44 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
             laneInteger(lanes, "r") != sourceRegister || laneInteger(lanes, "V") != lookupIndex ||
             !guardPath.is_object() || !guardPath.value("complete", false) || guardPath.value("overflow", true) ||
             observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
-                static_cast<int64_t>(pc + 1) || !writes.is_array() || writes.size() != 2 ||
-            !writes[0].is_object() || !writes[1].is_object() ||
-            writes[0].value("register", std::numeric_limits<int64_t>::min()) != *base ||
-            writes[1].value("register", std::numeric_limits<int64_t>::min()) != *base + 1 ||
-            writes[0].value("value", json::object()).value("type", "") != "function" ||
-            writes[1].value("value", json::object()).value("type", "") != "table")
+                static_cast<int64_t>(pc + 1) || !writes.is_array() || writes.size() != 2)
+            return std::nullopt;
+
+        const json* destinationWrite = nullptr;
+        const json* preservedWrite = nullptr;
+        for (const json& write : writes)
+        {
+            if (!write.is_object())
+                return std::nullopt;
+            const int64_t destination = write.value("register", std::numeric_limits<int64_t>::min());
+            if (destination == *base)
+                destinationWrite = &write;
+            else if (destination == *base + 1)
+                preservedWrite = &write;
+            else
+                return std::nullopt;
+        }
+        if (!destinationWrite || !preservedWrite ||
+            destinationWrite->value("value", json::object()).value("type", "") != "function" ||
+            preservedWrite->value("value", json::object()).value("type", "") != "table")
             return std::nullopt;
 
         const std::string preservedKey = std::to_string(*base + 1);
-        if (!origins.is_object() || !origins.contains(preservedKey) || !origins[preservedKey].is_array() ||
-            origins[preservedKey].size() != 1 || !origins[preservedKey].front().is_object() ||
-            origins[preservedKey].front().value("kind", "") != "register" ||
-            origins[preservedKey].front().value("index", std::numeric_limits<int64_t>::min()) != *sourceRegister)
+        if (!origins.is_object() || !origins.contains(preservedKey) || !origins[preservedKey].is_array())
+            return std::nullopt;
+        bool registerOrigin = false;
+        for (const json& origin : origins[preservedKey])
+        {
+            if (!origin.is_object())
+                return std::nullopt;
+            const std::string kind = origin.value("kind", "");
+            const int64_t index = origin.value("index", std::numeric_limits<int64_t>::min());
+            if (kind == "register" && index == *sourceRegister)
+                registerOrigin = true;
+            else if (kind != "argument" || index != *sourceRegister)
+                return std::nullopt;
+        }
+        if (!registerOrigin)
             return std::nullopt;
     }
 

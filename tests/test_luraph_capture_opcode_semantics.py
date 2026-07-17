@@ -66,7 +66,7 @@ def build_trace() -> str:
         (2, 136, encoded_lanes(S=6, Z=10)),
         (3, 186, encoded_lanes(S=8, r=8, V=187)),
         (4, 186, encoded_lanes(S=10, r=10, V=188)),
-        (5, 186, encoded_lanes(S=12, r=11, V=189)),
+        (5, 186, encoded_lanes(S=12, r=12, V=189)),
     )
     return "\n".join(
         (
@@ -84,8 +84,8 @@ def build_trace() -> str:
             # The preserved table claims the wrong register origin.
             step(4, 4, 186, sites[3][2], "10=f:|11=x:table", 2, "11=r:9"),
             guard_path(5, 5, 186),
-            # The handler requires the source register lane to equal the destination base.
-            step(5, 5, 186, sites[4][2], "12=f:|13=x:table", 2, "13=r:11"),
+            # The preserved S+1 value must remain a capture table, not another function.
+            step(5, 5, 186, sites[4][2], "12=f:|13=f:", 2, "13=r:12"),
             "",
         )
     )
@@ -237,7 +237,7 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
         rows[4], "opcode186_lookup_preserve_recognition", "opcode 186 wrong write origin"
     )
     assert_evidence_mismatch(
-        rows[5], "opcode186_lookup_preserve_recognition", "opcode 186 source/base mismatch"
+        rows[5], "opcode186_lookup_preserve_recognition", "opcode 186 non-table preservation"
     )
 
     partition = (report.get("coverage") or {}).get("semantic_coverage_partition") or {}
@@ -251,16 +251,42 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
 
 def audit_locked_handler_ranges(output: pathlib.Path) -> None:
     rows = instruction_rows(output)
-    for pc, opcode, key in (
-        (1, 136, "opcode136_capture_load_recognition"),
-        (3, 186, "opcode186_lookup_preserve_recognition"),
+    for pc, opcode, key, family, proof in (
+        (
+            1,
+            136,
+            "opcode136_capture_load_recognition",
+            "capture_load",
+            "locked_opcode136_capture_load_and_runtime_write_validated",
+        ),
+        (
+            3,
+            186,
+            "opcode186_lookup_preserve_recognition",
+            "lookup_and_preserve",
+            "locked_opcode186_lookup_preserve_branch_and_runtime_origins_validated",
+        ),
     ):
+        handler_range = rows[pc].get("handler_range") or {}
+        locked_range = (326066, 326084) if opcode == 136 else (307936, 323136)
         require(
-            rows[pc].get("handler_range")
-            != ({"begin": 326066, "end": 326084} if opcode == 136 else {"begin": 307936, "end": 323136}),
+            (handler_range.get("begin"), handler_range.get("end")) != locked_range,
             f"alternate family unexpectedly reused the locked opcode-{opcode} handler range",
         )
-        assert_evidence_mismatch(rows[pc], key, f"opcode {opcode} wrong handler range")
+        require(
+            rows[pc].get(key) == {"status": "evidence_mismatch", "validated_observations": 0},
+            f"opcode {opcode} wrong handler range did not reject exact recognition: {rows[pc].get(key)}",
+        )
+        operation = rows[pc].get("observational_semantic_operation")
+        if isinstance(operation, dict):
+            require(
+                operation.get("semantic_family") != family and operation.get("proof") != proof,
+                f"opcode {opcode} wrong handler range escaped as exact semantics: {operation}",
+            )
+            require(
+                operation.get("static_semantic") is False and operation.get("source_claim") is False,
+                f"opcode {opcode} fallback telemetry crossed the source boundary: {operation}",
+            )
 
 
 def main() -> int:
