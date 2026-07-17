@@ -8480,6 +8480,7 @@ json luraphRuntimeSemanticDispatchArtifact(
     using RuntimeSite = std::pair<uint64_t, size_t>;
     std::map<RuntimeSite, std::vector<json>> observationsBySite;
     std::map<RuntimeSite, std::vector<json>> returnsBySite;
+    std::map<RuntimeSite, std::vector<json>> childActivationsBySite;
     std::map<RuntimeSite, std::set<int64_t>> observedOpcodesBySite;
     for (const json& observed : trace.steps)
     {
@@ -8517,7 +8518,151 @@ json luraphRuntimeSemanticDispatchArtifact(
         if (prototype > 0)
             returnsBySite[{prototype, static_cast<size_t>(pc)}].push_back(returned);
     }
+    for (const auto& [activationId, activation] : trace.activations)
+    {
+        (void)activationId;
+        if (!activation.contains("caller_activation") || !activation["caller_activation"].is_number_integer() ||
+            !activation.contains("caller_pc") || !activation["caller_pc"].is_number_integer())
+            continue;
+        const int64_t callerActivation = activation["caller_activation"].get<int64_t>();
+        const int64_t callerPc = activation["caller_pc"].get<int64_t>();
+        auto caller = callerActivation > 0
+            ? trace.activations.find(static_cast<uint64_t>(callerActivation)) : trace.activations.end();
+        if (caller == trace.activations.end() || callerPc <= 0)
+            continue;
+        const uint64_t callerPrototype = caller->second.value("prototype", uint64_t(0));
+        if (callerPrototype == 0)
+            continue;
+        childActivationsBySite[{callerPrototype, static_cast<size_t>(callerPc)}].push_back({
+            {"activation", activation.value("activation", uint64_t(0))},
+            {"prototype", activation.value("prototype", uint64_t(0))},
+            {"argument_count", activation.value("argument_count", json(nullptr))},
+            {"entry_pc", activation.value("entry_pc", json(nullptr))},
+        });
+    }
+
+    const auto observedEffect = [&](uint64_t prototype, size_t pc, const std::vector<json>& observations) {
+        json effect = {
+            {"kind", "observed_effect"},
+            {"proof", "bounded_runtime_observation"},
+            {"path_specific", true},
+            {"prototype", prototype},
+            {"pc", pc},
+            {"observation_count", observations.size()},
+        };
+        std::set<int64_t> nextPcs;
+        std::set<std::vector<int64_t>> writeSignatures;
+        std::set<std::string> writtenTypes;
+        for (const json& observation : observations)
+        {
+            nextPcs.insert(observation.value("next_pc", int64_t(-1)));
+            std::vector<int64_t> signature;
+            const json writes = observation.value("register_writes", json::array());
+            if (writes.is_array())
+                for (const json& write : writes)
+                {
+                    if (write.contains("register") && write["register"].is_number_integer())
+                        signature.push_back(write["register"].get<int64_t>());
+                    if (write.contains("value") && write["value"].is_object())
+                        writtenTypes.insert(write["value"].value("type", "unknown"));
+                }
+            std::sort(signature.begin(), signature.end());
+            writeSignatures.insert(std::move(signature));
+        }
+        effect["next_pcs"] = nextPcs;
+        effect["written_value_types"] = writtenTypes;
+
+        auto returned = returnsBySite.find({prototype, pc});
+        auto children = childActivationsBySite.find({prototype, pc});
+        if (returned != returnsBySite.end())
+        {
+            effect["kind"] = "observed_return";
+            effect["returns"] = returned->second;
+            return effect;
+        }
+        if (children != childActivationsBySite.end())
+        {
+            effect["kind"] = "observed_call";
+            effect["callee_activations"] = children->second;
+            std::set<uint64_t> callees;
+            for (const json& child : children->second)
+                callees.insert(child.value("prototype", uint64_t(0)));
+            effect["callee_prototypes"] = callees;
+            effect["call_count"] = children->second.size();
+            return effect;
+        }
+
+        std::optional<std::pair<std::string, int64_t>> transferLane;
+        if (!observations.empty())
+        {
+            const json firstLanes = observations.front().value("runtime_lanes", json::object());
+            if (firstLanes.is_object())
+                for (auto lane = firstLanes.begin(); lane != firstLanes.end(); ++lane)
+                    for (int64_t adjustment : {int64_t(0), int64_t(1)})
+                    {
+                        bool matched = true;
+                        bool observedTransfer = false;
+                        for (const json& observation : observations)
+                        {
+                            const int64_t nextPc = observation.value("next_pc", int64_t(-1));
+                            const json lanes = observation.value("runtime_lanes", json::object());
+                            if (!lanes.contains(lane.key()) || !lanes[lane.key()].is_object() ||
+                                lanes[lane.key()].value("type", "") != "number" ||
+                                !lanes[lane.key()].contains("value") || !lanes[lane.key()]["value"].is_string())
+                            {
+                                matched = false;
+                                break;
+                            }
+                            const std::optional<int64_t> value =
+                                parseTraceInteger<int64_t>(lanes[lane.key()]["value"].get<std::string>());
+                            if (!value || *value + adjustment != nextPc)
+                            {
+                                matched = false;
+                                break;
+                            }
+                            observedTransfer = observedTransfer || nextPc != static_cast<int64_t>(pc + 1);
+                        }
+                        if (matched && observedTransfer)
+                        {
+                            transferLane = {lane.key(), adjustment};
+                            break;
+                        }
+                    }
+        }
+
+        const bool stableWrites = writeSignatures.size() == 1;
+        const std::vector<int64_t> writes = stableWrites ? *writeSignatures.begin() : std::vector<int64_t>{};
+        if (nextPcs.size() > 1)
+        {
+            effect["kind"] = "observed_branch";
+            effect["condition"] = "unresolved";
+        }
+        else if (transferLane)
+            effect["kind"] = "observed_jump";
+        else if (stableWrites && writes.size() == 1)
+            effect["kind"] = "observed_scalar_write";
+        else if (stableWrites && writes.size() > 1 &&
+            std::adjacent_find(writes.begin(), writes.end(), [](int64_t left, int64_t right) {
+                return right != left + 1;
+            }) == writes.end())
+            effect["kind"] = "observed_contiguous_write";
+        else if (nextPcs.size() == 1 && *nextPcs.begin() == static_cast<int64_t>(pc + 1) &&
+            stableWrites && writes.empty())
+            effect["kind"] = "observed_fallthrough";
+
+        if (stableWrites)
+            effect["register_writes"] = writes;
+        else
+            effect["register_writes"] = nullptr;
+        if (transferLane)
+        {
+            effect["target_lane"] = transferLane->first;
+            effect["target_adjustment"] = transferLane->second;
+        }
+        return effect;
+    };
     size_t traceSpecialized = 0;
+    size_t traceEffectClassified = 0;
     size_t runtimeOpcodeOverrides = 0;
     size_t runtimeOperandOverrides = 0;
 
@@ -8664,7 +8809,11 @@ json luraphRuntimeSemanticDispatchArtifact(
                     {"next_pcs", nextPcs},
                     {"observations", std::move(observations)},
                 };
+                row["trace_specialized_operation"]["observed_effect"] =
+                    observedEffect(id, pc, observedSite->second);
+                row["path_effect_classified"] = true;
                 ++traceSpecialized;
+                ++traceEffectClassified;
             }
             if (classified)
                 ++effectClassified;
@@ -8721,6 +8870,7 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"semantic_lifted_instructions", semanticLifted},
         {"semantic_unresolved_instructions", effectClassified + unresolved - semanticLifted},
         {"trace_specialized_instructions", traceSpecialized},
+        {"trace_effect_classified_instructions", traceEffectClassified},
         {"runtime_opcode_overrides", runtimeOpcodeOverrides},
         {"runtime_operand_overrides", runtimeOperandOverrides},
         {"observed_semantic_coverage", semanticLifted + traceSpecialized},
