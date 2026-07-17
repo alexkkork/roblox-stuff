@@ -1,5 +1,6 @@
 #include "Luau/Parser.h"
 #include "alex/owner_protection.hpp"
+#include "alexfuscator/alex_language.hpp"
 
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -85,11 +86,20 @@ enum class FallbackPolicy
     Fail,
 };
 
+enum class InputLanguage
+{
+    Auto,
+    Luau,
+    Alex,
+};
+
 struct Config
 {
     fs::path inputPath;
     fs::path outputPath;
     fs::path debugMapPath;
+    fs::path dumpIrPath;
+    fs::path dumpVmPath;
     fs::path ownerKeygenPath;
     fs::path ownerPrivateKeyPath;
     fs::path reportPath;
@@ -101,6 +111,8 @@ struct Config
     ProtectionLevel vmDiversity = ProtectionLevel::Preset;
     ProtectionLevel tamperDensity = ProtectionLevel::Preset;
     EnvironmentBinding environmentBinding = EnvironmentBinding::Portable;
+    InputLanguage language = InputLanguage::Auto;
+    InputLanguage effectiveLanguage = InputLanguage::Luau;
     uint64_t gameId = 0;
     std::string target = "roblox-luau";
     std::string analysisNotice;

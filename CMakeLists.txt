@@ -123,6 +123,14 @@ add_executable(rbx_luau_runtime
     src/runtime/signal.cpp
 )
 
+add_library(alexfuscator_core STATIC
+    src/alexfuscator/alex_language.cpp
+)
+
+target_include_directories(alexfuscator_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 add_executable(alexfuscator
     src/alexfuscator.cpp
 )
@@ -159,6 +167,7 @@ target_link_libraries(rbx_luau_runtime
 
 target_link_libraries(alexfuscator
     PRIVATE
+        alexfuscator_core
         Luau.Compiler
         nlohmann_json::nlohmann_json
         alex_antitamper::alex_antitamper
