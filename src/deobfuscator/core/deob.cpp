@@ -10937,6 +10937,26 @@ std::optional<int64_t> luraphObservedInteger(const json& value)
     return parseTraceInteger<int64_t>(value["value"].get<std::string>());
 }
 
+bool luraphIncompleteCandidateIsPureRegisterMove(const json& candidate, const json& handler)
+{
+    if (!candidate.is_object() || candidate.value("kind", "") != "register_write" ||
+        !candidate.contains("value") || !candidate["value"].is_object() ||
+        candidate["value"].value("kind", "") != "register_read" ||
+        luraphSemanticContainsUnknownState(candidate) || !handler.contains("effects") ||
+        !handler["effects"].is_object())
+        return false;
+    const json& effects = handler["effects"];
+    const json candidates = effects.value("operation_candidates", json::array());
+    return candidates.is_array() && candidates.size() == 1 && candidates[0] == "register_write" &&
+        effects.value("calls", size_t(0)) == 0 &&
+        effects.value("closures", size_t(0)) == 0 &&
+        effects.value("conditionals", size_t(0)) == 0 &&
+        effects.value("pc_writes", size_t(0)) == 0 &&
+        effects.value("returns", size_t(0)) == 0 &&
+        effects.value("register_writes", size_t(0)) == 1 &&
+        effects.value("table_writes", size_t(0)) == 1;
+}
+
 template<typename Value>
 void intersectLuraphEvidence(std::optional<std::set<Value>>& retained, std::set<Value> candidates)
 {
@@ -12435,11 +12455,20 @@ json luraphRuntimeSemanticDispatchArtifact(
                 const bool completePath = handler->second.value("executed_path_complete", false) &&
                     handler->second.value("full_effect_normalization", false);
                 bool incompleteCallCandidate = false;
+                bool incompleteMoveCandidate = false;
                 if (completePath)
                     validation = validateLuraphObservedCandidate(
                         candidate, observedSite->second, pc,
                         observedReturnsForSite != returnsBySite.end()
                             ? &observedReturnsForSite->second : nullptr);
+                else if (luraphIncompleteCandidateIsPureRegisterMove(candidate, handler->second))
+                {
+                    validation = validateLuraphObservedCandidate(
+                        candidate, observedSite->second, pc,
+                        observedReturnsForSite != returnsBySite.end()
+                            ? &observedReturnsForSite->second : nullptr);
+                    incompleteMoveCandidate = validation.has_value();
+                }
                 else if (childActivationsForSite != childActivationsBySite.end())
                 {
                     validation = validateLuraphObservedIncompleteCallCandidate(
@@ -12453,13 +12482,16 @@ json luraphRuntimeSemanticDispatchArtifact(
                     candidate["candidate_proof"] = candidate.value("proof", "");
                     candidate["proof"] = incompleteCallCandidate
                         ? "runtime_validated_incomplete_call_handler_candidate"
-                        : "runtime_validated_ambiguous_handler_candidate";
+                        : incompleteMoveCandidate
+                            ? "runtime_validated_incomplete_register_move_candidate"
+                            : "runtime_validated_ambiguous_handler_candidate";
                     candidate["runtime_validation"] = *validation;
                     candidate["full_effect_validation"] = completePath;
                     candidate["source_claim"] = false;
                     row["observational_semantic_operation"] = std::move(candidate);
                     row["guarded_candidate_validation"] = *validation;
                     row["incomplete_call_candidate_validated"] = incompleteCallCandidate;
+                    row["incomplete_move_candidate_validated"] = incompleteMoveCandidate;
                     ++guardedCandidatesValidated;
                     ++observationalSemanticLifted;
                     const std::string family = row["observational_semantic_operation"].value(
