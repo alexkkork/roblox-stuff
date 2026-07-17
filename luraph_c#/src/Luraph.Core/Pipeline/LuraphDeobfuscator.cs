@@ -75,15 +75,15 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
             })));
         await WriteStaticArtifactsAsync(store, envelope, legacy, cancellationToken).ConfigureAwait(false);
         log.Add("detect", envelope.FamilyDetected ? "done" : "blocked", envelope.FamilyDetected
-            ? $"found luraph {envelope.Banner.Version}"
+            ? envelope.LuaAuthLauncher.Present ? "found luaauth lph$ luraph" : $"found luraph {envelope.Banner.Version}"
             : "this isnt a supported luraph wrapper");
 
         if (!envelope.FamilyDetected || !envelope.VersionSupported)
         {
             diagnostics.Add(new("detect", envelope.FamilyDetected ? "unsupported_version" : "unsupported_family",
-                envelope.FamilyDetected ? "only Luraph v14.7 is supported" : "input does not match the Luraph envelope"));
+                envelope.FamilyDetected ? "only Luraph v14.7 and the LuaAuth LPH$ family are supported" : "input does not match the Luraph envelope"));
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Invalid, Coverage(envelope, legacy),
-                new(), diagnostics, tracePasses, new ArtifactManifest(), cancellationToken).ConfigureAwait(false);
+                new(), diagnostics, tracePasses, new ArtifactManifest(), cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         if (request.Mode is DeobfuscationMode.Inspect or DeobfuscationMode.Disassemble)
@@ -93,7 +93,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
                 : DeobfuscationStatus.Disassembled;
             log.Add(request.Mode == DeobfuscationMode.Inspect ? "inspect" : "disassemble", "done", "static files are done");
             return await FinishAsync(store, log, hash, status, Coverage(envelope, legacy), new(), diagnostics,
-                tracePasses, new ArtifactManifest(), cancellationToken).ConfigureAwait(false);
+                tracePasses, new ArtifactManifest(), cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         string? traceText = await ReadTraceAsync(request.TracePath, request.Limits.MaxTraceBytes, cancellationToken).ConfigureAwait(false);
@@ -111,7 +111,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
         {
             diagnostics.Add(new("trace", "invalid_trace_window", "trace window needs START > 0 and END >= START"));
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Invalid, Coverage(envelope, legacy), new(),
-                diagnostics, tracePasses, new ArtifactManifest(), cancellationToken).ConfigureAwait(false);
+                diagnostics, tracePasses, new ArtifactManifest(), cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
         if ((!HasStructureTrace(traceText) || targetedTrace) && request.Runtime.AutoTrace)
         {
@@ -135,7 +135,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
         {
             diagnostics.Add(new("trace", "trace_required", "a complete structure trace is required for reconstruction"));
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Blocked, Coverage(envelope, legacy), new(),
-                diagnostics, tracePasses, baseArtifacts, cancellationToken).ConfigureAwait(false);
+                diagnostics, tracePasses, baseArtifacts, cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         LuraphTraceDocument trace = traceParser.Parse(traceText, new TraceParseOptions { MaxBytes = request.Limits.MaxTraceBytes });
@@ -181,7 +181,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
             diagnostics.Add(new("lift", "semantic_lift_incomplete", traceLift.Reason ?? "reachable payload operations remain unresolved"));
             log.Add("lift", "blocked", "some payload ops are still unknown");
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Blocked, coverage, new(), diagnostics,
-                tracePasses, baseArtifacts, cancellationToken).ConfigureAwait(false);
+                tracePasses, baseArtifacts, cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         await store.WriteTextAsync("candidate.luau", candidateSource!, cancellationToken).ConfigureAwait(false);
@@ -204,7 +204,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
         {
             diagnostics.Add(new("verify", "runtime_unavailable", "candidate was not promoted because no runtime was supplied"));
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Blocked, coverage, new(), diagnostics,
-                tracePasses, baseArtifacts with { Candidate = "candidate.luau" }, cancellationToken).ConfigureAwait(false);
+                tracePasses, baseArtifacts with { Candidate = "candidate.luau" }, cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         log.Add("verify", "running", "compiling and running both versions");
@@ -221,7 +221,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
                 verified.Summary.Reason ?? "candidate verification failed"));
             log.Add("verify", "blocked", verified.Summary.Reason ?? "the rebuilt script didnt match");
             return await FinishAsync(store, log, hash, DeobfuscationStatus.Blocked, coverage, verified.Summary,
-                diagnostics, tracePasses, baseArtifacts with { Candidate = "candidate.luau" }, cancellationToken).ConfigureAwait(false);
+                diagnostics, tracePasses, baseArtifacts with { Candidate = "candidate.luau" }, cancellationToken, Adapter(envelope)).ConfigureAwait(false);
         }
 
         await store.WriteTextAsync("reconstructed.luau", candidateSource!, cancellationToken).ConfigureAwait(false);
@@ -231,7 +231,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
             {
                 Candidate = "candidate.luau",
                 Reconstructed = "reconstructed.luau",
-            }, cancellationToken).ConfigureAwait(false);
+            }, cancellationToken, Adapter(envelope)).ConfigureAwait(false);
     }
 
     private sealed record ProbePipelineResult(string? Trace, string? OpcodeHandlersJson);
@@ -618,11 +618,13 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
         IReadOnlyList<Diagnostic> diagnostics,
         IReadOnlyList<TracePassSummary> tracePasses,
         ArtifactManifest artifacts,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string adapter = "luraph-v14.7")
     {
         DeobfuscationResult result = new()
         {
             Status = status,
+            Adapter = adapter,
             ExactSource = false,
             InputSha256 = hash,
             Coverage = coverage,
@@ -635,4 +637,7 @@ public sealed class LuraphDeobfuscator : ILuraphDeobfuscator
         await store.WriteJsonAsync(artifacts.Report, result, cancellationToken).ConfigureAwait(false);
         return result;
     }
+
+    private static string Adapter(EnvelopeAnalysis envelope) =>
+        envelope.LuaAuthLauncher.Present ? "luraph-luaauth-lph-dollar" : "luraph-v14.7";
 }

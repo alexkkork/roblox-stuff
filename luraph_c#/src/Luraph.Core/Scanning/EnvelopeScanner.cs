@@ -184,6 +184,47 @@ public static class EnvelopeScanner
 
     private static bool IsIdentifierContinue(char ch) => ch == '_' || char.IsAsciiLetterOrDigit(ch);
 
+    private static void ShiftBodyRanges(EnvelopeAnalysis result, int offset)
+    {
+        if (offset == 0)
+            return;
+
+        SourceRange Shift(SourceRange range) => new(range.Begin + offset, range.End + offset);
+        SourceRange? ShiftOptional(SourceRange? range) => range.HasValue ? Shift(range.Value) : null;
+
+        result.Banner = result.Banner with { Range = ShiftOptional(result.Banner.Range) };
+        result.Wrapper = result.Wrapper with
+        {
+            TableRange = ShiftOptional(result.Wrapper.TableRange),
+            InvocationRange = ShiftOptional(result.Wrapper.InvocationRange),
+        };
+        for (var i = 0; i < result.Blobs.Count; i++)
+            result.Blobs[i] = result.Blobs[i] with { Range = Shift(result.Blobs[i].Range) };
+        for (var i = 0; i < result.Carriers.Count; i++)
+        {
+            CarrierExtraction carrier = result.Carriers[i];
+            result.Carriers[i] = carrier with
+            {
+                LiteralRange = Shift(carrier.LiteralRange),
+                ContentRange = Shift(carrier.ContentRange),
+                ErrorRange = ShiftOptional(carrier.ErrorRange),
+            };
+        }
+        for (var i = 0; i < result.Readers.Count; i++)
+        {
+            ReaderMetadata reader = result.Readers[i];
+            result.Readers[i] = reader with
+            {
+                NameRange = Shift(reader.NameRange),
+                DefinitionRange = ShiftOptional(reader.DefinitionRange),
+            };
+        }
+        for (var i = 0; i < result.Stages.Count; i++)
+            result.Stages[i] = result.Stages[i] with { Range = ShiftOptional(result.Stages[i].Range) };
+        for (var i = 0; i < result.Diagnostics.Count; i++)
+            result.Diagnostics[i] = result.Diagnostics[i] with { Range = ShiftOptional(result.Diagnostics[i].Range) };
+    }
+
     private static BannerInfo InspectBanner(string source)
     {
         var begin = source.Length > 0 && source[0] == '\ufeff' ? 1 : 0;
@@ -504,14 +545,16 @@ public static class EnvelopeScanner
     private static void DecodeCarriers(string source, IReadOnlyList<Token> tokens, EnvelopeAnalysis result, AnalysisLimits limits)
     {
         result.StaticDecode.CarrierCandidateCount = result.Counts.EncodedBlobCandidateCount;
-        result.StaticDecode.Eligible = result.Complete && result.Banner.ExactProductMarker && result.VersionSupported &&
+        var supportedEnvelope = result.Banner.ExactProductMarker && result.Banner.Version == "14.7" ||
+            result.LuaAuthLauncher.Present && result.VersionSupported;
+        result.StaticDecode.Eligible = result.Complete && supportedEnvelope &&
             result.Wrapper.Kind == WrapperKind.ReturnedTableMethodDispatch && result.Wrapper.ZeroArgumentMethodCall &&
             result.Wrapper.ForwardsVarargs && result.Wrapper.ConsumesEntireChunk;
         if (!result.StaticDecode.Eligible)
         {
             if (result.VersionSupported && result.Counts.EncodedBlobCandidateCount > 0)
                 AddDiagnostic(result, limits, DiagnosticSeverity.Info, "STATIC_DECODE_SKIPPED_UNPROVEN_WRAPPER",
-                    "Carrier literals were not decoded because the complete v14.7 wrapper dispatch shape was not proven.");
+                    "Carrier literals were not decoded because the complete supported wrapper dispatch shape was not proven.");
             return;
         }
 
@@ -576,7 +619,7 @@ public static class EnvelopeScanner
                 "Carrier tracking limit reached; additional candidates were counted but not decoded or retained.");
         if (result.StaticDecode.CarrierDecodedCount > 0)
             AddDiagnostic(result, limits, DiagnosticSeverity.Info, "CARRIER_LITERAL_DECODED",
-                "Decoded exact Luau string-literal bytes from the proven v14.7 wrapper envelope.");
+                "Decoded exact Luau string-literal bytes from the proven wrapper envelope.");
         if (result.StaticDecode.CarrierAttemptCount > 0)
             AddDiagnostic(result, limits, DiagnosticSeverity.Info, "VM_SEMANTICS_NOT_ATTEMPTED",
                 "Carrier/container bytes were inspected only; VM semantics and source recovery were not attempted.");
@@ -705,7 +748,7 @@ public static class EnvelopeScanner
         var marker = text.IndexOf("LPH", StringComparison.Ordinal);
         var hasMarker = marker >= 0 && marker + 3 < text.Length && text[marker + 3] is >= (char)33 and <= (char)126;
         return new(distinct, (double)printable / content.Length, (double)whitespace / content.Length,
-            hasMarker, text.Contains("LPH&", StringComparison.Ordinal));
+            hasMarker, text.Contains("LPH&", StringComparison.Ordinal), text.Contains("LPH$", StringComparison.Ordinal));
     }
 
     private static bool EncodedStringCandidate(int bytes, StringStats stats) =>
@@ -715,7 +758,9 @@ public static class EnvelopeScanner
         EncodedStringCandidate(bytes, stats) && (bytes >= MinEncodedBlobBytes || stats.HasLphMarker);
 
     private static BlobKind BlobKindFor(StringStats stats) =>
-        stats.HasLphAmpersandMarker ? BlobKind.LphAmpersand : stats.HasLphMarker ? BlobKind.LphMarker : BlobKind.OpaquePrintable;
+        stats.HasLphAmpersandMarker ? BlobKind.LphAmpersand :
+        stats.HasLphDollarMarker ? BlobKind.LphDollar :
+        stats.HasLphMarker ? BlobKind.LphMarker : BlobKind.OpaquePrintable;
 
     private static int? FindLphMarker(ReadOnlySpan<byte> bytes)
     {
@@ -755,7 +800,9 @@ public static class EnvelopeScanner
     private static void ScoreConfidence(EnvelopeAnalysis result)
     {
         AddEvidence(result, result.Banner.Present && result.Banner.ExactProductMarker, "LURAPH_BANNER", 0.42, "Leading comment names the Luraph Obfuscator product.");
-        AddEvidence(result, result.VersionSupported, "VERSION_14_7", 0.18, "Banner version is exactly 14.7.");
+        AddEvidence(result, result.Banner.Version == "14.7", "VERSION_14_7", 0.18, "Banner version is exactly 14.7.");
+        AddEvidence(result, result.LuaAuthLauncher.Present && result.VersionSupported, "LUAAUTH_LPH_DOLLAR", 0.60,
+            "An exact LuaAuth launcher protects a returned LPH$ wrapper body.");
         AddEvidence(result, result.Wrapper.Kind == WrapperKind.ReturnedTableMethodDispatch && result.Wrapper.ConsumesEntireChunk,
             "TABLE_METHOD_WRAPPER", 0.20, "Chunk is a returned table followed by method dispatch.");
         AddEvidence(result, result.Counts.EncodedBlobCandidateCount > 0, "OPAQUE_BLOB", 0.08, "Envelope contains an opaque encoded string blob.");
@@ -771,7 +818,8 @@ public static class EnvelopeScanner
             >= 0.25 => ConfidenceLevel.Low,
             _ => ConfidenceLevel.None,
         };
-        result.FamilyDetected = result.Banner.ExactProductMarker && result.Banner.Major.HasValue || result.Confidence.Score >= 0.70;
+        result.FamilyDetected = result.LuaAuthLauncher.Present && result.VersionSupported ||
+            result.Banner.ExactProductMarker && result.Banner.Major.HasValue || result.Confidence.Score >= 0.70;
     }
 
     private static void AddEvidence(EnvelopeAnalysis result, bool add, string code, double weight, string text)
@@ -863,5 +911,6 @@ public static class EnvelopeScanner
         double PrintableRatio,
         double WhitespaceRatio,
         bool HasLphMarker,
-        bool HasLphAmpersandMarker);
+        bool HasLphAmpersandMarker,
+        bool HasLphDollarMarker);
 }

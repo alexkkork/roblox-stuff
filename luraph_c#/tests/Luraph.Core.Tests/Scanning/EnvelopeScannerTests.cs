@@ -122,6 +122,44 @@ public sealed class EnvelopeScannerTests
     }
 
     [Fact]
+    public void DetectsLuaAuthWrappedLphDollarWithoutRetainingIdentityValues()
+    {
+        var body = Fixture("[=[LPH$!!!!!z!!!!!]=]")[(Fixture("[=[LPH$!!!!!z!!!!!]=]").IndexOf('\n') + 1)..];
+        var source = "la_code=123456789;la_script_id='fixture_id_123'\n" +
+            "--[[ LuaAuth protected loader. https://luaauth.com ]]\n\n" + body;
+
+        var result = EnvelopeScanner.Analyze(source);
+
+        Assert.True(result.Complete);
+        Assert.True(result.FamilyDetected);
+        Assert.True(result.VersionSupported);
+        Assert.True(result.LuaAuthLauncher.Present);
+        Assert.True(result.LuaAuthLauncher.ExactAssignmentShape);
+        Assert.True(result.LuaAuthLauncher.MetadataRemovedFromBody);
+        Assert.Equal(9, result.LuaAuthLauncher.CodeDigitCount);
+        Assert.Equal(14, result.LuaAuthLauncher.ScriptIdByteCount);
+        Assert.True(result.StaticDecode.Eligible);
+        Assert.True(result.StaticDecode.Complete);
+        Assert.Equal(BlobKind.LphDollar, Assert.Single(result.Carriers).Kind);
+        Assert.True(result.Carriers[0].LiteralRange.Begin >= result.LuaAuthLauncher.ProtectedBodyRange!.Value.Begin);
+        Assert.DoesNotContain("123456789", System.Text.Json.JsonSerializer.Serialize(result), StringComparison.Ordinal);
+        Assert.DoesNotContain("fixture_id_123", System.Text.Json.JsonSerializer.Serialize(result), StringComparison.Ordinal);
+        Assert.Contains(result.Diagnostics, item => item.Code == "LUAAUTH_LAUNCHER_REMOVED");
+    }
+
+    [Theory]
+    [InlineData("la_code=123;la_script_id='bad/id'\n--[[ LuaAuth protected loader. https://luaauth.com ]]\nreturn 1")]
+    [InlineData("la_code=123;la_script_id='safe'\n--[[ copied loader ]]\nreturn 'LPH$!!!!!'")]
+    [InlineData("la_code=123;la_script_id='safe'\n--[[ LuaAuth protected loader. https://luaauth.com ]]\nlocal x='LPH$!!!!!'")]
+    public void RejectsLuaAuthLauncherNearMisses(string source)
+    {
+        var result = EnvelopeScanner.Analyze(source);
+
+        Assert.False(result.LuaAuthLauncher.Present);
+        Assert.False(result.VersionSupported);
+    }
+
+    [Fact]
     public void ParsesContainerRecordsAndSpans()
     {
         var decoded = SyntheticContainer();
