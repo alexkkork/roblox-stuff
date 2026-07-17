@@ -10930,6 +10930,7 @@ json inferLuraphObservationalSiteOperation(
     bool varyingArity = false;
     std::set<size_t> arities;
     size_t argumentWrites = 0;
+    std::optional<std::map<int64_t, int64_t>> argumentBindings;
     for (const json& observation : observations)
     {
         const uint64_t activation = observation.value("activation", uint64_t(0));
@@ -10937,6 +10938,7 @@ json inferLuraphObservationalSiteOperation(
             arities.insert(activationRow->second.value("argument_count", size_t(0)));
         const json writes = observation.value("register_writes", json::array());
         const json origins = observation.value("write_origins", json::object());
+        std::map<int64_t, int64_t> observedBindings;
         if (!writes.is_array())
         {
             argumentCopy = false;
@@ -10952,18 +10954,40 @@ json inferLuraphObservationalSiteOperation(
                 argumentCopy = false;
                 break;
             }
+            const int64_t argument = (*origin)[0].value(
+                "index", std::numeric_limits<int64_t>::min());
+            if (argument <= 0 || !observedBindings.emplace(destination, argument).second)
+            {
+                argumentCopy = false;
+                break;
+            }
             ++argumentWrites;
         }
         if (!argumentCopy)
             break;
+        if (!argumentBindings)
+            argumentBindings = std::move(observedBindings);
+        else if (*argumentBindings != observedBindings)
+        {
+            argumentCopy = false;
+            break;
+        }
     }
     varyingArity = arities.size() > 1;
-    if (argumentCopy && argumentWrites > 0)
+    if (argumentCopy && argumentWrites > 0 && argumentBindings && !argumentBindings->empty())
     {
         json operation = evidence(varyingArity ? "varargs" : "arguments");
         operation["kind"] = varyingArity ? "capture_varargs" : "load_arguments";
         operation["observed_argument_arities"] = arities;
         operation["write_count"] = argumentWrites;
+        json bindings = json::array();
+        for (const auto& [destination, argument] : *argumentBindings)
+            bindings.push_back({
+                {"argument_index", argument},
+                {"destination_register", destination},
+                {"proof", "complete_write_origin_set"},
+            });
+        operation["argument_bindings"] = std::move(bindings);
         return operation;
     }
 
