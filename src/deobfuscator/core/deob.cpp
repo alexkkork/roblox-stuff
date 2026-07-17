@@ -11704,6 +11704,95 @@ std::optional<json> recognizeLuraphOpcode212ZeroArgumentCall(
     };
 }
 
+std::optional<json> recognizeLuraphOpcode38TwoArgumentDiscardCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>& observations,
+    const std::vector<json>& childActivations)
+{
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    constexpr std::string_view exactCall = "L[i](L[i+0X1],L[i+0X2]);";
+    constexpr std::string_view exactTop = "q=(i-0x0_1);";
+    const auto laneInteger = [](const json& lanes, std::string_view name) -> std::optional<int64_t> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        return luraphObservedInteger(lanes[std::string(name)]);
+    };
+    const std::optional<int64_t> base = laneInteger(effectiveLanes, "S");
+    if (!range.is_object() || range.value("begin", size_t(0)) != 340748 ||
+        range.value("end", size_t(0)) != 340791 || source.find(exactCall) == std::string::npos ||
+        source.find(exactTop) == std::string::npos || !base || *base < 1 ||
+        *base > std::numeric_limits<int64_t>::max() - 2 || childActivations.empty())
+        return std::nullopt;
+
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json lanes = observation.value("runtime_lanes", json::object());
+        if (observation.value("opcode", int64_t(-1)) != 38 || laneInteger(lanes, "S") != base ||
+            !guardPath.is_object() || !guardPath.value("complete", false) || guardPath.value("overflow", true) ||
+            observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                static_cast<int64_t>(pc + 1) || !writes.is_array() || !writes.empty())
+            return std::nullopt;
+    }
+
+    std::set<uint64_t> callees;
+    for (const json& child : childActivations)
+    {
+        if (!child.is_object() || child.value("argument_count", size_t(0)) != 2)
+            return std::nullopt;
+        const uint64_t callee = child.value("prototype", uint64_t(0));
+        if (callee == 0)
+            return std::nullopt;
+        callees.insert(callee);
+    }
+    if (callees.size() != 1)
+        return std::nullopt;
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    return json{
+        {"kind", "operation_sequence"},
+        {"semantic_family", "call"},
+        {"opcode", 38},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"path_specific", true},
+        {"static_semantic", false},
+        {"source_claim", false},
+        {"proof", "locked_opcode38_body_and_child_frame_runtime_validated"},
+        {"observation_count", observations.size()},
+        {"child_activation_count", childActivations.size()},
+        {"callee_prototype", *callees.begin()},
+        {"operations", json::array({
+            {
+                {"kind", "call"},
+                {"method", false},
+                {"function", registerRead(*base)},
+                {"arguments", json::array({registerRead(*base + 1), registerRead(*base + 2)})},
+            },
+            {{"kind", "set_top"}, {"value", constant(*base - 1)}},
+        })},
+        {"runtime_validation", {
+            {"validated_fields", json::array({
+                "handler_body", "callee_prototype", "argument_count", "discarded_results",
+            })},
+            {"argument_count", 2},
+            {"result_count", 0},
+            {"top_after", *base - 1},
+            {"caller_continuation_observed", !observations.empty()},
+        }},
+    };
+}
+
 std::optional<json> recognizeLuraphOpcode104OneArgumentCall(
     uint64_t prototype,
     size_t pc,
@@ -12976,6 +13065,34 @@ json luraphRuntimeSemanticDispatchArtifact(
                     row["opcode212_zero_argument_call_recognition"] = {
                         {"status", "evidence_mismatch"},
                         {"validated_observations", 0},
+                    };
+            }
+            if (!semanticAccepted && opcode == 38 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null() &&
+                childActivationsForSite != childActivationsBySite.end())
+            {
+                static const std::vector<json> noObservations;
+                const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
+                    ? observedSite->second : noObservations;
+                if (std::optional<json> recognized = recognizeLuraphOpcode38TwoArgumentDiscardCall(
+                        id, pc, handler->second, effectiveLanes, siteObservations,
+                        childActivationsForSite->second))
+                {
+                    row["observational_semantic_operation"] = std::move(*recognized);
+                    row["opcode38_two_argument_discard_call_recognition"] = {
+                        {"status", "runtime_validated"},
+                        {"validated_observations", siteObservations.size()},
+                        {"validated_child_activations", childActivationsForSite->second.size()},
+                    };
+                    ++observationalSemanticLifted;
+                    observationalOperationCounts["call"] =
+                        observationalOperationCounts.value("call", size_t(0)) + 1;
+                }
+                else
+                    row["opcode38_two_argument_discard_call_recognition"] = {
+                        {"status", "evidence_mismatch"},
+                        {"validated_observations", 0},
+                        {"validated_child_activations", 0},
                     };
             }
             if (!semanticAccepted && opcode == 146 && handler != handlers.end() &&
