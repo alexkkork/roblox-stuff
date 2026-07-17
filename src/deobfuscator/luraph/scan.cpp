@@ -2776,7 +2776,11 @@ std::optional<size_t> inspectLphContainer(
                 result.container_metrics.descriptor_count += analysis.descriptor_count;
                 result.container_metrics.trailer_bytes += analysis.trailer_bytes.size();
                 addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED",
-                    "Parsed the biased LPH$ count lanes, prototype records, instruction words, and one-based root selector; randomized constant and opcode meanings remain opaque.");
+                    "Recovered all-container LPH$ structure: " + std::to_string(analysis.constant_count) + " constants, " +
+                        std::to_string(analysis.prototype_count) + " prototypes, " + std::to_string(analysis.instruction_count) +
+                        " instructions, " + std::to_string(analysis.descriptor_count) + " descriptors, and " +
+                        std::to_string(analysis.trailer_bytes.size()) +
+                        " unread trailer bytes. These are serialized-container totals, not runtime-observed or runtime-reachable coverage; randomized constant and opcode meanings remain opaque.");
                 addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE",
                     "Delimited the complete constant-record region without assigning randomized tag values to Lua types.");
             }

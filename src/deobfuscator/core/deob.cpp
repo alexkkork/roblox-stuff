@@ -13837,6 +13837,41 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(nullptr)},
         };
     }
+    const bool staticContainerCountsAvailable = decodedContainer &&
+        (analysis.container_metrics.prototype_count > 0 || analysis.container_metrics.instruction_count > 0 ||
+            analysis.container_metrics.constant_count > 0 || analysis.container_metrics.descriptor_count > 0);
+    report["coverage"]["static_container"] = staticContainerCountsAvailable ? json({
+        {"available", true},
+        {"scope", "full-decoded-container-structural-scan"},
+        {"container_decoded", true},
+        {"schema_parsed", parsedContainer},
+        {"structural_counts_recovered", true},
+        {"prototypes", analysis.container_metrics.prototype_count},
+        {"instructions", analysis.container_metrics.instruction_count},
+        {"constants", analysis.container_metrics.constant_count},
+        {"descriptors", analysis.container_metrics.descriptor_count},
+        {"trailer_bytes", analysis.container_metrics.trailer_bytes},
+        {"semantic_lifted", false},
+        {"source_recovered", false},
+    }) : json({{"available", false}});
+    report["coverage"]["runtime_reachable"] = runtimeDecoded ? json({
+        {"available", true},
+        {"scope", "bounded-runtime-decoded-prototypes"},
+        {"complete", runtimeSchemaComplete},
+        {"prototypes", runtimeStructure->prototypes.size()},
+        {"instructions", {
+            {"declared", runtimeDeclaredInstructions},
+            {"observed", runtimeObservedInstructions},
+            {"observational_sites", runtimeObservationalSites},
+            {"unobserved", runtimeUnobservedInstructions},
+        }},
+        {"static_semantic_lifted", runtimeSemanticLifted},
+        {"static_semantic_unresolved", runtimeDeclaredInstructions - runtimeSemanticLifted},
+        {"observational_semantic_lifted", runtimeObservationalLifted},
+        {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+        {"observational_path_specific", true},
+        {"source_recovered", false},
+    }) : json({{"available", false}});
     report["coverage"]["payload_closure"] = payloadClosureMetrics ? json({
         {"available", true},
         {"activations", payloadClosureMetrics->activations},

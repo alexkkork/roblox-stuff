@@ -29,6 +29,14 @@ bool hasDiagnostic(const luraph::EnvelopeAnalysis& analysis, std::string_view co
     return false;
 }
 
+bool diagnosticContains(const luraph::EnvelopeAnalysis& analysis, std::string_view code, std::string_view text)
+{
+    for (const luraph::Diagnostic& diagnostic : analysis.diagnostics)
+        if (diagnostic.code == code && diagnostic.message.find(text) != std::string::npos)
+            return true;
+    return false;
+}
+
 bool sameSpan(const luraph::ByteSpan& left, const luraph::ByteSpan& right)
 {
     return left.begin == right.begin && left.end == right.end;
@@ -635,6 +643,9 @@ int main()
     ok &= require(hasDiagnostic(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED") &&
                       hasDiagnostic(structuralDollar, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE"),
         "LPH$ structural boundary diagnostics are missing");
+    ok &= require(diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "all-container") &&
+                      diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "not runtime-observed or runtime-reachable"),
+        "LPH$ static totals were not distinguished from runtime reachability in diagnostics");
 
     const luraph::EnvelopeAnalysis container = luraph::analyzeEnvelope(wrapperFixture(longCarrierLiteral(containerFixture.carrier)));
     ok &= require(container.static_decode.complete, "valid LPH& container decoding should complete");
