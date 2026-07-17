@@ -3769,6 +3769,29 @@ private:
                 ? static_cast<uint64_t>(descriptor["target_prototype"].get<int64_t>())
                 : uint64_t(0);
         const int64_t destination = descriptor.value("destination_register", int64_t(-1));
+        const bool deferredStaticTarget = targetPrototype == 0 && destination >= 0 &&
+            descriptor.contains("static_target_wrapper_index") &&
+            descriptor["static_target_wrapper_index"].is_number_unsigned() &&
+            descriptor.contains("captures") && descriptor["captures"].is_array();
+        if (deferredStaticTarget)
+        {
+            const std::string prefix = indentation(depth);
+            const uint64_t staticTarget = descriptor["static_target_wrapper_index"].get<uint64_t>();
+            ++result.unresolved_closure_descriptors;
+            ++result.unsupported_operations;
+            if (context.path_specific)
+                ++result.unsupported_path_specific_operations;
+            append(prefix + "-- Static closure target " + std::to_string(staticTarget) +
+                " was proven, but its body was not activated in the captured run.\n");
+            append(prefix + "registers[" + std::to_string(destination) + "] = function(...)\n");
+            append(prefix + "  return unsupported_semantic_operation(" +
+                std::to_string(context.prototype) + ", " + std::to_string(context.pc) +
+                ", \"closure\", \"static target prototype " + std::to_string(staticTarget) +
+                " has not been decoded\")\n");
+            append(prefix + "end\n");
+            ++result.closure_constructors;
+            return true;
+        }
         if (!descriptor.value("complete", false) || targetPrototype == 0 || destination < 0 ||
             !instructions.contains(targetPrototype) || !descriptor.contains("captures") || !descriptor["captures"].is_array())
         {

@@ -10058,16 +10058,31 @@ json luraphPrototypeCorrespondenceArtifact(
 
         json staticPrototypes = json::array();
         for (const luraph::vm::StaticPrototypeShape& prototype : staticIndex.prototypes)
+        {
+            json captures = json::array();
+            for (size_t captureIndex = 0; captureIndex < prototype.fingerprint.captures.size(); ++captureIndex)
+            {
+                const luraph::vm::CaptureDescriptorShape& capture =
+                    prototype.fingerprint.captures[captureIndex];
+                captures.push_back({
+                    {"capture_index", captureIndex},
+                    {"capture_kind", capture.kind_code},
+                    {"slot", capture.source_index},
+                });
+            }
             staticPrototypes.push_back({
                 {"metadata_index", prototype.metadata_index},
                 {"wrapper_index", prototype.wrapper_index},
                 {"instruction_count", prototype.fingerprint.instruction_count},
                 {"opcode_lane_fingerprint", luraphFingerprintHex(prototype.fingerprint.opcode_lane_digest)},
+                {"captures", std::move(captures)},
+                {"captures_complete", prototype.fingerprint.captures_complete},
                 {"parent_metadata_index", prototype.parent_metadata_index
                     ? json(*prototype.parent_metadata_index) : json(nullptr)},
                 {"parent_closure_pc", prototype.parent_closure_pc
                     ? json(*prototype.parent_closure_pc) : json(nullptr)},
             });
+        }
 
         json matches = json::array();
         for (const luraph::vm::PrototypeCorrespondence& match : result.records)
@@ -10196,6 +10211,104 @@ json luraphPrototypeCorrespondenceArtifact(
         }},
         {"containers", std::move(containerReports)},
     };
+}
+
+json applyLuraphStaticClosureCorrespondence(
+    LuraphRuntimeStructureTrace& trace,
+    const json& correspondence)
+{
+    json metrics = {
+        {"available", false},
+        {"runtime_targets_resolved", 0},
+        {"static_only_targets_resolved", 0},
+        {"unresolved_sites", trace.closure_descriptors.size()},
+    };
+    if (!correspondence.value("complete", false) ||
+        !correspondence.contains("selected_container_index") ||
+        !correspondence["selected_container_index"].is_number_unsigned() ||
+        !correspondence.contains("containers") || !correspondence["containers"].is_array())
+        return metrics;
+    const uint64_t selected = correspondence["selected_container_index"].get<uint64_t>();
+    const json* container = nullptr;
+    for (const json& candidate : correspondence["containers"])
+        if (candidate.value("container_index", std::numeric_limits<uint64_t>::max()) == selected)
+        {
+            container = &candidate;
+            break;
+        }
+    if (!container || !container->contains("matches") || !(*container)["matches"].is_array() ||
+        !container->contains("static_prototypes") || !(*container)["static_prototypes"].is_array())
+        return metrics;
+
+    std::map<uint64_t, size_t> staticParentByRuntime;
+    std::map<size_t, uint64_t> runtimeByStaticWrapper;
+    for (const json& match : (*container)["matches"])
+    {
+        if (!match.is_object() || match.value("status", "") != "matched" ||
+            !match.contains("runtime_id") || !match["runtime_id"].is_number_unsigned() ||
+            !match.contains("static_metadata_index") || !match["static_metadata_index"].is_number_unsigned() ||
+            !match.contains("static_wrapper_index") || !match["static_wrapper_index"].is_number_unsigned())
+            continue;
+        const uint64_t runtime = match["runtime_id"].get<uint64_t>();
+        staticParentByRuntime[runtime] = match["static_metadata_index"].get<size_t>();
+        runtimeByStaticWrapper[match["static_wrapper_index"].get<size_t>()] = runtime;
+    }
+
+    std::map<std::pair<size_t, size_t>, std::vector<const json*>> targetsByParentSite;
+    for (const json& prototype : (*container)["static_prototypes"])
+    {
+        if (!prototype.is_object() || !prototype.contains("parent_metadata_index") ||
+            !prototype["parent_metadata_index"].is_number_unsigned() ||
+            !prototype.contains("parent_closure_pc") || !prototype["parent_closure_pc"].is_number_unsigned())
+            continue;
+        targetsByParentSite[{
+            prototype["parent_metadata_index"].get<size_t>(),
+            prototype["parent_closure_pc"].get<size_t>(),
+        }].push_back(&prototype);
+    }
+
+    size_t runtimeResolved = 0;
+    size_t staticOnlyResolved = 0;
+    for (auto& [site, descriptor] : trace.closure_descriptors)
+    {
+        const auto parent = staticParentByRuntime.find(site.first);
+        if (parent == staticParentByRuntime.end())
+            continue;
+        const auto targets = targetsByParentSite.find({parent->second, site.second});
+        if (targets == targetsByParentSite.end() || targets->second.size() != 1)
+            continue;
+        const json& target = *targets->second.front();
+        if (!target.contains("metadata_index") || !target["metadata_index"].is_number_unsigned() ||
+            !target.contains("wrapper_index") || !target["wrapper_index"].is_number_unsigned() ||
+            !target.value("captures_complete", false) || !target.contains("captures") ||
+            !target["captures"].is_array())
+            continue;
+        const size_t wrapper = target["wrapper_index"].get<size_t>();
+        descriptor["static_target_metadata_index"] = target["metadata_index"];
+        descriptor["static_target_wrapper_index"] = wrapper;
+        descriptor["static_target_instruction_count"] = target.value("instruction_count", size_t(0));
+        descriptor["captures"] = target["captures"];
+        descriptor["capture_evidence"] = "verified_static_prototype_descriptor";
+        descriptor["target_evidence"] = "verified_static_parent_pc_correspondence";
+        const auto runtimeTarget = runtimeByStaticWrapper.find(wrapper);
+        if (runtimeTarget == runtimeByStaticWrapper.end())
+        {
+            descriptor["target_prototype"] = nullptr;
+            descriptor["complete"] = false;
+            ++staticOnlyResolved;
+            continue;
+        }
+        descriptor["target_prototype"] = runtimeTarget->second;
+        descriptor["complete"] = descriptor.contains("destination_register") &&
+            descriptor["destination_register"].is_number_integer() &&
+            descriptor["destination_register"].get<int64_t>() >= 0;
+        ++runtimeResolved;
+    }
+    metrics["available"] = true;
+    metrics["runtime_targets_resolved"] = runtimeResolved;
+    metrics["static_only_targets_resolved"] = staticOnlyResolved;
+    metrics["unresolved_sites"] = trace.closure_descriptors.size() - runtimeResolved - staticOnlyResolved;
+    return metrics;
 }
 
 json materializeLuraphSemanticOperation(const json& value, const json& lanes)
@@ -11165,6 +11278,83 @@ json inferLuraphObservationalSiteOperation(
                 {"index", {{"kind", "operand"}, {"lane", proven.source_lane}}}};
     }
     return operation;
+}
+
+std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& effectiveLanes,
+    const std::vector<json>& observations,
+    const std::vector<json>& childActivations)
+{
+    const auto lane = effectiveLanes.find("S");
+    const std::optional<int64_t> base = lane == effectiveLanes.end()
+        ? std::nullopt : luraphObservedInteger(*lane);
+    if (!base || *base < 0 || *base > std::numeric_limits<int64_t>::max() - 2 ||
+        observations.empty() || childActivations.size() != observations.size())
+        return std::nullopt;
+    for (const json& observation : observations)
+    {
+        const json& writes = observation.value("register_writes", json::array());
+        if (observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                static_cast<int64_t>(pc + 1) ||
+            !writes.is_array() || writes.size() != 1 || !writes.front().is_object() ||
+            writes.front().value("register", std::numeric_limits<int64_t>::min()) != *base)
+            return std::nullopt;
+    }
+    std::set<uint64_t> callees;
+    for (const json& child : childActivations)
+    {
+        if (!child.is_object() || child.value("argument_count", size_t(0)) != 2)
+            return std::nullopt;
+        const uint64_t callee = child.value("prototype", uint64_t(0));
+        if (callee == 0)
+            return std::nullopt;
+        callees.insert(callee);
+    }
+    if (callees.size() != 1)
+        return std::nullopt;
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    return json{
+        {"kind", "operation_sequence"},
+        {"semantic_family", "call"},
+        {"opcode", 161},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"path_specific", true},
+        {"static_semantic", false},
+        {"source_claim", false},
+        {"proof", "handler_shape_and_child_call_frame_runtime_validated"},
+        {"observation_count", observations.size()},
+        {"callee_prototype", *callees.begin()},
+        {"operations", json::array({
+            {
+                {"kind", "register_write"},
+                {"register", constant(*base)},
+                {"value", {
+                    {"kind", "call"},
+                    {"method", false},
+                    {"function", registerRead(*base)},
+                    {"arguments", json::array({registerRead(*base + 1), registerRead(*base + 2)})},
+                }},
+            },
+            {{"kind", "set_top"}, {"value", constant(*base)}},
+        })},
+        {"runtime_validation", {
+            {"validated_fields", json::array({
+                "callee_prototype", "argument_count", "destination_register", "next_pc",
+            })},
+            {"argument_count", 2},
+            {"destination_register", *base},
+            {"top_after", *base},
+        }},
+    };
 }
 
 json luraphOpcode8RangeArtifact(
@@ -15433,6 +15623,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     }
 
     std::optional<json> prototypeCorrespondenceDocument;
+    json runtimeClosureCorrespondence = {{"available", false}};
     const bool staticPrototypeGraphAvailable = std::any_of(
         analysis.containers.begin(), analysis.containers.end(), [](const luraph::ContainerAnalysis& container) {
             return container.parse_status == luraph::ContainerParseStatus::Parsed ||
@@ -15442,6 +15633,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     {
         prototypeCorrespondenceDocument = luraphPrototypeCorrespondenceArtifact(analysis, *runtimeStructure);
         writeJson(prototypeCorrespondencePath, *prototypeCorrespondenceDocument);
+        runtimeClosureCorrespondence = applyLuraphStaticClosureCorrespondence(
+            *runtimeStructure, *prototypeCorrespondenceDocument);
+        writeJson(runtimePrototypesPath,
+            luraphRuntimeStructureArtifact(*runtimeStructure, sha256(protectedSource)));
         const json* singleContainer = prototypeCorrespondenceDocument->contains("containers") &&
                 (*prototypeCorrespondenceDocument)["containers"].is_array() &&
                 (*prototypeCorrespondenceDocument)["containers"].size() == 1
@@ -15459,6 +15654,16 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"ambiguity_preserved", singleContainer
                 ? (*singleContainer)["ambiguity_preserved"] : json(nullptr)},
             {"artifact", prototypeCorrespondencePath.filename().string()},
+        });
+        report["passes"].push_back({
+            {"stage", "closure_correspondence"},
+            {"ok", runtimeClosureCorrespondence.value("available", false)},
+            {"scope", "verified-static-parent-pc-and-runtime-prototype-correspondence"},
+            {"runtime_targets_resolved", runtimeClosureCorrespondence.value(
+                "runtime_targets_resolved", size_t(0))},
+            {"static_only_targets_resolved", runtimeClosureCorrespondence.value(
+                "static_only_targets_resolved", size_t(0))},
+            {"unresolved_sites", runtimeClosureCorrespondence.value("unresolved_sites", size_t(0))},
         });
         if (!prototypeCorrespondenceDocument->value("complete", false))
             report["diagnostics"].push_back({
