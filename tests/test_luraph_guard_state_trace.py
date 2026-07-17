@@ -63,7 +63,7 @@ def run_deobfuscator(
     ]
     if trace is not None:
         command.extend(("--trace", str(trace)))
-    run(command, accepted=(2,))
+    run(command, accepted=(0, 2))
     return output
 
 

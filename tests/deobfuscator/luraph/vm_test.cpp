@@ -334,6 +334,7 @@ int main()
 
     luraph::ContainerAnalysis unproved = exactShape;
     unproved.prototype_graph_complete = false;
+    unproved.root_selector_graph_validated = false;
     const vm::StaticPrototypeIndex unprovedIndex = vm::buildStaticPrototypeIndex(unproved);
     ok &= require(!unprovedIndex.valid && unprovedIndex.prototypes.empty(),
         "unproved static graph was accepted for runtime correspondence");

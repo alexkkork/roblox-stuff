@@ -7300,15 +7300,6 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
     const std::string opcodeTableName(shape->opcode_table->name.value);
     const std::string registersName(registerRole->first->name.value);
     const bool fullTraceEnabled = fullTraceStart > 0 && fullTraceEnd >= fullTraceStart;
-    const auto appendGuardStateCapture = [&](std::string& target) {
-        if (guardNames.empty())
-            return;
-        target += "if __alex_lph_step_enabled then ";
-        for (const std::string& guard : guardNames)
-            target += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
-                quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
-        target += "end;";
-    };
     std::string instrumentation =
         "_G.__vmc=(_G.__vmc or 0)+1;_G.__curAid=__aid;_G.__curPc=" + pcName + ";_G.__curOp=" + opcodeName + ";";
     if (structureDump)
@@ -7353,7 +7344,6 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
             instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
-            appendGuardStateCapture(instrumentation);
             if (!dynamicGuardConditions.empty())
                 instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
             for (const std::string& lane : laneNames)
@@ -7380,7 +7370,6 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
         instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
-        appendGuardStateCapture(instrumentation);
         if (!dynamicGuardConditions.empty())
             instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
         for (const std::string& lane : laneNames)
@@ -7451,7 +7440,14 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         postInstrumentation += "for __alex_lph_key,__alex_lph_value in __alex_lph_pre_regs do if not __alex_lph_seen_keys[__alex_lph_key] and rawget(" + registersName + ",__alex_lph_key)==nil then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=z:\";end;end;end;";
         postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);";
         if (!guardNames.empty())
+        {
+            instrumentation += "if __alex_lph_step_enabled then ";
+            for (const std::string& guard : guardNames)
+                instrumentation += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
+                    quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
+            instrumentation += "end;";
             postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,table.concat(__alex_lph_pre_guards,\"|\"));";
+        }
         if (!dynamicGuardConditions.empty())
             postInstrumentation += "print(\"@@LPH_GUARD_PATH_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,#__alex_lph_guard_path,__alex_lph_guard_overflow and 1 or 0,table.concat(__alex_lph_guard_path,\"|\"));";
         postInstrumentation += "print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
@@ -10655,6 +10651,10 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t runtimeOpcodeOverrides = 0;
     size_t runtimeOperandOverrides = 0;
     size_t observationalSemanticLifted = 0;
+    size_t staticSemanticCoverage = 0;
+    size_t runtimeValidatedObservationalSemanticCoverage = 0;
+    size_t traceEvidenceOnlyCoverage = 0;
+    size_t unresolvedSemanticCoverage = 0;
     size_t guardedCandidatesValidated = 0;
     size_t guardedCandidatesRejected = 0;
     size_t guardReplaySitesAttached = 0;
@@ -10929,6 +10929,27 @@ json luraphRuntimeSemanticDispatchArtifact(
                 ++traceSpecialized;
                 ++traceEffectClassified;
             }
+            if (semanticAccepted)
+            {
+                row["semantic_coverage_class"] = "static_semantic";
+                ++staticSemanticCoverage;
+            }
+            else if (row["observational_semantic_operation"].is_object() ||
+                row.value("guard_replay_validated_effect", json(nullptr)).is_object())
+            {
+                row["semantic_coverage_class"] = "runtime_validated_observational_semantic";
+                ++runtimeValidatedObservationalSemanticCoverage;
+            }
+            else if (row["trace_specialized_operation"].is_object())
+            {
+                row["semantic_coverage_class"] = "trace_evidence_only";
+                ++traceEvidenceOnlyCoverage;
+            }
+            else
+            {
+                row["semantic_coverage_class"] = "unresolved";
+                ++unresolvedSemanticCoverage;
+            }
             if (classified)
                 ++effectClassified;
             else
@@ -10971,6 +10992,13 @@ json luraphRuntimeSemanticDispatchArtifact(
             returned["prototype"] = nullptr;
         returnRows.push_back(std::move(returned));
     }
+    const size_t materializedInstructionCount = effectClassified + unresolved;
+    if (declaredInstructionCount > materializedInstructionCount)
+        unresolvedSemanticCoverage += declaredInstructionCount - materializedInstructionCount;
+    const size_t semanticCoverageTotal = std::max(declaredInstructionCount, materializedInstructionCount);
+    const size_t semanticCoveragePartitionSum = staticSemanticCoverage +
+        runtimeValidatedObservationalSemanticCoverage + traceEvidenceOnlyCoverage +
+        unresolvedSemanticCoverage;
     return {
         {"version", 1},
         {"kind", "luraph-runtime-semantic-dispatch-ir"},
@@ -11004,6 +11032,23 @@ json luraphRuntimeSemanticDispatchArtifact(
             ? effectClassified + unresolved - observationalSites.size() : size_t(0)},
         {"observational_operation_counts", std::move(observationalOperationCounts)},
         {"observational_path_specific", true},
+        {"semantic_coverage_partition", {
+            {"available", semanticCoverageTotal > 0},
+            {"scope", "runtime-decoded-instruction-sites"},
+            {"total", semanticCoverageTotal},
+            {"declared_total", declaredInstructionCount},
+            {"materialized_total", materializedInstructionCount},
+            {"static_semantic", staticSemanticCoverage},
+            {"runtime_validated_observational_semantic", runtimeValidatedObservationalSemanticCoverage},
+            {"trace_evidence_only", traceEvidenceOnlyCoverage},
+            {"unresolved", unresolvedSemanticCoverage},
+            {"partition_sum", semanticCoveragePartitionSum},
+            {"partition_complete", semanticCoveragePartitionSum == semanticCoverageTotal},
+            {"semantic_coverage_complete", semanticCoveragePartitionSum == semanticCoverageTotal &&
+                traceEvidenceOnlyCoverage == 0 && unresolvedSemanticCoverage == 0},
+            {"runtime_validated_observational_semantic_is_path_specific", true},
+            {"trace_evidence_only_is_semantic", false},
+        }},
         {"write_origin_evidence", {
             {"available", writeOriginRows > 0},
             {"step_rows", trace.steps.size()},
@@ -13941,7 +13986,12 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     }
 
     std::optional<json> prototypeCorrespondenceDocument;
-    if (runtimeDecoded && parsedContainer)
+    const bool staticPrototypeGraphAvailable = std::any_of(
+        analysis.containers.begin(), analysis.containers.end(), [](const luraph::ContainerAnalysis& container) {
+            return container.parse_status == luraph::ContainerParseStatus::Parsed ||
+                container.parse_status == luraph::ContainerParseStatus::StructuralMetadataRecovered;
+        });
+    if (runtimeDecoded && staticPrototypeGraphAvailable)
     {
         prototypeCorrespondenceDocument = luraphPrototypeCorrespondenceArtifact(analysis, *runtimeStructure);
         writeJson(prototypeCorrespondencePath, *prototypeCorrespondenceDocument);
@@ -15463,6 +15513,46 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(nullptr)},
         };
     }
+    if (runtimeSemanticDocument)
+        report["coverage"]["semantic_coverage_partition"] =
+            runtimeSemanticDocument->value("semantic_coverage_partition", json::object());
+    else if (parsedContainer)
+    {
+        const size_t total = analysis.container_metrics.instruction_count;
+        report["coverage"]["semantic_coverage_partition"] = {
+            {"available", total > 0},
+            {"scope", "static-decoded-container-instruction-sites"},
+            {"total", total},
+            {"declared_total", total},
+            {"materialized_total", retainedInstructions},
+            {"static_semantic", 0},
+            {"runtime_validated_observational_semantic", 0},
+            {"trace_evidence_only", 0},
+            {"unresolved", total},
+            {"partition_sum", total},
+            {"partition_complete", true},
+            {"semantic_coverage_complete", false},
+            {"runtime_validated_observational_semantic_is_path_specific", true},
+            {"trace_evidence_only_is_semantic", false},
+        };
+    }
+    else
+        report["coverage"]["semantic_coverage_partition"] = {
+            {"available", false},
+            {"scope", "instruction-universe-unavailable"},
+            {"total", nullptr},
+            {"declared_total", nullptr},
+            {"materialized_total", 0},
+            {"static_semantic", 0},
+            {"runtime_validated_observational_semantic", 0},
+            {"trace_evidence_only", 0},
+            {"unresolved", nullptr},
+            {"partition_sum", nullptr},
+            {"partition_complete", false},
+            {"semantic_coverage_complete", false},
+            {"runtime_validated_observational_semantic_is_path_specific", true},
+            {"trace_evidence_only_is_semantic", false},
+        };
     const bool staticContainerCountsAvailable = decodedContainer &&
         (analysis.container_metrics.prototype_count > 0 || analysis.container_metrics.instruction_count > 0 ||
             analysis.container_metrics.constant_count > 0 || analysis.container_metrics.descriptor_count > 0);

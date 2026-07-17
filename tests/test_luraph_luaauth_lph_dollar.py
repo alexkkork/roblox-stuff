@@ -95,6 +95,99 @@ def build_partial_trace(spec: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def append_uleb(output: bytearray, value: int) -> None:
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            byte |= 0x80
+        output.append(byte)
+        if not value:
+            return
+
+
+def append_little(output: bytearray, value: int, width: int) -> None:
+    output.extend(value.to_bytes(width, byteorder="little"))
+
+
+def signed_fold(value: int) -> int:
+    return (1 << 53) + value if value < 0 else value
+
+
+def radix85_dollar_carrier(decoded: bytes) -> str:
+    require(len(decoded) % 4 == 0, "structural carrier must contain complete radix-85 groups")
+    encoded = []
+    for offset in range(0, len(decoded), 4):
+        value = int.from_bytes(decoded[offset : offset + 4], byteorder="little")
+        digits = ["!"] * 5
+        for index in range(4, -1, -1):
+            digits[index] = chr(value % 85 + 33)
+            value //= 85
+        encoded.extend(digits)
+    return "LPH$" + "".join(encoded)
+
+
+def build_ambiguous_structural_subject() -> str:
+    decoded = bytearray()
+    append_uleb(decoded, 101 + 2)
+    decoded.extend((0x5A, 0x21, 0xA1, 0x42, 0xB2))
+    append_uleb(decoded, 203 + 2)
+
+    append_uleb(decoded, 1)
+    append_uleb(decoded, 4)
+    append_uleb(decoded, 7)
+    append_uleb(decoded, 8)
+    for value in (1, 1, 10, 20):
+        append_little(decoded, value, 4)
+    append_uleb(decoded, 307 + 1)
+    for word in (5, 1, -2, 3):
+        append_uleb(decoded, signed_fold(word))
+
+    append_uleb(decoded, 0)
+    append_uleb(decoded, 9)
+    append_uleb(decoded, 10)
+    append_little(decoded, 0, 4)
+    append_uleb(decoded, 307 + 1)
+    for word in (112, -8, 9, 10):
+        append_uleb(decoded, signed_fold(word))
+
+    append_uleb(decoded, 2)
+    decoded.extend((0xDE, 0xAD, 0xBE))
+    while len(decoded) % 4:
+        decoded.append(0xEF)
+    carrier = radix85_dollar_carrier(decoded)
+    return (
+        "la_code=271828182;la_script_id='structural_schema_fixture'\n"
+        "--[[ LuaAuth protected loader. https://luaauth.com ]]\n\n"
+        "return({P=function(self)local state={} local runtime=buffer local words={1,2,3,4,5,6,7,8,9} "
+        "state[7]=buffer.readu8 state[8]=buffer.readi16 state[11]=buffer.readu16 "
+        "state[12]=buffer.readi32 state[13]=buffer.readu32 state[14]=buffer.readf32 "
+        "state[15]=buffer.readf64 state[49]=buffer.readstring "
+        "state[42]=function()return 0 end "
+        "state[50]=function()local byte,total,factor=0,0,1 repeat byte=state[42]() "
+        "total+=(byte>127 and byte-128 or byte)*factor factor*=128 until byte<=127 return total end "
+        "local function constants()local count=state[50]()-101 if state[42]()~=0 then return end "
+        "for index=1,count do local tag=state[42]() if tag<=12 then elseif tag<=34 then elseif tag<=56 then "
+        "elseif tag<=78 then elseif tag<=90 then elseif tag<=123 then elseif tag<=210 then end end end "
+        "local function prototypes()local count=state[50]()-203 local instructionCount=state[50]()-307 "
+        "return count+instructionCount end local prototypeTable={} local root=prototypeTable[state[50]()] "
+        f"constants() prototypes() return function(...)return root,... end end,payload=[========[{carrier}]========]"
+        "}):P()(...);"
+    )
+
+
+def build_ambiguous_correspondence_trace() -> str:
+    return "\n".join(
+        (
+            "@@LPH_PROTO_V1@@\t11\t1\tD,G,p",
+            "@@LPH_PROTO_OBJECT_V1@@\t11\t1011",
+            "@@LPH_PROTO_V1@@\t12\t1\tD,G,p",
+            "@@LPH_PROTO_OBJECT_V1@@\t12\t1012",
+            "",
+        )
+    )
+
+
 def run_deobfuscator(
     deobfuscator: pathlib.Path,
     subject: pathlib.Path,
@@ -252,6 +345,68 @@ def assert_strict_partial_reporting(spec: dict, report: dict) -> None:
     require(not gaps, "strict partial-coverage reporting gaps:\n- " + "\n- ".join(gaps))
 
 
+def assert_ambiguous_prototype_correspondence(report: dict, output: pathlib.Path) -> None:
+    envelope = read_json(output / "luraph_envelope_analysis.json")
+    containers = envelope.get("containers") or []
+    require(len(containers) == 1, "structural LPH$ fixture did not retain exactly one container")
+    require(
+        containers[0].get("parse_status") == "structural_metadata_recovered",
+        "prototype correspondence fixture did not reach StructuralMetadataRecovered",
+    )
+
+    artifacts = report.get("artifacts") or {}
+    require(
+        artifacts.get("prototype_correspondence") == "prototype_correspondence.json",
+        "structural metadata was not accepted for prototype correspondence",
+    )
+    correspondence = read_json(output / "prototype_correspondence.json")
+    require(correspondence.get("status") == "partial", "ambiguous correspondence was not partial")
+    require(correspondence.get("complete") is False, "ambiguous correspondence was falsely complete")
+    require(
+        correspondence.get("selected_container_index") is None,
+        "an incomplete correspondence selected a static container",
+    )
+    require(
+        correspondence.get("complete_container_match_count") == 0,
+        "incomplete runtime evidence produced a complete container match",
+    )
+
+    container_reports = correspondence.get("containers") or []
+    require(len(container_reports) == 1, "structural correspondence report omitted its container")
+    container = container_reports[0]
+    require(container.get("container_index") == 0, "structural correspondence index drifted")
+    require(container.get("static_evidence_valid") is True, "structural static evidence was rejected")
+    require(container.get("runtime_evidence_valid") is True, "bounded runtime evidence was rejected")
+    require(container.get("complete") is False, "ambiguous container was falsely complete")
+    require(container.get("matched") == 0, "incomplete evidence produced a prototype mapping")
+    require(container.get("ambiguous") == 2, "ambiguous prototype count was not preserved")
+    require(container.get("unmatched") == 0, "compatible ambiguous prototypes were marked unmatched")
+    require(container.get("ambiguity_preserved") is True, "ambiguity preservation was not reported")
+
+    matches = container.get("matches") or []
+    require(len(matches) == 2, "runtime prototype correspondence rows are missing")
+    for match in matches:
+        runtime_id = match.get("runtime_id")
+        require(match.get("status") == "ambiguous", f"runtime prototype {runtime_id} was guessed")
+        require(
+            match.get("static_metadata_index") is None and match.get("static_wrapper_index") is None,
+            f"runtime prototype {runtime_id} exposed an unproven mapping",
+        )
+        require(match.get("proof") == [], f"runtime prototype {runtime_id} exposed a mapping proof")
+        require(
+            [candidate.get("metadata_index") for candidate in match.get("candidates") or []] == [0, 1],
+            f"runtime prototype {runtime_id} did not retain both static candidates",
+        )
+
+    correspondence_pass = next(
+        (item for item in report.get("passes") or [] if item.get("stage") == "prototype_correspondence"),
+        {},
+    )
+    require(correspondence_pass.get("ok") is False, "partial correspondence pass was marked successful")
+    require(correspondence_pass.get("ambiguity_preserved") is True, "report pass hid ambiguity")
+    require(correspondence_pass.get("selected_container_index") is None, "report pass claimed a mapping")
+
+
 def assert_partial_trace(
     spec: dict,
     static_report: dict,
@@ -403,9 +558,30 @@ def main() -> int:
             strict_reporting=args.require_complete_reporting,
         )
 
+        correspondence_subject = root / "ambiguous_structural_subject.luau"
+        correspondence_trace = root / "ambiguous_correspondence_trace.log"
+        correspondence_subject.write_text(build_ambiguous_structural_subject(), encoding="utf-8")
+        correspondence_trace.write_text(build_ambiguous_correspondence_trace(), encoding="utf-8")
+        correspondence_output = root / "prototype-correspondence"
+        correspondence_completed, correspondence_report = run_deobfuscator(
+            args.deobfuscator.resolve(),
+            correspondence_subject,
+            correspondence_output,
+            root / "prototype-correspondence-report.json",
+            correspondence_trace,
+        )
+        require(
+            correspondence_completed.returncode == 2,
+            f"prototype correspondence boundary returned {correspondence_completed.returncode}",
+        )
+        assert_source_withheld(
+            correspondence_report, correspondence_output, "ambiguous prototype correspondence"
+        )
+        assert_ambiguous_prototype_correspondence(correspondence_report, correspondence_output)
+
     print(
         "LuaAuth LPH$ regression OK: exact carrier framing decoded; "
-        "268/25,215 runtime evidence retained as partial, path-specific IR with source withheld"
+        "268/25,215 runtime evidence retained as partial, and ambiguous prototype correspondence withheld"
     )
     return 0
 

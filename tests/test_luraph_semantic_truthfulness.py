@@ -152,6 +152,61 @@ def build_guarded_trace(opcode: int, lanes: list[str]) -> str:
     ))
 
 
+def build_semantic_partition_trace(
+    static_opcode: int,
+    observational_opcode: int,
+    lanes: list[str],
+) -> str:
+    encoded_lanes = "|".join(f"{lane}=n:0" for lane in lanes)
+    instructions = (
+        (1, static_opcode),
+        (2, observational_opcode),
+        (3, observational_opcode),
+        (4, observational_opcode),
+    )
+    return "\n".join((
+        f"@@LPH_PROTO_V1@@\t1\t4\t{','.join(lanes)}",
+        "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
+        "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t0",
+        *(f"@@LPH_INSN_V1@@\t1\t{pc}\t{opcode}\t{encoded_lanes}" for pc, opcode in instructions),
+        f"@@LPH_STEP_V1@@\t1\t1\t2\t{observational_opcode}\t3\t0\t\t{encoded_lanes}",
+        f"@@LPH_RETURN_V1@@\t2\t1\t2\t{observational_opcode}\t0\t0\t",
+        f"@@LPH_STEP_V1@@\t3\t1\t3\t{observational_opcode}\t4\t0\t\t{encoded_lanes}",
+        "",
+    ))
+
+
+def semantic_coverage_partition(report: dict) -> dict:
+    partition = (report.get("coverage") or {}).get("semantic_coverage_partition")
+    require(isinstance(partition, dict), "semantic coverage partition is missing")
+    require(partition.get("available") is True, f"semantic coverage partition is unavailable: {partition}")
+    categories = (
+        "static_semantic",
+        "runtime_validated_observational_semantic",
+        "trace_evidence_only",
+        "unresolved",
+    )
+    counts = {category: partition.get(category) for category in categories}
+    require(
+        all(isinstance(value, int) and value >= 0 for value in counts.values()),
+        f"semantic coverage categories are not non-negative integer counts: {counts}",
+    )
+    require(
+        sum(counts.values()) == partition.get("total") == partition.get("partition_sum"),
+        f"semantic coverage categories are not a disjoint total: {partition}",
+    )
+    require(partition.get("partition_complete") is True, "semantic coverage partition is marked incomplete")
+    require(
+        partition.get("runtime_validated_observational_semantic_is_path_specific") is True,
+        "runtime-validated observational semantics lost their path-specific qualification",
+    )
+    require(
+        partition.get("trace_evidence_only_is_semantic") is False,
+        "trace-only evidence was mislabeled as semantic coverage",
+    )
+    return partition
+
+
 def audit_guarded_runtime_candidate(deobfuscator: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="luraph-guarded-runtime-truth-") as temporary:
         root = pathlib.Path(temporary)
@@ -204,6 +259,72 @@ def audit_guarded_runtime_candidate(deobfuscator: pathlib.Path) -> None:
         )
         require(semantic_pass.get("semantic_lifted_instructions") == 0,
                 "report counted guarded runtime evidence as static semantics")
+
+        partition = semantic_coverage_partition(report)
+        require(
+            partition.get("static_semantic") == 0
+            and partition.get("runtime_validated_observational_semantic") == 1
+            and partition.get("trace_evidence_only") == 0
+            and partition.get("unresolved") == 0,
+            f"guarded runtime evidence was assigned to the wrong semantic class: {partition}",
+        )
+
+        exact = next(
+            (
+                row for row in handlers
+                if row.get("selection_status") == "exact"
+                and isinstance(row.get("semantic_operation"), dict)
+            ),
+            None,
+        )
+        require(exact is not None, "locked fixture has no exact static semantic handler")
+        partition_trace = root / "semantic-partition-trace.log"
+        partition_trace.write_text(
+            build_semantic_partition_trace(int(exact["opcode"]), int(candidate["opcode"]), lanes),
+            encoding="utf-8",
+        )
+        completed, output, report = run_deobfuscator(
+            deobfuscator, root / "partitioned", trace=partition_trace
+        )
+        require(completed.returncode == 2, f"partition trace crossed the recovery boundary: {completed.returncode}")
+        partition = semantic_coverage_partition(report)
+        expected = {
+            "static_semantic": 1,
+            "runtime_validated_observational_semantic": 1,
+            "trace_evidence_only": 1,
+            "unresolved": 1,
+        }
+        require(
+            {name: partition.get(name) for name in expected} == expected,
+            f"semantic coverage partition double-counted or omitted a site: {partition}",
+        )
+        require(
+            partition.get("total") == partition.get("declared_total") == partition.get("materialized_total") == 4,
+            f"semantic coverage total does not match its independent instruction universe: {partition}",
+        )
+
+        semantic = read_json(output / "runtime_semantic_ir.json")
+        require(
+            semantic.get("semantic_coverage_partition") == partition,
+            "runtime semantic IR and report expose different semantic partitions",
+        )
+        instructions = [
+            instruction
+            for prototype in semantic.get("prototypes") or []
+            for instruction in prototype.get("instructions") or []
+        ]
+        classes = Counter(row.get("semantic_coverage_class") for row in instructions)
+        require(classes == Counter(expected), f"instruction classes disagree with report totals: {classes}")
+        overlapping = next(row for row in instructions if row.get("pc") == 2)
+        require(
+            isinstance(overlapping.get("observational_semantic_operation"), dict)
+            and isinstance(overlapping.get("trace_specialized_operation"), dict),
+            "partition fixture no longer carries overlapping observational and trace telemetry",
+        )
+        require(
+            overlapping.get("semantic_coverage_class") == "runtime_validated_observational_semantic",
+            "overlapping telemetry was counted in more than its strongest semantic class",
+        )
 
 
 def audit_incomplete_payload_root(deobfuscator: pathlib.Path) -> None:
