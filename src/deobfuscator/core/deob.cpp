@@ -1,4 +1,5 @@
 #include "core/deob.hpp"
+#include "luraph/call_semantics.hpp"
 #include "luraph/scan.hpp"
 #include "luraph/emit.hpp"
 #include "luraph/vm.hpp"
@@ -5158,6 +5159,219 @@ struct LuraphSemanticRoles
     std::map<Luau::AstLocal*, std::string> semantic_locals;
 };
 
+struct LuraphLocalReferenceSet : Luau::AstVisitor
+{
+    std::set<Luau::AstLocal*> locals;
+
+    bool visit(Luau::AstExprLocal* node) override
+    {
+        if (node->local)
+            locals.insert(node->local);
+        return true;
+    }
+
+    bool visit(Luau::AstExprFunction*) override
+    {
+        return false;
+    }
+};
+
+struct LuraphOpcode8OperandAliasCollector : Luau::AstVisitor
+{
+    explicit LuraphOpcode8OperandAliasCollector(const LuraphSemanticRoles& roles)
+        : roles(roles)
+    {
+    }
+
+    const LuraphSemanticRoles& roles;
+    std::map<Luau::AstLocal*, std::string> aliases;
+
+    bool visit(Luau::AstStatAssign* node) override
+    {
+        if (node->vars.size != 1 || node->values.size != 1)
+            return true;
+        auto target = unwrapLuraphExpression(node->vars.data[0])->as<Luau::AstExprLocal>();
+        auto source = unwrapLuraphExpression(node->values.data[0])->as<Luau::AstExprIndexExpr>();
+        auto table = source ? unwrapLuraphExpression(source->expr)->as<Luau::AstExprLocal>() : nullptr;
+        auto index = source ? unwrapLuraphExpression(source->index)->as<Luau::AstExprLocal>() : nullptr;
+        if (!target || !table || !index || index->local != roles.pc)
+            return true;
+        const auto lane = roles.lanes.find(table->local);
+        if (lane != roles.lanes.end())
+            aliases[target->local] = lane->second;
+        return true;
+    }
+
+    bool visit(Luau::AstExprFunction*) override
+    {
+        return false;
+    }
+};
+
+struct LuraphOpcode8ShapeCollector : Luau::AstVisitor
+{
+    LuraphOpcode8ShapeCollector(
+        const LuraphSemanticRoles& roles,
+        const std::map<Luau::AstLocal*, std::string>& aliases)
+        : roles(roles)
+        , aliases(aliases)
+    {
+    }
+
+    const LuraphSemanticRoles& roles;
+    const std::map<Luau::AstLocal*, std::string>& aliases;
+    std::set<Luau::AstLocal*> register_call_bases;
+    std::set<Luau::AstLocal*> register_loop_bases;
+    std::set<Luau::AstLocal*> top_dependencies;
+    std::map<Luau::AstLocal*, std::set<int64_t>> compared_constants;
+    size_t register_calls = 0;
+    size_t register_result_loops = 0;
+
+    bool visit(Luau::AstExprCall* node) override
+    {
+        auto function = unwrapLuraphExpression(node->func)->as<Luau::AstExprIndexExpr>();
+        auto index = function ? unwrapLuraphExpression(function->index)->as<Luau::AstExprLocal>() : nullptr;
+        if (function && index && luraphIndexedBase(function) == roles.registers && aliases.contains(index->local))
+        {
+            register_call_bases.insert(index->local);
+            ++register_calls;
+        }
+        return true;
+    }
+
+    bool visit(Luau::AstStatFor* node) override
+    {
+        auto from = unwrapLuraphExpression(node->from)->as<Luau::AstExprLocal>();
+        if (from && aliases.contains(from->local))
+        {
+            LuraphHandlerEffects effects(roles.registers, roles.pc, {});
+            node->body->visit(&effects);
+            if (effects.register_writes > 0)
+            {
+                register_loop_bases.insert(from->local);
+                ++register_result_loops;
+            }
+        }
+        return true;
+    }
+
+    bool visit(Luau::AstStatAssign* node) override
+    {
+        if (node->vars.size == 1 && node->values.size == 1)
+        {
+            auto target = unwrapLuraphExpression(node->vars.data[0])->as<Luau::AstExprLocal>();
+            if (target && target->local == roles.top)
+            {
+                LuraphLocalReferenceSet references;
+                node->values.data[0]->visit(&references);
+                top_dependencies.insert(references.locals.begin(), references.locals.end());
+            }
+        }
+        return true;
+    }
+
+    bool visit(Luau::AstExprBinary* node) override
+    {
+        if (node->op != Luau::AstExprBinary::CompareEq && node->op != Luau::AstExprBinary::CompareNe)
+            return true;
+        auto left = unwrapLuraphExpression(node->left)->as<Luau::AstExprLocal>();
+        auto right = unwrapLuraphExpression(node->right)->as<Luau::AstExprLocal>();
+        const std::optional<double> leftNumber = evaluateAstNumber(node->left);
+        const std::optional<double> rightNumber = evaluateAstNumber(node->right);
+        const auto retain = [&](Luau::AstExprLocal* local, const std::optional<double>& number) {
+            if (!local || !number || !std::isfinite(*number) || std::floor(*number) != *number ||
+                (*number != 0.0 && *number != 1.0) || !aliases.contains(local->local))
+                return;
+            compared_constants[local->local].insert(static_cast<int64_t>(*number));
+        };
+        retain(left, rightNumber);
+        retain(right, leftNumber);
+        return true;
+    }
+
+    bool visit(Luau::AstExprFunction*) override
+    {
+        return false;
+    }
+};
+
+json recognizeLuraphOpcode8PackedCallShape(
+    Luau::AstStatBlock* handler,
+    const LuraphSemanticRoles& roles,
+    bool staticGuardPathComplete)
+{
+    json result = {
+        {"verified", false},
+        {"static_guard_path_complete", staticGuardPathComplete},
+        {"proof", "structural_ast"},
+    };
+    if (!handler || !roles.registers || !roles.pc || !roles.top)
+    {
+        result["diagnostic"] = "required VM roles are unavailable";
+        return result;
+    }
+
+    LuraphOpcode8OperandAliasCollector aliasCollector(roles);
+    handler->visit(&aliasCollector);
+    LuraphOpcode8ShapeCollector shape(roles, aliasCollector.aliases);
+    handler->visit(&shape);
+
+    std::set<Luau::AstLocal*> baseCandidates;
+    std::set_intersection(
+        shape.register_call_bases.begin(), shape.register_call_bases.end(),
+        shape.register_loop_bases.begin(), shape.register_loop_bases.end(),
+        std::inserter(baseCandidates, baseCandidates.begin()));
+    if (baseCandidates.size() != 1 || shape.register_calls < 2 || shape.register_result_loops == 0)
+    {
+        result["diagnostic"] = "callee/result-base alias is not uniquely proven";
+        return result;
+    }
+    Luau::AstLocal* base = *baseCandidates.begin();
+
+    std::set<Luau::AstLocal*> countCandidates;
+    for (const auto& [local, constants] : shape.compared_constants)
+        if (constants.contains(0) && constants.contains(1) && local != base)
+            countCandidates.insert(local);
+
+    std::set<Luau::AstLocal*> argumentCandidates;
+    for (Luau::AstLocal* local : countCandidates)
+        if (shape.top_dependencies.contains(local))
+            argumentCandidates.insert(local);
+    if (argumentCandidates.size() != 1)
+    {
+        result["diagnostic"] = "argument-count alias is not uniquely proven";
+        return result;
+    }
+    Luau::AstLocal* argumentCount = *argumentCandidates.begin();
+    countCandidates.erase(argumentCount);
+    if (countCandidates.size() != 1)
+    {
+        result["diagnostic"] = "result-count alias is not uniquely proven";
+        return result;
+    }
+    Luau::AstLocal* resultCount = *countCandidates.begin();
+
+    const auto baseLane = aliasCollector.aliases.find(base);
+    const auto argumentLane = aliasCollector.aliases.find(argumentCount);
+    const auto resultLane = aliasCollector.aliases.find(resultCount);
+    if (baseLane == aliasCollector.aliases.end() || argumentLane == aliasCollector.aliases.end() ||
+        resultLane == aliasCollector.aliases.end() || baseLane->second == argumentLane->second ||
+        baseLane->second == resultLane->second || argumentLane->second == resultLane->second)
+    {
+        result["diagnostic"] = "operand lanes are incomplete or aliased";
+        return result;
+    }
+
+    result["verified"] = true;
+    result["base_register_lane"] = baseLane->second;
+    result["encoded_argument_count_lane"] = argumentLane->second;
+    result["encoded_result_count_lane"] = resultLane->second;
+    result["register_call_count"] = shape.register_calls;
+    result["register_result_loop_count"] = shape.register_result_loops;
+    result["diagnostic"] = "packed register-call handler shape verified from the Luau AST";
+    return result;
+}
+
 std::optional<json> normalizeLuraphSemanticExpression(
     Luau::AstExpr* expression,
     const LuraphSemanticRoles& roles,
@@ -7233,6 +7447,9 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
                 operation["static_semantic"] = false;
                 row["candidate_semantic_operation"] = std::move(operation);
             }
+            if (opcode == 8)
+                row["opcode8_call_shape"] = recognizeLuraphOpcode8PackedCallShape(
+                    leaf, semanticRoles, resolved && path.complete && !path.ambiguous && !opcodeLocalReused);
         }
         if (leaf)
         {

@@ -386,6 +386,12 @@ struct LoadArgumentsShape
     std::vector<ArgumentBinding> bindings;
 };
 
+struct RegisterClearRangeShape
+{
+    int64_t first_register = 0;
+    int64_t last_register = 0;
+};
+
 class Emitter
 {
 public:
@@ -3175,6 +3181,80 @@ private:
         return shape;
     }
 
+    static std::optional<int64_t> provenRegisterIndex(
+        const json& value, std::string_view field)
+    {
+        const auto found = value.find(std::string(field));
+        if (found == value.end())
+            return std::nullopt;
+        if (const std::optional<int64_t> direct = primitiveIntegerValue(*found))
+            return direct;
+        return integerValue(*found);
+    }
+
+    static std::optional<RegisterClearRangeShape> registerClearRangeShape(
+        const json& value, std::string& reason)
+    {
+        const std::optional<int64_t> first = provenRegisterIndex(value, "first_register");
+        const std::optional<int64_t> last = provenRegisterIndex(value, "last_register");
+        if (!first || !last || *first < 0 || *last < 0)
+        {
+            reason = "register_clear_range bounds are not proven nonnegative integral register indices";
+            return std::nullopt;
+        }
+
+        const auto stepValue = value.find("step");
+        const std::optional<int64_t> step = stepValue == value.end()
+            ? std::nullopt
+            : (primitiveIntegerValue(*stepValue).has_value()
+                    ? primitiveIntegerValue(*stepValue)
+                    : integerValue(*stepValue));
+        if (!step || *step != 1)
+        {
+            reason = "register_clear_range requires a proven unit positive step";
+            return std::nullopt;
+        }
+        if (!value.contains("inclusive_last_register") ||
+            !value["inclusive_last_register"].is_boolean() ||
+            !value["inclusive_last_register"].get<bool>())
+        {
+            reason = "register_clear_range requires a proven inclusive upper bound";
+            return std::nullopt;
+        }
+        if (!value.contains("writes_nil") || !value["writes_nil"].is_boolean() ||
+            !value["writes_nil"].get<bool>())
+        {
+            reason = "register_clear_range requires a proven nil write";
+            return std::nullopt;
+        }
+        if (!value.contains("empty") || !value["empty"].is_boolean() ||
+            value["empty"].get<bool>() != (*first > *last))
+        {
+            reason = "register_clear_range empty-range evidence contradicts its bounds";
+            return std::nullopt;
+        }
+        if (value.value("assignment_count_overflow", false))
+        {
+            reason = "register_clear_range assignment count overflowed";
+            return std::nullopt;
+        }
+
+        const uint64_t expectedAssignments = *first > *last
+            ? 0
+            : static_cast<uint64_t>(*last) - static_cast<uint64_t>(*first) + 1;
+        if (value.contains("assignment_count") && !value["assignment_count"].is_null())
+        {
+            const std::optional<uint64_t> assignments = nonnegativeInteger(value["assignment_count"]);
+            if (!assignments || *assignments != expectedAssignments)
+            {
+                reason = "register_clear_range assignment count contradicts its inclusive bounds";
+                return std::nullopt;
+            }
+        }
+
+        return RegisterClearRangeShape{*first, *last};
+    }
+
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
     {
         ++result.operations;
@@ -3342,6 +3422,21 @@ private:
             append(prefix + "  if clear_range then\n");
             append(prefix + "    for register_index = clear_range.from, clear_range.to do registers[register_index] = nil end\n");
             append(prefix + "  end\n");
+            append(prefix + "end\n");
+            return;
+        }
+        if (kind == "register_clear_range")
+        {
+            std::string reason;
+            const std::optional<RegisterClearRangeShape> shape = registerClearRangeShape(value, reason);
+            if (!shape)
+            {
+                unsupportedOperation(kind, reason, depth, context);
+                return;
+            }
+            append(prefix + "for register_index = " + std::to_string(shape->first_register) + ", " +
+                std::to_string(shape->last_register) + ", 1 do\n");
+            append(prefix + "  registers[register_index] = nil\n");
             append(prefix + "end\n");
             return;
         }

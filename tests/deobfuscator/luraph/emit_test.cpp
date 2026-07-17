@@ -1501,6 +1501,119 @@ bool testArgumentLoadSeparatesVariadicAndIncompleteShapes()
             "incomplete variadic capture guessed default state destinations");
 }
 
+bool testProvenRegisterClearRangeEmitsInclusiveLuau()
+{
+    const json operation = {
+        {"kind", "register_clear_range"},
+        {"semantic_family", "register_clear"},
+        {"first_register_lane", "r"},
+        {"last_register_lane", "S"},
+        {"first_register", 4},
+        {"last_register", 7},
+        {"step", 1},
+        {"inclusive_last_register", true},
+        {"writes_nil", true},
+        {"empty", false},
+        {"assignment_count", 4},
+        {"observation_count", 468},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, operation),
+    }), 0);
+
+    bool mappedProvenance = false;
+    for (const json& row : candidate.mapping)
+        if (row.value("prototype", 0) == 2 && row.value("pc_start", 0) == 1)
+        {
+            const json records = row.value("path_specific_operation_provenance", json::array());
+            mappedProvenance = !row.value("source_claim", true) && records.size() == 1 &&
+                !records[0].value("source_claim", true) &&
+                records[0]["operation"].value("first_register_lane", "") == "r" &&
+                records[0]["operation"].value("last_register_lane", "") == "S" &&
+                records[0]["operation"].value("assignment_count", 0) == 4;
+        }
+
+    return require(candidate.source.find("for register_index = 4, 7, 1 do\n") != std::string::npos &&
+                candidate.source.find("  registers[register_index] = nil\n") != std::string::npos,
+               "proven inclusive register clear did not emit a readable Luau numeric loop") &&
+        require(candidate.path_specific_operations == 1 &&
+                candidate.unsupported_path_specific_operations == 0 && candidate.unsupported_operations == 0,
+            "proven register clear was not emitted as a supported path-specific operation") &&
+        require(candidate.path_specific_operation_provenance.size() == 1 && mappedProvenance,
+            "register clear lane, range, or source-claim provenance was not retained");
+}
+
+bool testDescendingRegisterClearRangeRemainsNoOp()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "register_clear_range"},
+            {"first_register_lane", "r"},
+            {"last_register_lane", "S"},
+            {"first_register", 9},
+            {"last_register", 4},
+            {"step", 1},
+            {"inclusive_last_register", true},
+            {"writes_nil", true},
+            {"empty", true},
+            {"assignment_count", 0},
+        }),
+    }), 0);
+
+    return require(candidate.source.find("for register_index = 9, 4, 1 do\n") != std::string::npos,
+               "descending register clear was rewritten instead of preserving its positive-step no-op") &&
+        require(candidate.unsupported_operations == 0 && candidate.fully_rendered(),
+            "proven descending no-op was marked unsupported");
+}
+
+bool testUnprovenRegisterClearRangeFailsClosed()
+{
+    const auto emitRange = [](json operation) {
+        return emitWithTarget(json::array({pathSpecificInstruction(1, std::move(operation))}), 0);
+    };
+    const json base = {
+        {"kind", "register_clear_range"},
+        {"first_register", 3},
+        {"last_register", 5},
+        {"step", 1},
+        {"inclusive_last_register", true},
+        {"writes_nil", true},
+        {"empty", false},
+        {"assignment_count", 3},
+    };
+
+    json dynamic = base;
+    dynamic["first_register"] = {
+        {"kind", "register_read"},
+        {"index", {"kind", "constant"}},
+    };
+    json exclusive = base;
+    exclusive["inclusive_last_register"] = false;
+    json wrongCount = base;
+    wrongCount["assignment_count"] = 2;
+
+    const SemanticCandidate dynamicCandidate = emitRange(std::move(dynamic));
+    const SemanticCandidate exclusiveCandidate = emitRange(std::move(exclusive));
+    const SemanticCandidate countCandidate = emitRange(std::move(wrongCount));
+
+    return require(dynamicCandidate.source.find(
+                       "register_clear_range bounds are not proven nonnegative integral register indices") !=
+                       std::string::npos && dynamicCandidate.unsupported_path_specific_operations == 1,
+               "dynamic register-clear bound was guessed instead of rejected") &&
+        require(exclusiveCandidate.source.find(
+                    "register_clear_range requires a proven inclusive upper bound") != std::string::npos &&
+                exclusiveCandidate.unsupported_path_specific_operations == 1,
+            "exclusive register-clear range was emitted as an inclusive loop") &&
+        require(countCandidate.source.find(
+                    "register_clear_range assignment count contradicts its inclusive bounds") !=
+                    std::string::npos && countCandidate.unsupported_path_specific_operations == 1,
+            "contradictory register-clear cardinality was accepted") &&
+        require(dynamicCandidate.path_specific_operation_provenance.size() == 1 &&
+                !dynamicCandidate.path_specific_operation_provenance[0].value("source_claim", true) &&
+                !dynamicCandidate.fully_rendered(),
+            "rejected register-clear evidence lost provenance or claimed complete rendering");
+}
+
 bool testPathSpecificClosureAndJumpUseRecoveredMetadata()
 {
     json childDescriptor = descriptor(3, 7, 1);
@@ -1816,6 +1929,9 @@ int main()
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
     ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
+    ok &= testProvenRegisterClearRangeEmitsInclusiveLuau();
+    ok &= testDescendingRegisterClearRangeRemainsNoOp();
+    ok &= testUnprovenRegisterClearRangeFailsClosed();
     ok &= testPathSpecificClosureAndJumpUseRecoveredMetadata();
     ok &= testConditionlessPathSpecificBranchUsesOrderedReplay();
     ok &= testIncompletePathSpecificCallStopsExplicitly();
