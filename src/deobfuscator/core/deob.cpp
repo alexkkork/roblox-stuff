@@ -11718,6 +11718,223 @@ std::optional<json> recognizeLuraphOpcode104OneArgumentCall(
     };
 }
 
+std::optional<json> luraphHelperTable32Expression(int64_t index)
+{
+    static const std::map<int64_t, std::pair<std::string, std::string>> paths = {
+        {5, {"string", "byte"}},
+        {6, {"bit32", "countrz"}},
+        {7, {"string", "packsize"}},
+        {8, {"math", "ceil"}},
+        {9, {"math", "pi"}},
+        {10, {"string", "unpack"}},
+        {11, {"string", "len"}},
+        {12, {"bit32", "countlz"}},
+        {13, {"bit32", "band"}},
+        {14, {"bit32", "bnot"}},
+        {15, {"bit32", "rrotate"}},
+        {16, {"bit32", "bor"}},
+        {17, {"math", "modf"}},
+        {18, {"bit32", "bxor"}},
+        {19, {"bit32", "lrotate"}},
+        {20, {"bit32", "rshift"}},
+        {21, {"bit32", "lshift"}},
+        {22, {"math", "floor"}},
+    };
+    const auto path = paths.find(index);
+    if (path == paths.end())
+        return std::nullopt;
+    return json{
+        {"kind", "index_read"},
+        {"table", {{"kind", "global"}, {"name", path->second.first}}},
+        {"index", {{"kind", "constant"}, {"value", path->second.second}}},
+        {"effect_barrier", false},
+        {"may_invoke_index_metamethod", false},
+        {"may_raise", true},
+        {"evaluated_once", true},
+        {"constant_foldable", false},
+        {"common_subexpression_eliminable", true},
+        {"dead_code_eliminable", true},
+        {"reorderable", true},
+    };
+}
+
+std::optional<json> recognizeLuraphOpcode146HelperLookup(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>& observations)
+{
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    const auto laneInteger = [](const json& lanes, std::string_view name) -> std::optional<int64_t> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        return luraphObservedInteger(lanes[std::string(name)]);
+    };
+    const std::optional<int64_t> destination = laneInteger(effectiveLanes, "S");
+    const std::optional<int64_t> helperIndex = laneInteger(effectiveLanes, "r");
+    const std::optional<json> value = helperIndex
+        ? luraphHelperTable32Expression(*helperIndex) : std::nullopt;
+    if (!range.is_object() || range.value("begin", size_t(0)) != 327498 ||
+        range.value("end", size_t(0)) != 327524 ||
+        source.find("(L)[S[_]]=O[0X2__0][r[_]];") == std::string::npos ||
+        !destination || *destination < 0 || !helperIndex || !value || observations.empty())
+        return std::nullopt;
+
+    const auto expectedPath = [&]() -> std::optional<std::pair<std::string, std::string>> {
+        const json& table = (*value)["table"];
+        const json& key = (*value)["index"];
+        if (!table.is_object() || !key.is_object() || !table.contains("name") ||
+            !table["name"].is_string() || !key.contains("value") || !key["value"].is_string())
+            return std::nullopt;
+        return std::pair{table["name"].get<std::string>(), key["value"].get<std::string>()};
+    }();
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json lanes = observation.value("runtime_lanes", json::object());
+        if (observation.value("opcode", int64_t(-1)) != 146 ||
+            laneInteger(lanes, "S") != destination || laneInteger(lanes, "r") != helperIndex ||
+            !guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) ||
+            observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                observation.value("pc", std::numeric_limits<int64_t>::min()) + 1 ||
+            !writes.is_array() || writes.size() != 1 || !writes.front().is_object() ||
+            writes.front().value("register", std::numeric_limits<int64_t>::min()) != *destination ||
+            !writes.front().contains("value") || !writes.front()["value"].is_object())
+            return std::nullopt;
+        const json& observedValue = writes.front()["value"];
+        if (*helperIndex == 9)
+        {
+            std::optional<double> number;
+            if (observedValue.value("type", "") == "number" &&
+                observedValue.contains("value") && observedValue["value"].is_string())
+            {
+                try
+                {
+                    size_t consumed = 0;
+                    const std::string encoded = observedValue["value"].get<std::string>();
+                    const double parsed = std::stod(encoded, &consumed);
+                    if (consumed == encoded.size())
+                        number = parsed;
+                }
+                catch (const std::exception&)
+                {
+                }
+            }
+            if (!number || std::abs(*number - 3.14159265358979323846) > 1e-15)
+                return std::nullopt;
+        }
+        else if (!expectedPath || observedValue.value("type", "") != "function" ||
+            observedValue.value("name", "") != expectedPath->second)
+            return std::nullopt;
+    }
+
+    return json{
+        {"kind", "register_write"},
+        {"semantic_family", "helper_lookup"},
+        {"static_semantic", false},
+        {"path_specific", true},
+        {"source_claim", false},
+        {"proof", "locked_helper_table32_lookup_and_runtime_value_validated"},
+        {"observation_count", observations.size()},
+        {"register", {{"kind", "constant"}, {"value", *destination}}},
+        {"value", *value},
+        {"helper_index", *helperIndex},
+    };
+}
+
+std::optional<json> recognizeLuraphOpcode201Add(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>& observations)
+{
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    const auto laneNumber = [](const json& lanes, std::string_view name) -> std::optional<double> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        const json& value = lanes[std::string(name)];
+        if (!value.is_object() || value.value("type", "") != "number" ||
+            !value.contains("value") || !value["value"].is_string())
+            return std::nullopt;
+        try
+        {
+            size_t consumed = 0;
+            const std::string encoded = value["value"].get<std::string>();
+            const double parsed = std::stod(encoded, &consumed);
+            return consumed == encoded.size() ? std::optional<double>(parsed) : std::nullopt;
+        }
+        catch (const std::exception&)
+        {
+            return std::nullopt;
+        }
+    };
+    const auto laneInteger = [](const json& lanes, std::string_view name) -> std::optional<int64_t> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        return luraphObservedInteger(lanes[std::string(name)]);
+    };
+    const auto immediateLane = [](const json& lanes, std::string_view name) {
+        return json{
+            {"kind", "immediate"},
+            {"lane", name},
+            {"value", lanes.is_object() && lanes.contains(std::string(name))
+                ? lanes[std::string(name)] : json(nullptr)},
+        };
+    };
+    const std::optional<int64_t> destination = laneInteger(effectiveLanes, "S");
+    const std::optional<double> left = laneNumber(effectiveLanes, "g");
+    const std::optional<double> right = laneNumber(effectiveLanes, "V");
+    if (!range.is_object() || range.value("begin", size_t(0)) != 307936 ||
+        range.value("end", size_t(0)) != 323136 ||
+        source.find("else(L)[S[_]]=(g[_]+V[_]);end;") == std::string::npos ||
+        !destination || *destination < 0 || !left || !right || observations.empty())
+        return std::nullopt;
+
+    for (const json& observation : observations)
+    {
+        const json lanes = observation.value("runtime_lanes", json::object());
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const std::optional<int64_t> observedDestination = laneInteger(lanes, "S");
+        const std::optional<double> observedLeft = laneNumber(lanes, "g");
+        const std::optional<double> observedRight = laneNumber(lanes, "V");
+        if (observation.value("opcode", int64_t(-1)) != 201 ||
+            observedDestination != destination || observedLeft != left || observedRight != right ||
+            !guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) ||
+            observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                observation.value("pc", std::numeric_limits<int64_t>::min()) + 1 ||
+            !writes.is_array() || writes.size() != 1 || !writes.front().is_object() ||
+            writes.front().value("register", std::numeric_limits<int64_t>::min()) != *destination ||
+            !writes.front().contains("value") || !writes.front()["value"].is_object())
+            return std::nullopt;
+        const json& written = writes.front()["value"];
+        const json writtenLanes = {{"written", written}};
+        const std::optional<double> observedResult = laneNumber(writtenLanes, "written");
+        if (!observedResult || *observedResult != *left + *right)
+            return std::nullopt;
+    }
+
+    return json{
+        {"kind", "register_write"},
+        {"semantic_family", "arithmetic"},
+        {"static_semantic", false},
+        {"path_specific", true},
+        {"source_claim", false},
+        {"proof", "locked_opcode201_add_branch_and_runtime_result_validated"},
+        {"observation_count", observations.size()},
+        {"register", {{"kind", "constant"}, {"value", *destination}}},
+        {"value", {
+            {"kind", "binary"},
+            {"operator", "+"},
+            {"left", immediateLane(effectiveLanes, "g")},
+            {"right", immediateLane(effectiveLanes, "V")},
+        }},
+    };
+}
+
 json luraphOpcode8RangeArtifact(
     const luraph::call_semantics::RegisterRange& range)
 {
@@ -12691,6 +12908,50 @@ json luraphRuntimeSemanticDispatchArtifact(
                 }
                 else
                     row["opcode212_zero_argument_call_recognition"] = {
+                        {"status", "evidence_mismatch"},
+                        {"validated_observations", 0},
+                    };
+            }
+            if (!semanticAccepted && opcode == 146 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null() &&
+                observedSite != observationsBySite.end())
+            {
+                if (std::optional<json> recognized = recognizeLuraphOpcode146HelperLookup(
+                        handler->second, effectiveLanes, observedSite->second))
+                {
+                    row["observational_semantic_operation"] = std::move(*recognized);
+                    row["opcode146_helper_lookup_recognition"] = {
+                        {"status", "runtime_validated"},
+                        {"validated_observations", observedSite->second.size()},
+                    };
+                    ++observationalSemanticLifted;
+                    observationalOperationCounts["helper_lookup"] =
+                        observationalOperationCounts.value("helper_lookup", size_t(0)) + 1;
+                }
+                else
+                    row["opcode146_helper_lookup_recognition"] = {
+                        {"status", "evidence_mismatch"},
+                        {"validated_observations", 0},
+                    };
+            }
+            if (!semanticAccepted && opcode == 201 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null() &&
+                observedSite != observationsBySite.end())
+            {
+                if (std::optional<json> recognized = recognizeLuraphOpcode201Add(
+                        handler->second, effectiveLanes, observedSite->second))
+                {
+                    row["observational_semantic_operation"] = std::move(*recognized);
+                    row["opcode201_add_recognition"] = {
+                        {"status", "runtime_validated"},
+                        {"validated_observations", observedSite->second.size()},
+                    };
+                    ++observationalSemanticLifted;
+                    observationalOperationCounts["arithmetic"] =
+                        observationalOperationCounts.value("arithmetic", size_t(0)) + 1;
+                }
+                else
+                    row["opcode201_add_recognition"] = {
                         {"status", "evidence_mismatch"},
                         {"validated_observations", 0},
                     };
