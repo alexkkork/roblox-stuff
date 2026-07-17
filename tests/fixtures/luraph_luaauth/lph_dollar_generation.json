@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "fixture_kind": "sanitized-luaauth-lph-dollar-generation",
+  "description": "Same-scale carrier framing and partial runtime evidence without launcher identity or protected payload content.",
+  "launcher": {
+    "code_digit_count": 9,
+    "script_id_byte_count": 32
+  },
+  "carrier": {
+    "marker": "LPH$",
+    "radix85_group_count": 57855,
+    "radix85_zero_group_count": 217,
+    "encoded_body_bytes": 288407,
+    "encoded_carrier_bytes": 288411,
+    "decoded_bytes": 231420,
+    "sanitized_decoded_sha256": "7229e78d1c2bef659b8bdba6e5804eda3310b4eea978a75a98c8d3b21ff89034"
+  },
+  "local_reference": {
+    "source_bytes": 369639,
+    "protected_body_bytes": 368779,
+    "decoded_sha256": "40cb8b336b3558bbf17b996029e9a86e5f69ef2bb3bcaa0a6bcd23877aa5e6cd"
+  },
+  "partial_trace": {
+    "prototype_count": 1,
+    "declared_instruction_count": 25215,
+    "observed_instruction_count": 268,
+    "observed_step_count": 268
+  }
+}

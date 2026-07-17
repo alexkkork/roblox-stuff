@@ -75,6 +75,14 @@ enum class ReaderValueKind
     UnsignedInteger,
     SignedInteger,
     FloatingPoint,
+    ByteString,
+};
+
+enum class ReaderEvidenceKind
+{
+    IdentifierHint,
+    RuntimeMemberBinding,
+    BodyVerified,
 };
 
 enum class ByteOrder
@@ -99,6 +107,7 @@ enum class ContainerParseStatus
 {
     NotAttempted,
     Parsed,
+    StructuralMetadataRecovered,
     UnsupportedSchema,
     Truncated,
     UlebOverflow,
@@ -107,6 +116,34 @@ enum class ContainerParseStatus
     CountLimitExceeded,
     SignedFoldOverflow,
     TrailerLimitExceeded,
+};
+
+enum class FamilyKind
+{
+    Unknown,
+    Luraph147LphAmpersand,
+    LuaAuthLphDollar,
+    InterpreterLike,
+};
+
+enum class SupportLevel
+{
+    None,
+    EnvelopeRecognized,
+    TransportDecoded,
+    StructuralSchemaRecovered,
+};
+
+enum class RecordLaneKind
+{
+    ConstantPoolMode,
+    ConstantCount,
+    ConstantTag,
+    ConstantPayload,
+    PrototypeCount,
+    PrototypeRecord,
+    RelocationTriple,
+    RootSelector,
 };
 
 enum class ConstantKind
@@ -312,6 +349,7 @@ struct ContainerAnalysis
     size_t decoded_bytes = 0;
     std::string decoded_sha256;
     unsigned char marker = 0;
+    ByteOrder transport_byte_order = ByteOrder::Unknown;
     std::optional<size_t> encoded_error_offset;
     std::optional<size_t> parse_error_offset;
     size_t constant_count = 0;
@@ -365,6 +403,79 @@ struct ReaderMetadata
     bool implementation_verified = false;
     SourceRange name_range;
     std::optional<SourceRange> definition_range;
+    ReaderEvidenceKind evidence = ReaderEvidenceKind::IdentifierHint;
+    std::optional<size_t> state_slot;
+    bool cursor_advancing = false;
+    size_t cursor_advance_bytes = 0;
+};
+
+struct ReaderBindingMetadata
+{
+    std::string primitive;
+    ReaderValueKind value_kind = ReaderValueKind::UnsignedInteger;
+    ReaderEvidenceKind evidence = ReaderEvidenceKind::IdentifierHint;
+    ByteOrder byte_order = ByteOrder::Unknown;
+    size_t bit_width = 0;
+    size_t byte_width = 0;
+    size_t state_slot = 0;
+    bool cursor_advancing = false;
+    size_t cursor_advance_bytes = 0;
+    SourceRange evidence_range;
+};
+
+struct RecordLaneMetadata
+{
+    RecordLaneKind kind = RecordLaneKind::ConstantPoolMode;
+    size_t order = 0;
+    std::optional<size_t> reader_slot;
+    std::optional<uint64_t> numeric_bias;
+    bool repeated = false;
+    bool semantics_known = false;
+    SourceRange evidence_range;
+};
+
+struct RootCandidateMetadata
+{
+    bool present = false;
+    bool prototype_table_index = false;
+    bool selector_value_known = false;
+    std::optional<size_t> reader_slot;
+    SourceRange evidence_range;
+};
+
+struct TagScheduleMetadata
+{
+    bool present = false;
+    bool randomized = false;
+    bool semantic_mapping_recovered = false;
+    std::optional<size_t> tag_reader_slot;
+    std::vector<uint64_t> decision_boundaries;
+    SourceRange evidence_range;
+};
+
+struct KeyScheduleMetadata
+{
+    bool candidate_present = false;
+    bool applied_to_container_proven = false;
+    bool semantic_mapping_recovered = false;
+    size_t opaque_word_count = 0;
+    SourceRange evidence_range;
+};
+
+struct LphDollarSchemaMetadata
+{
+    bool detected = false;
+    bool reader_bindings_verified = false;
+    bool variable_integer_reader_verified = false;
+    bool record_lanes_recovered = false;
+    bool root_selection_recovered = false;
+    ByteOrder scalar_byte_order = ByteOrder::Unknown;
+    std::optional<size_t> variable_integer_reader_slot;
+    std::vector<ReaderBindingMetadata> reader_bindings;
+    std::vector<RecordLaneMetadata> record_lanes;
+    RootCandidateMetadata root;
+    TagScheduleMetadata tags;
+    KeyScheduleMetadata keys;
 };
 
 struct StaticDecodeMetrics
@@ -372,6 +483,10 @@ struct StaticDecodeMetrics
     bool eligible = false;
     bool attempted = false;
     bool complete = false;
+    bool literal_complete = false;
+    bool transport_complete = false;
+    bool schema_complete = false;
+    bool semantic_complete = false;
     // These fields refer to protected-program/VM decoding, not container framing.
     bool payload_decode_attempted = false;
     bool payload_decoded = false;
@@ -424,6 +539,8 @@ struct EnvelopeAnalysis
     bool bounded = true;
     bool family_detected = false;
     bool version_supported = false;
+    FamilyKind family_kind = FamilyKind::Unknown;
+    SupportLevel support_level = SupportLevel::None;
     bool generated_interpreter = false;
     bool source_recovery_attempted = false;
     BannerInfo banner;
@@ -436,6 +553,7 @@ struct EnvelopeAnalysis
     ContainerMetrics container_metrics;
     std::vector<ContainerAnalysis> containers;
     std::vector<ReaderMetadata> readers;
+    LphDollarSchemaMetadata lph_dollar_schema;
     std::vector<Stage> stages;
     Confidence confidence;
     std::vector<Diagnostic> diagnostics;
@@ -459,9 +577,13 @@ std::string_view toString(BlobKind kind);
 std::string_view toString(CarrierLiteralKind kind);
 std::string_view toString(CarrierDecodeStatus status);
 std::string_view toString(ReaderValueKind kind);
+std::string_view toString(ReaderEvidenceKind kind);
 std::string_view toString(ByteOrder byteOrder);
 std::string_view toString(ContainerDecodeStatus status);
 std::string_view toString(ContainerParseStatus status);
+std::string_view toString(FamilyKind kind);
+std::string_view toString(SupportLevel level);
+std::string_view toString(RecordLaneKind kind);
 std::string_view toString(ConstantKind kind);
 std::string_view toString(StageKind kind);
 std::string_view toString(ConfidenceLevel level);

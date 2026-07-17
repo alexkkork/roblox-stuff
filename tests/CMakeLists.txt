@@ -653,3 +653,13 @@ if(NPM_EXECUTABLE)
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/web/rbx-runtime-runner"
     )
 endif()
+
+if(TARGET alex_deobfuscator)
+    rbx_add_python_test(
+        deobfuscator_luraph_luaauth_lph_dollar
+        "integration;deobfuscator;security;luraph"
+        90
+        test_luraph_luaauth_lph_dollar.py
+        --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+    )
+endif()

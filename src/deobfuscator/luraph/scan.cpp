@@ -777,8 +777,8 @@ bool encodedBlobCandidate(size_t sourceBytes, const StringStats& stats)
 
 bool readerPrimitive(std::string_view identifier)
 {
-    constexpr std::array<std::string_view, 12> names = {
-        "readu8", "readu16", "readu32", "readi8", "readi16", "readi32", "readf32", "readf64", "byte", "char", "unpack", "bit32",
+    constexpr std::array<std::string_view, 13> names = {
+        "readu8", "readu16", "readu32", "readi8", "readi16", "readi32", "readf32", "readf64", "readstring", "byte", "char", "unpack", "bit32",
     };
     return std::find(names.begin(), names.end(), identifier) != names.end();
 }
@@ -790,7 +790,7 @@ struct ReaderSpec
     size_t bit_width;
 };
 
-constexpr std::array<ReaderSpec, 8> kReaderSpecs = {{
+constexpr std::array<ReaderSpec, 9> kReaderSpecs = {{
     {"readu8", ReaderValueKind::UnsignedInteger, 8},
     {"readu16", ReaderValueKind::UnsignedInteger, 16},
     {"readu32", ReaderValueKind::UnsignedInteger, 32},
@@ -799,6 +799,7 @@ constexpr std::array<ReaderSpec, 8> kReaderSpecs = {{
     {"readi32", ReaderValueKind::SignedInteger, 32},
     {"readf32", ReaderValueKind::FloatingPoint, 32},
     {"readf64", ReaderValueKind::FloatingPoint, 64},
+    {"readstring", ReaderValueKind::ByteString, 0},
 }};
 
 struct ReaderObservation
@@ -1148,6 +1149,495 @@ LiteralDecodeResult decodeQuotedLiteral(std::string_view source, const Token& to
         return decoded;
     }
     return decoded;
+}
+
+std::optional<uint64_t> unsignedIntegerToken(std::string_view source, const Token& token)
+{
+    if (token.kind != TokenKind::Number)
+        return std::nullopt;
+    const std::string_view text = source.substr(token.begin, token.end - token.begin);
+    size_t cursor = 0;
+    unsigned int base = 10;
+    if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+    {
+        base = 16;
+        cursor = 2;
+    }
+    else if (text.size() >= 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B'))
+    {
+        base = 2;
+        cursor = 2;
+    }
+
+    uint64_t value = 0;
+    bool sawDigit = false;
+    for (; cursor < text.size(); ++cursor)
+    {
+        const char ch = text[cursor];
+        if (ch == '_')
+            continue;
+        unsigned int digit = 0;
+        if (ch >= '0' && ch <= '9')
+            digit = static_cast<unsigned int>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f')
+            digit = static_cast<unsigned int>(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F')
+            digit = static_cast<unsigned int>(ch - 'A' + 10);
+        else
+            return std::nullopt;
+        if (digit >= base || value > (std::numeric_limits<uint64_t>::max() - digit) / base)
+            return std::nullopt;
+        value = value * base + digit;
+        sawDigit = true;
+    }
+    return sawDigit ? std::optional<uint64_t>(value) : std::nullopt;
+}
+
+struct FunctionTokenRange
+{
+    size_t begin = 0;
+    size_t end = 0;
+};
+
+std::vector<FunctionTokenRange> functionTokenRanges(std::string_view source, const std::vector<Token>& tokens)
+{
+    struct KeywordBlock
+    {
+        BlockKind kind = BlockKind::End;
+        size_t begin = 0;
+        bool function = false;
+    };
+
+    std::vector<KeywordBlock> blocks;
+    std::vector<FunctionTokenRange> ranges;
+    for (size_t index = 0; index < tokens.size(); ++index)
+    {
+        const Token& token = tokens[index];
+        if (token.kind != TokenKind::Identifier)
+            continue;
+        if (tokenIs(token, source, "function"))
+            blocks.push_back(KeywordBlock{BlockKind::End, index, true});
+        else if (tokenIs(token, source, "if"))
+            blocks.push_back(KeywordBlock{BlockKind::End, index, false});
+        else if (tokenIs(token, source, "while") || tokenIs(token, source, "for"))
+            blocks.push_back(KeywordBlock{BlockKind::LoopAwaitingDo, index, false});
+        else if (tokenIs(token, source, "do"))
+        {
+            if (!blocks.empty() && blocks.back().kind == BlockKind::LoopAwaitingDo)
+                blocks.back().kind = BlockKind::End;
+            else
+                blocks.push_back(KeywordBlock{BlockKind::End, index, false});
+        }
+        else if (tokenIs(token, source, "repeat"))
+            blocks.push_back(KeywordBlock{BlockKind::Repeat, index, false});
+        else if (tokenIs(token, source, "end"))
+        {
+            if (blocks.empty() || blocks.back().kind == BlockKind::Repeat)
+                continue;
+            const KeywordBlock block = blocks.back();
+            blocks.pop_back();
+            if (block.function)
+                ranges.push_back(FunctionTokenRange{block.begin, index});
+        }
+        else if (tokenIs(token, source, "until"))
+        {
+            if (!blocks.empty() && blocks.back().kind == BlockKind::Repeat)
+                blocks.pop_back();
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const FunctionTokenRange& left, const FunctionTokenRange& right) {
+        return left.end - left.begin < right.end - right.begin;
+    });
+    return ranges;
+}
+
+std::optional<FunctionTokenRange> enclosingFunction(const std::vector<FunctionTokenRange>& ranges, size_t tokenIndex)
+{
+    for (const FunctionTokenRange& range : ranges)
+        if (range.begin <= tokenIndex && tokenIndex <= range.end)
+            return range;
+    return std::nullopt;
+}
+
+std::optional<size_t> indexedSlotAt(std::string_view source, const std::vector<Token>& tokens, size_t index)
+{
+    if (index + 3 >= tokens.size() || tokens[index].kind != TokenKind::Identifier || !tokenIs(tokens[index + 1], source, "[") ||
+        !tokenIs(tokens[index + 3], source, "]"))
+        return std::nullopt;
+    const std::optional<uint64_t> value = unsignedIntegerToken(source, tokens[index + 2]);
+    if (!value || *value > std::numeric_limits<size_t>::max())
+        return std::nullopt;
+    return static_cast<size_t>(*value);
+}
+
+std::optional<size_t> slotCallAt(std::string_view source, const std::vector<Token>& tokens, size_t index)
+{
+    const std::optional<size_t> slot = indexedSlotAt(source, tokens, index);
+    if (!slot || index + 5 >= tokens.size() || !tokenIs(tokens[index + 4], source, "(") || !tokenIs(tokens[index + 5], source, ")"))
+        return std::nullopt;
+    return slot;
+}
+
+bool comparisonOperator(const Token& token, std::string_view source)
+{
+    return tokenIs(token, source, "<") || tokenIs(token, source, "<=") || tokenIs(token, source, ">") || tokenIs(token, source, ">=") ||
+           tokenIs(token, source, "==") || tokenIs(token, source, "~=");
+}
+
+void inspectLphDollarSchema(
+    std::string_view source,
+    const std::vector<Token>& tokens,
+    EnvelopeAnalysis& result,
+    const AnalysisLimits& limits)
+{
+    LphDollarSchemaMetadata schema;
+    const std::vector<FunctionTokenRange> functions = functionTokenRanges(source, tokens);
+
+    struct PrimitiveAlias
+    {
+        std::string identifier;
+        std::string primitive;
+    };
+    std::vector<PrimitiveAlias> aliases;
+    size_t bufferAliasCount = 0;
+    for (size_t index = 0; index + 2 < tokens.size(); ++index)
+    {
+        if (tokens[index].kind != TokenKind::Identifier || !tokenIs(tokens[index + 1], source, "="))
+            continue;
+        if (tokens[index + 2].kind == TokenKind::Identifier && tokenIs(tokens[index + 2], source, "buffer"))
+            ++bufferAliasCount;
+        if (tokens[index + 2].kind != TokenKind::String || tokens[index + 2].long_string)
+            continue;
+        const LiteralDecodeResult decoded = decodeQuotedLiteral(source, tokens[index + 2], 32);
+        if (decoded.status != CarrierDecodeStatus::DecodedLiteral)
+            continue;
+        const std::string primitive(decoded.bytes.begin(), decoded.bytes.end());
+        if (findReaderSpec(primitive))
+            aliases.push_back(PrimitiveAlias{std::string(source.substr(tokens[index].begin, tokens[index].end - tokens[index].begin)), primitive});
+    }
+
+    const auto aliasPrimitive = [&](std::string_view name) -> std::optional<std::string> {
+        for (const PrimitiveAlias& alias : aliases)
+            if (alias.identifier == name)
+                return alias.primitive;
+        return std::nullopt;
+    };
+    const auto addBinding = [&](std::string primitive, size_t slot, SourceRange range, ReaderEvidenceKind evidence) {
+        const ReaderSpec* spec = findReaderSpec(primitive);
+        if (!spec)
+            return;
+        for (const ReaderBindingMetadata& existing : schema.reader_bindings)
+            if (existing.state_slot == slot && existing.primitive == primitive)
+                return;
+        schema.reader_bindings.push_back(ReaderBindingMetadata{
+            std::move(primitive), spec->value_kind, evidence, ByteOrder::LittleEndian, spec->bit_width, spec->bit_width / 8,
+            slot, false, 0, range});
+    };
+
+    for (size_t index = 0; index + 7 < tokens.size(); ++index)
+    {
+        const std::optional<size_t> slot = indexedSlotAt(source, tokens, index);
+        if (!slot || !tokenIs(tokens[index + 4], source, "="))
+            continue;
+        size_t rhs = index + 5;
+        while (rhs < tokens.size() && tokenIs(tokens[rhs], source, "("))
+            ++rhs;
+        if (rhs + 2 < tokens.size() && tokens[rhs].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 1], source, ".") &&
+            tokens[rhs + 2].kind == TokenKind::Identifier)
+        {
+            const std::string_view primitive = source.substr(tokens[rhs + 2].begin, tokens[rhs + 2].end - tokens[rhs + 2].begin);
+            if (findReaderSpec(primitive))
+                addBinding(std::string(primitive), *slot, SourceRange{tokens[index].begin, tokens[rhs + 2].end}, ReaderEvidenceKind::RuntimeMemberBinding);
+            continue;
+        }
+        if (rhs + 5 < tokens.size() && tokens[rhs].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 1], source, "[") &&
+            tokens[rhs + 2].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 3], source, ".") && tokens[rhs + 4].kind == TokenKind::Identifier &&
+            tokenIs(tokens[rhs + 5], source, "]"))
+        {
+            const std::string_view alias = source.substr(tokens[rhs + 4].begin, tokens[rhs + 4].end - tokens[rhs + 4].begin);
+            if (const std::optional<std::string> primitive = aliasPrimitive(alias))
+                addBinding(*primitive, *slot, SourceRange{tokens[index].begin, tokens[rhs + 5].end}, ReaderEvidenceKind::RuntimeMemberBinding);
+        }
+    }
+
+    // Accept parenthesized assignment targets and values. The protected wrapper
+    // freely writes `(state)[slot]=(runtime.readu8)`, so the binding is anchored
+    // on the assignment and its nearest numeric index rather than identifier text.
+    for (size_t equals = 0; equals + 3 < tokens.size(); ++equals)
+    {
+        if (!tokenIs(tokens[equals], source, "="))
+            continue;
+        std::optional<size_t> slot;
+        size_t slotBegin = equals;
+        const size_t searchBegin = equals > 8 ? equals - 8 : 0;
+        for (size_t cursor = searchBegin; cursor + 2 < equals; ++cursor)
+        {
+            if (!tokenIs(tokens[cursor], source, "[") || !tokenIs(tokens[cursor + 2], source, "]"))
+                continue;
+            const std::optional<uint64_t> parsed = unsignedIntegerToken(source, tokens[cursor + 1]);
+            if (parsed && *parsed <= std::numeric_limits<size_t>::max())
+            {
+                slot = static_cast<size_t>(*parsed);
+                slotBegin = cursor;
+            }
+        }
+        if (!slot)
+            continue;
+        size_t rhs = equals + 1;
+        while (rhs < tokens.size() && tokenIs(tokens[rhs], source, "("))
+            ++rhs;
+        if (rhs + 2 < tokens.size() && tokens[rhs].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 1], source, ".") &&
+            tokens[rhs + 2].kind == TokenKind::Identifier)
+        {
+            const std::string_view primitive = source.substr(tokens[rhs + 2].begin, tokens[rhs + 2].end - tokens[rhs + 2].begin);
+            if (findReaderSpec(primitive))
+                addBinding(std::string(primitive), *slot, SourceRange{tokens[slotBegin].begin, tokens[rhs + 2].end}, ReaderEvidenceKind::RuntimeMemberBinding);
+            continue;
+        }
+        if (rhs + 5 < tokens.size() && tokens[rhs].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 1], source, "[") &&
+            tokens[rhs + 2].kind == TokenKind::Identifier && tokenIs(tokens[rhs + 3], source, ".") && tokens[rhs + 4].kind == TokenKind::Identifier &&
+            tokenIs(tokens[rhs + 5], source, "]"))
+        {
+            const std::string_view alias = source.substr(tokens[rhs + 4].begin, tokens[rhs + 4].end - tokens[rhs + 4].begin);
+            if (const std::optional<std::string> primitive = aliasPrimitive(alias))
+                addBinding(*primitive, *slot, SourceRange{tokens[slotBegin].begin, tokens[rhs + 5].end}, ReaderEvidenceKind::RuntimeMemberBinding);
+        }
+    }
+
+    struct BiasEvidence
+    {
+        size_t reader_slot = 0;
+        uint64_t bias = 0;
+        SourceRange range;
+        std::optional<FunctionTokenRange> function;
+    };
+    std::vector<BiasEvidence> biases;
+    std::vector<std::pair<size_t, SourceRange>> modeReaders;
+    for (size_t index = 0; index + 7 < tokens.size(); ++index)
+    {
+        const std::optional<size_t> slot = slotCallAt(source, tokens, index);
+        if (!slot)
+            continue;
+        if (tokenIs(tokens[index + 6], source, "-") && tokens[index + 7].kind == TokenKind::Number)
+        {
+            if (const std::optional<uint64_t> bias = unsignedIntegerToken(source, tokens[index + 7]))
+                biases.push_back(BiasEvidence{*slot, *bias, SourceRange{tokens[index].begin, tokens[index + 7].end}, enclosingFunction(functions, index)});
+        }
+        if (tokenIs(tokens[index + 6], source, "~=") && tokens[index + 7].kind == TokenKind::Number &&
+            unsignedIntegerToken(source, tokens[index + 7]) == 0)
+            modeReaders.push_back({*slot, SourceRange{tokens[index].begin, tokens[index + 7].end}});
+    }
+
+    std::optional<size_t> rootReaderSlot;
+    SourceRange rootRange;
+    for (size_t index = 0; index + 8 < tokens.size(); ++index)
+    {
+        if (tokens[index].kind != TokenKind::Identifier || !tokenIs(tokens[index + 1], source, "[") ||
+            tokens[index + 2].kind != TokenKind::Identifier)
+            continue;
+        const std::optional<size_t> slot = slotCallAt(source, tokens, index + 2);
+        if (!slot || !tokenIs(tokens[index + 8], source, "]"))
+            continue;
+        rootReaderSlot = *slot;
+        rootRange = SourceRange{tokens[index].begin, tokens[index + 8].end};
+        break;
+    }
+
+    std::optional<size_t> tagReaderSlot;
+    SourceRange tagRange;
+    std::vector<uint64_t> tagBoundaries;
+    if (!modeReaders.empty())
+    {
+        const size_t candidateSlot = modeReaders.front().first;
+        for (size_t index = 0; index + 7 < tokens.size(); ++index)
+        {
+            if (tokens[index].kind != TokenKind::Identifier || !tokenIs(tokens[index + 1], source, "="))
+                continue;
+            const std::optional<size_t> slot = slotCallAt(source, tokens, index + 2);
+            if (!slot || *slot != candidateSlot)
+                continue;
+            const std::string_view variable = source.substr(tokens[index].begin, tokens[index].end - tokens[index].begin);
+            const std::optional<FunctionTokenRange> function = enclosingFunction(functions, index);
+            if (!function)
+                continue;
+            std::vector<uint64_t> boundaries;
+            for (size_t cursor = function->begin; cursor + 2 <= function->end; ++cursor)
+            {
+                if (tokens[cursor].kind != TokenKind::Identifier ||
+                    source.substr(tokens[cursor].begin, tokens[cursor].end - tokens[cursor].begin) != variable ||
+                    !comparisonOperator(tokens[cursor + 1], source))
+                    continue;
+                if (const std::optional<uint64_t> value = unsignedIntegerToken(source, tokens[cursor + 2]))
+                    boundaries.push_back(*value);
+            }
+            std::sort(boundaries.begin(), boundaries.end());
+            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+            if (boundaries.size() > tagBoundaries.size())
+            {
+                tagBoundaries = std::move(boundaries);
+                tagReaderSlot = candidateSlot;
+                tagRange = SourceRange{tokens[function->begin].begin, tokens[function->end].end};
+            }
+        }
+    }
+
+    bool ulebBodyVerified = false;
+    for (const FunctionTokenRange& function : functions)
+    {
+        bool compares127 = false;
+        bool subtracts128 = false;
+        bool multiplies128 = false;
+        for (size_t index = function.begin; index <= function.end; ++index)
+        {
+            const std::optional<uint64_t> value = unsignedIntegerToken(source, tokens[index]);
+            if (!value)
+                continue;
+            if (*value == 127 && index > function.begin && comparisonOperator(tokens[index - 1], source))
+                compares127 = true;
+            if (*value == 128 && index > function.begin && tokenIs(tokens[index - 1], source, "-"))
+                subtracts128 = true;
+            if (*value == 128 && index > function.begin && tokenIs(tokens[index - 1], source, "*="))
+                multiplies128 = true;
+        }
+        if (compares127 && subtracts128 && multiplies128)
+        {
+            ulebBodyVerified = true;
+            break;
+        }
+    }
+
+    size_t opaqueWordCount = 0;
+    SourceRange opaqueWordRange;
+    for (size_t index = 0; index + 3 < tokens.size(); ++index)
+    {
+        if (tokens[index].kind != TokenKind::Identifier || !tokenIs(tokens[index + 1], source, "=") || !tokenIs(tokens[index + 2], source, "{"))
+            continue;
+        size_t depth = 1;
+        size_t numbers = 0;
+        bool numericOnly = true;
+        size_t cursor = index + 3;
+        for (; cursor < tokens.size() && depth > 0; ++cursor)
+        {
+            if (tokenIs(tokens[cursor], source, "{"))
+            {
+                ++depth;
+                numericOnly = false;
+            }
+            else if (tokenIs(tokens[cursor], source, "}"))
+                --depth;
+            else if (depth == 1 && tokens[cursor].kind == TokenKind::Number)
+                ++numbers;
+            else if (depth == 1 && !tokenIs(tokens[cursor], source, ","))
+                numericOnly = false;
+        }
+        if (depth == 0 && numericOnly && numbers > opaqueWordCount)
+        {
+            opaqueWordCount = numbers;
+            opaqueWordRange = SourceRange{tokens[index].begin, tokens[cursor - 1].end};
+        }
+    }
+
+    const bool directReadersVerified = bufferAliasCount > 0 && schema.reader_bindings.size() >= 7;
+    size_t rootBiasCount = 0;
+    if (rootReaderSlot)
+        for (const BiasEvidence& bias : biases)
+            rootBiasCount += bias.reader_slot == *rootReaderSlot ? 1 : 0;
+    schema.reader_bindings_verified = directReadersVerified;
+    schema.variable_integer_reader_verified = ulebBodyVerified && rootReaderSlot.has_value();
+    schema.variable_integer_reader_slot = rootReaderSlot;
+    schema.scalar_byte_order = directReadersVerified ? ByteOrder::LittleEndian : ByteOrder::Unknown;
+    if (rootReaderSlot)
+        schema.root = RootCandidateMetadata{true, true, false, rootReaderSlot, rootRange};
+    if (tagReaderSlot)
+        schema.tags = TagScheduleMetadata{true, true, false, tagReaderSlot, tagBoundaries, tagRange};
+    schema.keys = KeyScheduleMetadata{opaqueWordCount >= 4, false, false, opaqueWordCount, opaqueWordRange};
+    schema.detected = directReadersVerified && ulebBodyVerified && rootReaderSlot && !modeReaders.empty() && tagReaderSlot &&
+                      tagBoundaries.size() >= 4 && rootBiasCount >= 2;
+    if (!schema.detected)
+    {
+        result.lph_dollar_schema = std::move(schema);
+        return;
+    }
+
+    schema.reader_bindings_verified = true;
+    schema.variable_integer_reader_verified = true;
+    schema.record_lanes_recovered = true;
+    schema.root_selection_recovered = true;
+    schema.scalar_byte_order = ByteOrder::LittleEndian;
+    schema.reader_bindings.push_back(ReaderBindingMetadata{
+        "uleb128", ReaderValueKind::UnsignedInteger, ReaderEvidenceKind::BodyVerified, ByteOrder::LittleEndian, 0, 0,
+        *rootReaderSlot, true, 0, rootRange});
+
+    const size_t modeSlot = modeReaders.front().first;
+    schema.reader_bindings.push_back(ReaderBindingMetadata{
+        "readu8_cursor", ReaderValueKind::UnsignedInteger, ReaderEvidenceKind::BodyVerified, ByteOrder::LittleEndian, 8, 1,
+        modeSlot, true, 1, modeReaders.front().second});
+
+    size_t laneOrder = 0;
+    schema.record_lanes.push_back(RecordLaneMetadata{
+        RecordLaneKind::ConstantPoolMode, laneOrder++, modeSlot, std::nullopt, false, true, modeReaders.front().second});
+    for (const BiasEvidence& bias : biases)
+    {
+        if (bias.reader_slot != *rootReaderSlot)
+            continue;
+        bool sharesModeFunction = false;
+        if (bias.function)
+            for (const auto& mode : modeReaders)
+                if (mode.second.begin >= tokens[bias.function->begin].begin && mode.second.end <= tokens[bias.function->end].end)
+                    sharesModeFunction = true;
+        schema.record_lanes.push_back(RecordLaneMetadata{
+            sharesModeFunction ? RecordLaneKind::ConstantCount : RecordLaneKind::PrototypeRecord,
+            laneOrder++, bias.reader_slot, bias.bias, false, sharesModeFunction, bias.range});
+    }
+    schema.record_lanes.push_back(RecordLaneMetadata{
+        RecordLaneKind::ConstantTag, laneOrder++, *tagReaderSlot, std::nullopt, true, false, tagRange});
+    schema.record_lanes.push_back(RecordLaneMetadata{
+        RecordLaneKind::ConstantPayload, laneOrder++, std::nullopt, std::nullopt, true, false, tagRange});
+    schema.record_lanes.push_back(RecordLaneMetadata{
+        RecordLaneKind::PrototypeCount, laneOrder++, *rootReaderSlot, std::nullopt, false, false, rootRange});
+    schema.record_lanes.push_back(RecordLaneMetadata{
+        RecordLaneKind::RootSelector, laneOrder++, *rootReaderSlot, std::nullopt, false, true, rootRange});
+
+    schema.root = RootCandidateMetadata{true, true, false, rootReaderSlot, rootRange};
+    schema.tags = TagScheduleMetadata{true, true, false, tagReaderSlot, std::move(tagBoundaries), tagRange};
+    schema.keys = KeyScheduleMetadata{opaqueWordCount >= 4, false, false, opaqueWordCount, opaqueWordRange};
+
+    for (const ReaderBindingMetadata& binding : schema.reader_bindings)
+    {
+        if (!findReaderSpec(binding.primitive))
+            continue;
+        auto found = std::find_if(result.readers.begin(), result.readers.end(), [&](const ReaderMetadata& reader) {
+            return reader.name == binding.primitive;
+        });
+        if (found == result.readers.end())
+        {
+            result.readers.push_back(ReaderMetadata{
+                binding.primitive, binding.value_kind, binding.byte_order, binding.bit_width, binding.byte_width, 1, true, false, true,
+                binding.evidence_range, binding.evidence_range, binding.evidence, binding.state_slot, binding.cursor_advancing, binding.cursor_advance_bytes});
+        }
+        else
+        {
+            found->byte_order = binding.byte_order;
+            found->implementation_verified = true;
+            found->inferred_from_identifier = false;
+            found->definition_present = true;
+            found->definition_range = binding.evidence_range;
+            found->evidence = binding.evidence;
+            found->state_slot = binding.state_slot;
+        }
+    }
+    result.static_decode.reader_metadata_count = result.readers.size();
+    result.static_decode.reader_definition_count = static_cast<size_t>(std::count_if(result.readers.begin(), result.readers.end(), [](const ReaderMetadata& reader) {
+        return reader.definition_present;
+    }));
+    result.lph_dollar_schema = std::move(schema);
+    addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_STRUCTURAL_SCHEMA_RECOVERED",
+        "Recovered the LuaAuth LPH$ reader bindings, variable-integer lane, constant record envelope, prototype lane, and root selection structurally; randomized tag meanings remain unknown.");
+    addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_RANDOMIZED_TAGS_RETAINED",
+        "Retained the tag reader and comparison boundaries without assigning Lua value or opcode meanings to randomized tag values.");
+    if (result.lph_dollar_schema.keys.candidate_present)
+        addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_KEY_SCHEDULE_UNPROVEN",
+            "An opaque wrapper control-word table was identified, but no container key schedule or semantic mapping was claimed.");
 }
 
 uint32_t rotateRight(uint32_t value, unsigned int count)
@@ -1738,22 +2228,44 @@ Radix85DecodeResult decodeLphContainer(const std::vector<unsigned char>& carrier
     uint64_t value = 0;
     size_t digits = 0;
     size_t groupBegin = markerBytes;
+    const auto appendDigit = [&](uint64_t digit, size_t sourceOffset) {
+        if (value > (std::numeric_limits<uint32_t>::max() - digit) / 85u)
+        {
+            decoded.status = ContainerDecodeStatus::Radix85Overflow;
+            decoded.error_offset = groupBegin;
+            decoded.bytes.clear();
+            return false;
+        }
+        value = value * 85u + digit;
+        ++digits;
+        if (digits != 5)
+            return true;
+        if (decoded.bytes.size() > maxBytes || maxBytes - decoded.bytes.size() < 4)
+        {
+            decoded.status = ContainerDecodeStatus::OutputLimitExceeded;
+            decoded.error_offset = groupBegin;
+            decoded.bytes.clear();
+            return false;
+        }
+        for (size_t index = 0; index < 4; ++index)
+            decoded.bytes.push_back(static_cast<unsigned char>(value >> (index * 8u)));
+        ++decoded.group_count;
+        value = 0;
+        digits = 0;
+        groupBegin = sourceOffset + 1;
+        return true;
+    };
     for (size_t offset = markerBytes; offset < carrier.size(); ++offset)
     {
         const unsigned char byte = carrier[offset];
-        if (zeroShorthand && byte == 'z' && digits == 0)
+        if (zeroShorthand && byte == 'z')
         {
-            if (decoded.bytes.size() > maxBytes || maxBytes - decoded.bytes.size() < 4)
-            {
-                decoded.status = ContainerDecodeStatus::OutputLimitExceeded;
-                decoded.error_offset = offset;
-                decoded.bytes.clear();
-                return decoded;
-            }
-            decoded.bytes.insert(decoded.bytes.end(), 4, 0);
-            ++decoded.group_count;
             ++decoded.zero_group_count;
-            groupBegin = offset + 1;
+            // The LuaAuth wrapper applies gsub("z", "!!!!!") before grouping,
+            // so shorthand is valid even when it appears inside a source group.
+            for (size_t expansion = 0; expansion < 5; ++expansion)
+                if (!appendDigit(0, offset))
+                    return decoded;
             continue;
         }
         if (byte < 33 || byte > 117)
@@ -1763,31 +2275,8 @@ Radix85DecodeResult decodeLphContainer(const std::vector<unsigned char>& carrier
             decoded.bytes.clear();
             return decoded;
         }
-        const uint64_t digit = byte - 33u;
-        if (value > (std::numeric_limits<uint32_t>::max() - digit) / 85u)
-        {
-            decoded.status = ContainerDecodeStatus::Radix85Overflow;
-            decoded.error_offset = groupBegin;
-            decoded.bytes.clear();
+        if (!appendDigit(byte - 33u, offset))
             return decoded;
-        }
-        value = value * 85u + digit;
-        ++digits;
-        if (digits != 5)
-            continue;
-        if (decoded.bytes.size() > maxBytes || maxBytes - decoded.bytes.size() < 4)
-        {
-            decoded.status = ContainerDecodeStatus::OutputLimitExceeded;
-            decoded.error_offset = groupBegin;
-            decoded.bytes.clear();
-            return decoded;
-        }
-        for (size_t index = 0; index < 4; ++index)
-            decoded.bytes.push_back(static_cast<unsigned char>(value >> (index * 8u)));
-        ++decoded.group_count;
-        value = 0;
-        digits = 0;
-        groupBegin = offset + 1;
     }
     if (digits != 0)
     {
@@ -1859,6 +2348,7 @@ void addContainerParseDiagnostic(
             "The decoded LPH& container ended during a required scalar or record.");
         break;
     case ContainerParseStatus::UnsupportedSchema:
+    case ContainerParseStatus::StructuralMetadataRecovered:
         break;
     case ContainerParseStatus::UlebOverflow:
         addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LPH_ULEB_OVERFLOW",
@@ -1917,6 +2407,7 @@ std::optional<size_t> inspectLphContainer(
         analysis.decoded_bytes = decoded.bytes.size();
         analysis.decoded_sha256 = sha256Hex(decoded.bytes);
         analysis.decoded_data = decoded.bytes;
+        analysis.transport_byte_order = ByteOrder::LittleEndian;
         ++result.container_metrics.decoded_count;
         result.container_metrics.decoded_bytes += decoded.bytes.size();
         addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_CONTAINER_DECODED",
@@ -1926,9 +2417,18 @@ std::optional<size_t> inspectLphContainer(
 
         if (decoded.marker == '$')
         {
-            analysis.parse_status = ContainerParseStatus::UnsupportedSchema;
-            addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LPH_DOLLAR_SCHEMA_UNSUPPORTED",
-                "The LPH$ container bytes were recovered exactly, but this carrier uses a different randomized record schema; v14.7 tag rules were not applied.");
+            if (result.lph_dollar_schema.detected)
+            {
+                analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
+                addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED",
+                    "The LPH$ transport and deserializer structure were recovered; byte records remain unparsed until randomized tag meanings are proven.");
+            }
+            else
+            {
+                analysis.parse_status = ContainerParseStatus::UnsupportedSchema;
+                addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LPH_DOLLAR_SCHEMA_UNSUPPORTED",
+                    "The LPH$ container bytes were recovered exactly, but its randomized record schema was not structurally verified.");
+            }
         }
         else if (parseContainerBytes(decoded.bytes, analysis, limits))
         {
@@ -1967,9 +2467,9 @@ void decodeCarrierLiterals(
     const AnalysisLimits& limits)
 {
     result.static_decode.carrier_candidate_count = result.counts.encoded_blob_candidate_count;
-    const bool supportedAttribution = result.banner.exact_product_marker ||
+    const bool supportedAttribution = (result.banner.exact_product_marker && result.version_supported) ||
                                       (result.luaauth_launcher.present && result.luaauth_launcher.exact_assignment_shape);
-    result.static_decode.eligible = result.complete && supportedAttribution && result.version_supported &&
+    result.static_decode.eligible = result.complete && supportedAttribution &&
                                     result.wrapper.kind == WrapperKind::ReturnedTableMethodDispatch && result.wrapper.zero_argument_method_call &&
                                     result.wrapper.forwards_varargs && result.wrapper.consumes_entire_chunk;
     if (!result.static_decode.eligible)
@@ -1983,6 +2483,7 @@ void decodeCarrierLiterals(
     result.static_decode.attempted = true;
     result.static_decode.complete = true;
     inspectReaderMetadata(source, tokens, result, limits);
+    inspectLphDollarSchema(source, tokens, result, limits);
 
     for (const Token& token : tokens)
     {
@@ -2021,8 +2522,16 @@ void decodeCarrierLiterals(
             extraction.bytes = std::move(decoded.bytes);
             result.static_decode.decoded_carrier_bytes += extraction.decoded_byte_count;
             ++result.static_decode.carrier_decoded_count;
-            if (stats.has_lph_ampersand_marker || stats.has_lph_dollar_marker)
+            const bool leadingDecodedMarker = extraction.lph_marker_offset == 0 && extraction.bytes.size() >= 4 &&
+                                              (extraction.bytes[3] == '&' || extraction.bytes[3] == '$');
+            if (leadingDecodedMarker || stats.has_lph_ampersand_marker || stats.has_lph_dollar_marker)
+            {
+                if (!stats.has_lph_marker)
+                    ++result.container_metrics.candidate_count;
+                if (leadingDecodedMarker)
+                    extraction.kind = extraction.bytes[3] == '$' ? BlobKind::LphDollar : BlobKind::LphAmpersand;
                 extraction.container_index = inspectLphContainer(extraction.bytes, result.carriers.size(), result, limits);
+            }
         }
         else
         {
@@ -2050,6 +2559,14 @@ void decodeCarrierLiterals(
     if (result.static_decode.carrier_decoded_count > 0)
         addDiagnostic(result, limits, DiagnosticSeverity::Info, "CARRIER_LITERAL_DECODED",
             "Decoded exact Luau string-literal bytes from the proven wrapper envelope.");
+    result.static_decode.literal_complete = result.static_decode.carrier_attempt_count > 0 &&
+                                            result.static_decode.carrier_failure_count == 0 &&
+                                            result.static_decode.carrier_skipped_count == 0;
+    result.static_decode.transport_complete = result.container_metrics.attempt_count > 0 &&
+                                              result.container_metrics.decoded_count == result.container_metrics.attempt_count &&
+                                              result.container_metrics.failure_count == 0;
+    result.static_decode.schema_complete = false;
+    result.static_decode.semantic_complete = false;
     if (result.static_decode.carrier_attempt_count > 0)
         addDiagnostic(result, limits, DiagnosticSeverity::Info, "VM_SEMANTICS_NOT_ATTEMPTED",
             "Carrier/container bytes were inspected only; VM semantics and source recovery were not attempted.");
@@ -2140,6 +2657,8 @@ void inferStages(EnvelopeAnalysis& result)
         addStage(result, StageKind::EncodedPayload, 0.94,
             result.container_metrics.parsed_count > 0
                 ? "Strict LPH& framing and bounded container records were decoded; VM semantics remain opaque."
+                : result.lph_dollar_schema.detected && result.container_metrics.decoded_count > 0
+                ? "LPH$ transport, reader bindings, record lanes, and root selection were recovered; randomized tag meanings remain opaque."
                 : result.container_metrics.decoded_count > 0
                 ? "LPH container bytes were decoded exactly; its version-specific record schema remains opaque."
                 : result.static_decode.carrier_decoded_count > 0
@@ -2148,7 +2667,9 @@ void inferStages(EnvelopeAnalysis& result)
             result.blobs.empty() ? std::nullopt : std::optional<SourceRange>(result.blobs.front().range));
     if (result.counts.encoded_blob_candidate_count > 0 && result.counts.reader_primitive_reference_count >= 2)
         addStage(result, StageKind::ReaderSetup, 0.88,
-            result.static_decode.reader_metadata_count > 0
+            result.lph_dollar_schema.reader_bindings_verified
+                ? "Runtime reader bindings and little-endian scalar widths were verified from the deserializer; variable-length record semantics remain bounded."
+                : result.static_decode.reader_metadata_count > 0
                 ? "Reader identifier width hints were extracted; implementations, byte order, and runtime behavior remain unproven."
                 : "Byte-reader primitives and an encoded carrier indicate decoder or deserializer setup.");
     if (result.wrapper.function_member_count >= 16 && result.counts.loop_construct_count >= 8 && result.counts.indexed_access_count >= 16)
@@ -2170,15 +2691,21 @@ void addConfidenceEvidence(EnvelopeAnalysis& result, std::string code, double we
 void scoreConfidence(EnvelopeAnalysis& result)
 {
     if (result.luaauth_launcher.present && result.luaauth_launcher.exact_assignment_shape)
-        addConfidenceEvidence(result, "LUAAUTH_LAUNCHER", 0.62,
-            "Leading LuaAuth assignments and official launcher notice were separated from the protected body.");
+        addConfidenceEvidence(result, "LUAAUTH_LAUNCHER", 0.24,
+            "Leading LuaAuth assignments and official launcher notice were separated from the protected body; launcher identity alone is not Luraph attribution.");
     if (result.generated_interpreter)
         addConfidenceEvidence(result, "GENERATED_INTERPRETER", 0.82,
             "Large vararg-backed returned dispatcher contains dense functions, loops, indexed state, coroutine yield, buffer, and bit32 primitives.");
     if (result.banner.present && result.banner.exact_product_marker)
         addConfidenceEvidence(result, "LURAPH_BANNER", 0.42, "Leading comment names the Luraph Obfuscator product.");
-    if (result.version_supported)
+    if (result.banner.version == "14.7")
         addConfidenceEvidence(result, "VERSION_14_7", 0.18, "Banner version is exactly 14.7.");
+    if (result.family_kind == FamilyKind::LuaAuthLphDollar && result.container_metrics.decoded_count > 0)
+        addConfidenceEvidence(result, "LPH_DOLLAR_TRANSPORT", 0.38,
+            "A leading LPH$ carrier was decoded through the wrapper's radix-85 transport.");
+    if (result.lph_dollar_schema.detected)
+        addConfidenceEvidence(result, "LPH_DOLLAR_STRUCTURAL_SCHEMA", 0.24,
+            "Reader bindings, record lanes, tag decision boundaries, and root selection match the LuaAuth LPH$ deserializer family.");
     if (result.wrapper.kind == WrapperKind::ReturnedTableMethodDispatch && result.wrapper.consumes_entire_chunk)
         addConfidenceEvidence(result, "TABLE_METHOD_WRAPPER", 0.20, "Chunk is a returned table followed by method dispatch.");
     if (result.counts.encoded_blob_candidate_count > 0)
@@ -2201,7 +2728,8 @@ void scoreConfidence(EnvelopeAnalysis& result)
         result.confidence.level = ConfidenceLevel::None;
 
     result.family_detected = result.generated_interpreter ||
-                             result.luaauth_launcher.present ||
+                             result.family_kind == FamilyKind::LuaAuthLphDollar ||
+                             result.family_kind == FamilyKind::Luraph147LphAmpersand ||
                              (result.banner.exact_product_marker && result.banner.major.has_value()) ||
                              result.confidence.score >= 0.70;
 }
@@ -2241,6 +2769,23 @@ void shiftBodyRanges(EnvelopeAnalysis& result, size_t offset)
         reader.name_range.end += offset;
         shiftSourceRange(reader.definition_range, offset);
     }
+    if (result.lph_dollar_schema.detected)
+    {
+        const auto shiftRange = [offset](SourceRange& range) {
+            range.begin += offset;
+            range.end += offset;
+        };
+        for (ReaderBindingMetadata& binding : result.lph_dollar_schema.reader_bindings)
+            shiftRange(binding.evidence_range);
+        for (RecordLaneMetadata& lane : result.lph_dollar_schema.record_lanes)
+            shiftRange(lane.evidence_range);
+        if (result.lph_dollar_schema.root.present)
+            shiftRange(result.lph_dollar_schema.root.evidence_range);
+        if (result.lph_dollar_schema.tags.present)
+            shiftRange(result.lph_dollar_schema.tags.evidence_range);
+        if (result.lph_dollar_schema.keys.candidate_present)
+            shiftRange(result.lph_dollar_schema.keys.evidence_range);
+    }
     for (Diagnostic& diagnostic : result.diagnostics)
         shiftSourceRange(diagnostic.range, offset);
 }
@@ -2270,14 +2815,10 @@ EnvelopeAnalysis analyzeEnvelope(std::string_view source, const AnalysisLimits& 
     const std::string_view protectedSource = source.substr(bodyOffset);
     result.luaauth_launcher = launcher;
     result.banner = inspectBanner(protectedSource);
-    const bool luaAuthDollarCarrier = launcher.present && protectedSource.find("LPH$") != std::string_view::npos;
-    result.version_supported = result.banner.version == "14.7" || luaAuthDollarCarrier;
+    result.version_supported = result.banner.version == "14.7";
     if (result.banner.exact_product_marker && !result.version_supported)
         addDiagnostic(result, limits, DiagnosticSeverity::Warning, "UNSUPPORTED_VERSION", "A Luraph banner was found, but its version is not the supported 14.7 envelope.",
             result.banner.range);
-    if (launcher.present && !luaAuthDollarCarrier)
-        addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LUAAUTH_CARRIER_UNSUPPORTED",
-            "A LuaAuth launcher was recognized, but its protected body does not contain the supported LPH$ carrier.");
 
     LexResult lexed = lex(protectedSource, result, limits);
     result.counts.token_count = lexed.tokens.size();
@@ -2303,6 +2844,40 @@ EnvelopeAnalysis analyzeEnvelope(std::string_view source, const AnalysisLimits& 
         result.wrapper = inspectWrapper(protectedSource, lexed.tokens, matches);
     result.complete = lexed.complete && delimitersBalanced;
     decodeCarrierLiterals(protectedSource, lexed.tokens, result, limits);
+    const bool decodedDollarCarrier = std::any_of(result.containers.begin(), result.containers.end(), [](const ContainerAnalysis& container) {
+        return container.marker == '$' && container.decode_status == ContainerDecodeStatus::Decoded;
+    });
+    const bool decodedAmpersandCarrier = std::any_of(result.containers.begin(), result.containers.end(), [](const ContainerAnalysis& container) {
+        return container.marker == '&' && container.decode_status == ContainerDecodeStatus::Decoded;
+    });
+    if (decodedDollarCarrier && launcher.present)
+    {
+        result.family_kind = FamilyKind::LuaAuthLphDollar;
+        result.version_supported = true; // Legacy adapter-capability flag used by the runtime probe pipeline.
+        result.support_level = result.lph_dollar_schema.detected
+            ? SupportLevel::StructuralSchemaRecovered : SupportLevel::TransportDecoded;
+    }
+    else if (decodedAmpersandCarrier && result.banner.version == "14.7")
+    {
+        result.family_kind = FamilyKind::Luraph147LphAmpersand;
+        result.support_level = result.container_metrics.parsed_count > 0
+            ? SupportLevel::StructuralSchemaRecovered : SupportLevel::TransportDecoded;
+    }
+    else if (result.banner.exact_product_marker && result.banner.version == "14.7")
+    {
+        result.family_kind = FamilyKind::Luraph147LphAmpersand;
+        result.support_level = SupportLevel::EnvelopeRecognized;
+    }
+    else if (result.generated_interpreter)
+    {
+        result.family_kind = FamilyKind::InterpreterLike;
+        result.support_level = SupportLevel::EnvelopeRecognized;
+    }
+    else if (result.banner.present || launcher.present)
+        result.support_level = SupportLevel::EnvelopeRecognized;
+    if (launcher.present && !decodedDollarCarrier)
+        addDiagnostic(result, limits, DiagnosticSeverity::Warning, "LUAAUTH_CARRIER_UNSUPPORTED",
+            "A LuaAuth launcher was recognized, but no decoded leading LPH$ carrier was proven.");
     shiftBodyRanges(result, bodyOffset);
     if (launcher.present)
         addDiagnostic(result, limits, DiagnosticSeverity::Info, "LUAAUTH_LAUNCHER_REMOVED",
@@ -2414,6 +2989,18 @@ std::string_view toString(ReaderValueKind kind)
     case ReaderValueKind::UnsignedInteger: return "unsigned_integer";
     case ReaderValueKind::SignedInteger: return "signed_integer";
     case ReaderValueKind::FloatingPoint: return "floating_point";
+    case ReaderValueKind::ByteString: return "byte_string";
+    }
+    return "unknown";
+}
+
+std::string_view toString(ReaderEvidenceKind kind)
+{
+    switch (kind)
+    {
+    case ReaderEvidenceKind::IdentifierHint: return "identifier_hint";
+    case ReaderEvidenceKind::RuntimeMemberBinding: return "runtime_member_binding";
+    case ReaderEvidenceKind::BodyVerified: return "body_verified";
     }
     return "unknown";
 }
@@ -2450,6 +3037,7 @@ std::string_view toString(ContainerParseStatus status)
     {
     case ContainerParseStatus::NotAttempted: return "not_attempted";
     case ContainerParseStatus::Parsed: return "parsed";
+    case ContainerParseStatus::StructuralMetadataRecovered: return "structural_metadata_recovered";
     case ContainerParseStatus::UnsupportedSchema: return "unsupported_schema";
     case ContainerParseStatus::Truncated: return "truncated";
     case ContainerParseStatus::UlebOverflow: return "uleb_overflow";
@@ -2458,6 +3046,46 @@ std::string_view toString(ContainerParseStatus status)
     case ContainerParseStatus::CountLimitExceeded: return "count_limit_exceeded";
     case ContainerParseStatus::SignedFoldOverflow: return "signed_fold_overflow";
     case ContainerParseStatus::TrailerLimitExceeded: return "trailer_limit_exceeded";
+    }
+    return "unknown";
+}
+
+std::string_view toString(FamilyKind kind)
+{
+    switch (kind)
+    {
+    case FamilyKind::Unknown: return "unknown";
+    case FamilyKind::Luraph147LphAmpersand: return "luraph_14_7_lph_ampersand";
+    case FamilyKind::LuaAuthLphDollar: return "luaauth_lph_dollar";
+    case FamilyKind::InterpreterLike: return "interpreter_like";
+    }
+    return "unknown";
+}
+
+std::string_view toString(SupportLevel level)
+{
+    switch (level)
+    {
+    case SupportLevel::None: return "none";
+    case SupportLevel::EnvelopeRecognized: return "envelope_recognized";
+    case SupportLevel::TransportDecoded: return "transport_decoded";
+    case SupportLevel::StructuralSchemaRecovered: return "structural_schema_recovered";
+    }
+    return "unknown";
+}
+
+std::string_view toString(RecordLaneKind kind)
+{
+    switch (kind)
+    {
+    case RecordLaneKind::ConstantPoolMode: return "constant_pool_mode";
+    case RecordLaneKind::ConstantCount: return "constant_count";
+    case RecordLaneKind::ConstantTag: return "constant_tag";
+    case RecordLaneKind::ConstantPayload: return "constant_payload";
+    case RecordLaneKind::PrototypeCount: return "prototype_count";
+    case RecordLaneKind::PrototypeRecord: return "prototype_record";
+    case RecordLaneKind::RelocationTriple: return "relocation_triple";
+    case RecordLaneKind::RootSelector: return "root_selector";
     }
     return "unknown";
 }

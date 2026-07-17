@@ -93,6 +93,12 @@ def classify_bytes(data: bytes, filename: str = "") -> str:
 def detect_adapter(source: str) -> tuple[str, list[dict[str, Any]]]:
     lower = source[:250000].lower()
     scores = {
+        "luraph": (
+            3 * ("lph$" in lower)
+            + 2 * ("luaauth" in lower)
+            + ("la_script_id" in lower)
+            + ("do not modify this script" in lower and "return({" in lower)
+        ),
         "wynfuscate": sum(token in lower for token in ("wynfuscate", "local md=", "local md =", "keytxt_auth")),
         "moonveil": sum(token in lower for token in ("moonveil", "mv2", "ascii85", "z85")),
         "wearedevs": sum(token in lower for token in ("wearedevs.net/obfuscator", "wearedevs", "return(function(...)")),
@@ -375,7 +381,22 @@ class AutoDeobfuscator:
             self.ingest_adapter_artifacts(adapter_dir)
             return
         command: list[str] | None = None
-        if self.adapter == "wynfuscate":
+        native_report = adapter_dir / "native-report.json"
+        if self.adapter == "luraph":
+            if not self.args.deobfuscator.is_file():
+                self.adapter_runs.append({
+                    "adapter": self.adapter,
+                    "exit_code": None,
+                    "diagnostic": "native_deobfuscator_missing",
+                })
+                return
+            command = [
+                str(self.args.deobfuscator), str(self.input_path),
+                "--output-dir", str(adapter_dir),
+                "--mode", self.args.mode,
+                "--report", str(native_report),
+            ]
+        elif self.adapter == "wynfuscate":
             command = [sys.executable, str(ROOT / "tools" / "wynfuscate_deobfuscator.py"), str(self.input_path), "--out-root", str(adapter_dir)]
         elif self.adapter == "moonveil":
             command = [
@@ -387,7 +408,24 @@ class AutoDeobfuscator:
             return
         try:
             result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.args.wall_timeout + 20)
-            self.adapter_runs.append({"adapter": self.adapter, "exit_code": result.returncode, "output_dir": str(adapter_dir.relative_to(self.output_dir))})
+            summary: dict[str, Any] = {
+                "adapter": self.adapter,
+                "exit_code": result.returncode,
+                "output_dir": str(adapter_dir.relative_to(self.output_dir)),
+            }
+            if native_report.is_file():
+                try:
+                    native = json.loads(native_report.read_text(encoding="utf-8"))
+                    summary.update({
+                        "native_adapter": native.get("adapter"),
+                        "native_status": native.get("status"),
+                        "native_backend": native.get("backend"),
+                        "coverage": native.get("coverage"),
+                        "diagnostics": native.get("diagnostics", []),
+                    })
+                except json.JSONDecodeError:
+                    summary["diagnostic"] = "native_report_invalid"
+            self.adapter_runs.append(summary)
         except subprocess.TimeoutExpired:
             self.adapter_runs.append({"adapter": self.adapter, "exit_code": None, "timed_out": True})
             return
@@ -620,9 +658,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("auto", "exact", "reconstruct", "disassemble"), default="auto")
     parser.add_argument("--runtime", type=Path, default=ROOT / "build" / "rbx_luau_runtime")
     parser.add_argument("--alexfuscator", type=Path, default=ROOT / "build" / "alexfuscator")
+    parser.add_argument("--deobfuscator", type=Path, default=ROOT / "build" / "alex_deobfuscator")
     parser.add_argument("--profile", choices=("roblox-client", "executor-client"), default="executor-client")
     parser.add_argument("--scenario", type=Path)
-    parser.add_argument("--adapter", choices=("auto", "generic", "alexfuscator", "moonveil", "wynfuscate", "wearedevs"), default="auto")
+    parser.add_argument("--adapter", choices=("auto", "generic", "alexfuscator", "luraph", "moonveil", "wynfuscate", "wearedevs"), default="auto")
     parser.add_argument("--max-passes", type=int, default=6)
     parser.add_argument("--wall-timeout", type=float, default=10.0)
     parser.add_argument("--instruction-budget", type=int, default=10_000_000)

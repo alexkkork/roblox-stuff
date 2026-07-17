@@ -6761,7 +6761,8 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
     uint64_t fullTraceStart = 0,
     uint64_t fullTraceEnd = 0,
     std::string* failureReason = nullptr,
-    bool structureDump = false)
+    bool structureDump = false,
+    bool dynamicEvidence = false)
 {
     const auto fail = [&](std::string_view reason) -> std::optional<std::string> {
         if (failureReason)
@@ -6867,7 +6868,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "__alex_lph_parts[#__alex_lph_parts+1]=" + quoteLuau(lane + "=") + "..__alex_lph_encoded;end;";
         }
         instrumentation += "local __alex_lph_runtime_opcode=rawget(" + opcodeTableName + ",__alex_lph_ip);print(\"@@LPH_INSN_V1@@\",__alex_lph_pid,__alex_lph_ip,__alex_lph_runtime_opcode,table.concat(__alex_lph_parts,\"|\"));end;end;";
-        if (fullTraceEnabled)
+        if (dynamicEvidence && fullTraceEnabled)
         {
             instrumentation += "if _G.__vmc>=" + std::to_string(fullTraceStart) +
                 " and _G.__vmc<=" + std::to_string(fullTraceEnd) +
@@ -6895,6 +6896,27 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         }
         else
             instrumentation += "end;";
+    }
+
+    if (!structureDump && dynamicEvidence && fullTraceEnabled)
+    {
+        instrumentation += "local __alex_lph_seen=_G.__alex_lph_proto_seen;if type(__alex_lph_seen)~=\"table\" then __alex_lph_seen=setmetatable({},{__mode=\"k\"});_G.__alex_lph_proto_seen=__alex_lph_seen;end;";
+        instrumentation += "if type(" + opcodeTableName + ")==\"table\" then local __alex_lph_pid=__alex_lph_seen[" + opcodeTableName + "];if __alex_lph_pid==nil then _G.__alex_lph_proto_count=(_G.__alex_lph_proto_count or 0)+1;__alex_lph_pid=_G.__alex_lph_proto_count;__alex_lph_seen[" + opcodeTableName + "]=__alex_lph_pid;end;";
+        instrumentation += "if _G.__vmc>=" + std::to_string(fullTraceStart) +
+            " and _G.__vmc<=" + std::to_string(fullTraceEnd) +
+            " and not __alex_lph_structure_announced then local __alex_lph_activation_args={};";
+        instrumentation += R"LURAPH_ARGS(local function __alex_lph_hex(__alex_lph_text)local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_text do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_text,__alex_lph_byte));end;return table.concat(__alex_lph_bytes);end;local function __alex_lph_encode_activation_arg(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then return "s:"..__alex_lph_hex(__alex_lph_value);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";return "f:"..__alex_lph_hex(__alex_lph_name);else return "x:"..__alex_lph_kind;end;end;for __alex_lph_arg_index=1,math.min(__argCount,16) do __alex_lph_activation_args[__alex_lph_arg_index]=__alex_lph_encode_activation_arg(rawget(__alex_lph_args,__alex_lph_arg_index));end;)LURAPH_ARGS";
+        instrumentation += "_G.__alex_lph_activation_rows=(_G.__alex_lph_activation_rows or 0)+1;if _G.__alex_lph_activation_rows<=" + std::to_string(kLuraphActivationTraceRowLimit) + " then print(\"@@LPH_ACT_PROTO_V1@@\",__aid,__alex_lph_pid,__callerAid,__callerPc,__callerOp,__argCount," + pcName + ",table.concat(__alex_lph_activation_args,\"|\"),_G.__vmc);elseif _G.__alex_lph_activation_rows==" + std::to_string(kLuraphActivationTraceRowLimit + 1) + " then print(\"@@LPH_ACT_PROTO_LIMIT_V1@@\"," + std::to_string(kLuraphActivationTraceRowLimit) + ",_G.__vmc);end;__alex_lph_structure_announced=true;end;end;";
+        instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
+        instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};";
+        instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+        for (const std::string& lane : laneNames)
+        {
+            instrumentation += "do local __alex_lph_operand=type(" + lane + ")==\"table\" and rawget(" + lane + ",__alex_lph_pre_pc) or nil;";
+            instrumentation += "__alex_lph_pre_lanes[#__alex_lph_pre_lanes+1]=" + quoteLuau(lane + "=") + "..__alex_lph_encode_operand(__alex_lph_operand);end;";
+        }
+        instrumentation += "if __alex_lph_step_enabled and type(" + registersName + ")==\"table\" then for __alex_lph_key,__alex_lph_value in " + registersName + " do ";
+        instrumentation += "if type(__alex_lph_key)==\"number\" and __alex_lph_key%1==0 and __alex_lph_key>=-200000 and __alex_lph_key<=200000 then __alex_lph_pre_regs[__alex_lph_key]=__alex_lph_value;end;end;end;";
     }
 
     // Pure structure probes only need each prototype once. Call discovery is retained
@@ -6942,26 +6964,26 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         std::string text;
     };
     std::vector<ProbeInsertion> insertions;
-    if (structureDump && fullTraceEnabled)
+    if (dynamicEvidence && fullTraceEnabled)
     {
         if (dispatcherBodyEnd < fetchEnd || dispatcherBodyEnd > source.size())
             return fail("post_injection_offset_invalid");
         std::string postInstrumentation = " if __alex_lph_step_enabled then ";
-        postInstrumentation += "local __alex_lph_writes={};local __alex_lph_seen_keys={};";
+        postInstrumentation += "local __alex_lph_writes={};local __alex_lph_origins={};local __alex_lph_seen_keys={};";
         postInstrumentation += "local function __alex_lph_encode_value(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);";
         postInstrumentation += R"LURAPH_STEP(if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_STEP";
         postInstrumentation += "if type(" + registersName + ")==\"table\" then for __alex_lph_key,__alex_lph_value in " + registersName + " do ";
         postInstrumentation += "if type(__alex_lph_key)==\"number\" and __alex_lph_key%1==0 and __alex_lph_key>=-200000 and __alex_lph_key<=200000 then __alex_lph_seen_keys[__alex_lph_key]=true;";
-        postInstrumentation += "if not rawequal(rawget(__alex_lph_pre_regs,__alex_lph_key),__alex_lph_value) then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=\"..__alex_lph_encode_value(__alex_lph_value);end;end;end;";
+        postInstrumentation += "if not rawequal(rawget(__alex_lph_pre_regs,__alex_lph_key),__alex_lph_value) then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=\"..__alex_lph_encode_value(__alex_lph_value);local __alex_lph_matches={};if __alex_lph_value~=nil then for __alex_lph_source,__alex_lph_source_value in __alex_lph_pre_regs do if __alex_lph_source~=__alex_lph_key and rawequal(__alex_lph_source_value,__alex_lph_value) then __alex_lph_matches[#__alex_lph_matches+1]=\"r:\"..tostring(__alex_lph_source);if #__alex_lph_matches>=2 then break;end;end;end;if #__alex_lph_matches<2 then for __alex_lph_argument=1,__argCount do if rawequal(rawget(__alex_lph_args,__alex_lph_argument),__alex_lph_value) then __alex_lph_matches[#__alex_lph_matches+1]=\"a:\"..tostring(__alex_lph_argument);if #__alex_lph_matches>=2 then break;end;end;end;end;end;if #__alex_lph_matches>0 then table.sort(__alex_lph_matches);__alex_lph_origins[#__alex_lph_origins+1]=tostring(__alex_lph_key)..\"=\"..table.concat(__alex_lph_matches,\",\");end;end;end;end;";
         postInstrumentation += "for __alex_lph_key,__alex_lph_value in __alex_lph_pre_regs do if not __alex_lph_seen_keys[__alex_lph_key] and rawget(" + registersName + ",__alex_lph_key)==nil then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=z:\";end;end;end;";
-        postInstrumentation += "table.sort(__alex_lph_writes);print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"));end;";
+        postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
         insertions.push_back({dispatcherBodyEnd, 0, std::move(postInstrumentation)});
     }
     insertions.push_back({fetchEnd, 0, std::move(instrumentation)});
     std::string activation = std::string(
         "local __callerAid,__callerPc,__callerOp=_G.__curAid,_G.__curPc,_G.__curOp;"
         "_G.__lph_a=(_G.__lph_a or 0)+1;local __aid=_G.__lph_a;local __argCount=select(\"#\",...);local __alex_lph_args={...};");
-    if (structureDump && fullTraceEnabled)
+    if (dynamicEvidence && fullTraceEnabled)
     {
         std::string returnTracer = R"LURAPH_RETURN(do local function __alex_lph_encode_return(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;_G.__alex_lph_trace_return=function(__alex_lph_vm_count,__alex_lph_activation,__alex_lph_return_pc,__alex_lph_return_op,...)local __alex_lph_return_count=select("#",...);if __alex_lph_vm_count>=)LURAPH_RETURN";
         returnTracer += std::to_string(fullTraceStart);
@@ -6999,7 +7021,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             }
         }
     }
-    if (structureDump && fullTraceEnabled)
+    if (dynamicEvidence && fullTraceEnabled)
         activation += "local __alex_lph_structure_announced=false;";
     insertions.push_back({functionBodyOffset, 0, std::move(activation)});
     std::sort(insertions.begin(), insertions.end(), [](const ProbeInsertion& left, const ProbeInsertion& right) {
@@ -7356,7 +7378,87 @@ struct LuraphRuntimeStructureTrace
     size_t malformed_rows = 0;
     std::map<std::string, size_t> malformed_row_kinds;
     bool complete = false;
+    bool structure_reused = false;
 };
+
+std::optional<LuraphRuntimeStructureTrace> loadLuraphRuntimeStructureSeed(
+    const fs::path& path,
+    std::string_view expectedSourceHash)
+{
+    if (!fs::exists(path))
+        return std::nullopt;
+    json artifact;
+    try
+    {
+        artifact = json::parse(readFile(path));
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+    if (!artifact.is_object() || artifact.value("version", 0) != 1 ||
+        artifact.value("kind", "") != "luraph-runtime-decoded-prototypes" ||
+        artifact.value("source_sha256", "") != expectedSourceHash ||
+        !artifact.value("complete", false) || !artifact.contains("prototypes") ||
+        !artifact["prototypes"].is_array())
+        return std::nullopt;
+
+    LuraphRuntimeStructureTrace seed;
+    for (const json& row : artifact["prototypes"])
+    {
+        if (!row.is_object() || !row.contains("runtime_id") || !row["runtime_id"].is_number_unsigned() ||
+            !row.contains("declared_instruction_count") || !row["declared_instruction_count"].is_number_unsigned() ||
+            !row.contains("instructions") || !row["instructions"].is_array())
+            return std::nullopt;
+        const uint64_t id = row["runtime_id"].get<uint64_t>();
+        const size_t declared = row["declared_instruction_count"].get<size_t>();
+        if (id == 0 || declared > 200000 || row["instructions"].size() != declared)
+            return std::nullopt;
+        LuraphRuntimePrototype prototype;
+        prototype.id = id;
+        prototype.declared_instruction_count = declared;
+        if (row.contains("lane_names") && row["lane_names"].is_array())
+            for (const json& lane : row["lane_names"])
+            {
+                if (!lane.is_string())
+                    return std::nullopt;
+                const std::string name = lane.get<std::string>();
+                if (name.empty() || !isIdentifierStart(name.front()) ||
+                    !std::all_of(name.begin() + 1, name.end(), isIdentifier))
+                    return std::nullopt;
+                prototype.lane_names.push_back(name);
+            }
+        for (const json& instruction : row["instructions"])
+        {
+            if (!instruction.is_object() || !instruction.contains("pc") || !instruction["pc"].is_number_unsigned())
+                return std::nullopt;
+            const size_t pc = instruction["pc"].get<size_t>();
+            if (pc == 0 || pc > declared || prototype.instructions.contains(pc))
+                return std::nullopt;
+            prototype.instructions[pc] = instruction;
+        }
+        seed.instruction_count += prototype.instructions.size();
+        seed.prototypes[id] = std::move(prototype);
+    }
+    if (seed.prototypes.empty() || seed.instruction_count != artifact.value("instruction_count", size_t(0)))
+        return std::nullopt;
+
+    if (artifact.contains("closure_descriptors") && artifact["closure_descriptors"].is_array())
+        for (const json& descriptor : artifact["closure_descriptors"])
+        {
+            if (!descriptor.is_object() || !descriptor.contains("prototype") || !descriptor["prototype"].is_number_unsigned() ||
+                !descriptor.contains("pc") || !descriptor["pc"].is_number_unsigned())
+                continue;
+            seed.closure_descriptors[{descriptor["prototype"].get<uint64_t>(), descriptor["pc"].get<size_t>()}] = descriptor;
+        }
+    if (artifact.contains("observed_capture_domains") && artifact["observed_capture_domains"].is_array())
+        for (const json& domain : artifact["observed_capture_domains"])
+            if (domain.is_object() && domain.contains("prototype") && domain["prototype"].is_number_unsigned())
+                seed.capture_domains[domain["prototype"].get<uint64_t>()] = domain;
+    seed.complete = true;
+    seed.structure_reused = true;
+    return seed;
+}
 
 std::optional<uint64_t> luraphTraceObjectId(std::string_view encoded)
 {
@@ -7443,9 +7545,19 @@ std::optional<std::string> luraphClosureDestinationLane(const LuraphOpcodeCatalo
 
 LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     const fs::path& path,
-    const LuraphOpcodeCatalog& catalog)
+    const LuraphOpcodeCatalog& catalog,
+    const LuraphRuntimeStructureTrace* structureSeed = nullptr)
 {
-    LuraphRuntimeStructureTrace trace;
+    LuraphRuntimeStructureTrace trace = structureSeed ? *structureSeed : LuraphRuntimeStructureTrace{};
+    if (structureSeed)
+    {
+        trace.activations.clear();
+        trace.vm_events.clear();
+        trace.steps.clear();
+        trace.returns.clear();
+        trace.malformed_rows = 0;
+        trace.malformed_row_kinds.clear();
+    }
     std::string parsePhase = "initialize";
     try
     {
@@ -7969,6 +8081,66 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 markMalformed();
                 continue;
             }
+            json writeOrigins = json::object();
+            if (fields.size() >= 10 && !fields[9].empty())
+            {
+                std::set<int64_t> writtenRegisters;
+                for (const json& write : writes)
+                    if (write.contains("register") && write["register"].is_number_integer())
+                        writtenRegisters.insert(write["register"].get<int64_t>());
+                size_t begin = 0;
+                while (begin <= fields[9].size())
+                {
+                    const size_t end = fields[9].find('|', begin);
+                    const std::string_view item(fields[9].data() + begin,
+                        (end == std::string::npos ? fields[9].size() : end) - begin);
+                    const size_t equal = item.find('=');
+                    const std::optional<int64_t> destination = equal == std::string_view::npos
+                        ? std::nullopt : parseTraceInteger<int64_t>(item.substr(0, equal));
+                    if (!destination || !writtenRegisters.contains(*destination) || equal + 1 >= item.size())
+                    {
+                        valid = false;
+                        break;
+                    }
+                    json candidates = json::array();
+                    size_t candidateBegin = equal + 1;
+                    while (candidateBegin <= item.size())
+                    {
+                        const size_t candidateEnd = item.find(',', candidateBegin);
+                        const std::string_view token = item.substr(candidateBegin,
+                            (candidateEnd == std::string_view::npos ? item.size() : candidateEnd) - candidateBegin);
+                        if (token.size() < 3 || token[1] != ':' || (token[0] != 'r' && token[0] != 'a'))
+                        {
+                            valid = false;
+                            break;
+                        }
+                        const std::optional<int64_t> index = parseTraceInteger<int64_t>(token.substr(2));
+                        if (!index || (token[0] == 'a' && *index <= 0) || *index < -200000 || *index > 200000)
+                        {
+                            valid = false;
+                            break;
+                        }
+                        candidates.push_back({{"kind", token[0] == 'r' ? "register" : "argument"}, {"index", *index}});
+                        if (candidateEnd == std::string_view::npos)
+                            break;
+                        candidateBegin = candidateEnd + 1;
+                    }
+                    if (!valid || candidates.empty() || candidates.size() > 2)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    writeOrigins[std::to_string(*destination)] = std::move(candidates);
+                    if (end == std::string::npos)
+                        break;
+                    begin = end + 1;
+                }
+            }
+            if (!valid)
+            {
+                markMalformed();
+                continue;
+            }
             trace.steps.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -7977,6 +8149,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"next_pc", *nextPc},
                 {"register_writes", std::move(writes)},
                 {"runtime_lanes", std::move(runtimeLanes)},
+                {"write_origins", std::move(writeOrigins)},
             });
             continue;
         }
@@ -8234,7 +8407,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     }
 }
 
-json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace)
+json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace, std::string_view sourceHash)
 {
     json prototypes = json::array();
     for (const auto& [id, prototype] : trace.prototypes)
@@ -8300,6 +8473,8 @@ json luraphRuntimeStructureArtifact(const LuraphRuntimeStructureTrace& trace)
         {"version", 1},
         {"kind", "luraph-runtime-decoded-prototypes"},
         {"scope", "reachable-prototypes-observed-offline"},
+        {"source_sha256", sourceHash},
+        {"structure_reused", trace.structure_reused},
         {"complete", trace.complete},
         {"malformed_rows", trace.malformed_rows},
         {"malformed_row_kinds", trace.malformed_row_kinds},
@@ -11437,7 +11612,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     };
 
     auto buildTraceProbe = [&](uint64_t rangeStart = 0, uint64_t rangeEnd = 0, std::string* generator = nullptr,
-                               std::string* failureReason = nullptr, bool includeStructure = false) -> std::optional<std::string> {
+                               std::string* failureReason = nullptr, bool includeStructure = false,
+                               bool includeDynamicEvidence = false) -> std::optional<std::string> {
         if (!analysis.version_supported && !analysis.generated_interpreter)
         {
             if (failureReason)
@@ -11446,7 +11622,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         }
         std::string structuralFailure;
         if (std::optional<std::string> structural = buildStructuralLuraphTraceProbe(
-                protectedSource, rangeStart, rangeEnd, &structuralFailure, includeStructure))
+                protectedSource, rangeStart, rangeEnd, &structuralFailure, includeStructure, includeDynamicEvidence))
         {
             if (compiles(*structural))
             {
@@ -11492,7 +11668,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     std::string structureProbeFailure;
     const std::optional<std::string> structureProbe = (analysis.version_supported || analysis.generated_interpreter)
         ? buildStructuralLuraphTraceProbe(
-            protectedSource, requestedTraceStart, requestedTraceEnd, &structureProbeFailure, true)
+            protectedSource, requestedTraceStart, requestedTraceEnd, &structureProbeFailure, true, true)
         : std::nullopt;
     const bool structureProbeCompiled = structureProbe && compiles(*structureProbe);
     json structureProbeDiagnostics = json::array();
@@ -11560,9 +11736,12 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
+        const std::optional<LuraphRuntimeStructureTrace> structureSeed =
+            loadLuraphRuntimeStructureSeed(runtimePrototypesPath, sha256(protectedSource));
         try
         {
-            parsedStructure = parseLuraphRuntimeStructureTrace(*options.trace, opcodeCatalog);
+            parsedStructure = parseLuraphRuntimeStructureTrace(
+                *options.trace, opcodeCatalog, structureSeed ? &*structureSeed : nullptr);
         }
         catch (const std::exception& error)
         {
@@ -11573,7 +11752,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             runtimeStructure = std::move(parsedStructure);
             if (!runtimeStructure->prototypes.empty())
             {
-                writeJson(runtimePrototypesPath, luraphRuntimeStructureArtifact(*runtimeStructure));
+                writeJson(runtimePrototypesPath, luraphRuntimeStructureArtifact(*runtimeStructure, sha256(protectedSource)));
                 try
                 {
                     runtimeSemanticDocument = luraphRuntimeSemanticDispatchArtifact(
@@ -11596,6 +11775,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"observed_steps", runtimeStructure->steps.size()},
                 {"malformed_rows", runtimeStructure->malformed_rows},
                 {"complete", runtimeStructure->complete},
+                {"structure_reused", runtimeStructure->structure_reused},
                 {"semantic_classification_complete", false},
             });
             report["passes"].push_back({
@@ -11726,7 +11906,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 : lastCall + 512;
             std::string refinedProbeGenerator;
             const std::optional<std::string> refinedProbe = buildTraceProbe(
-                rangeStart, rangeEnd, &refinedProbeGenerator, nullptr, true);
+                rangeStart, rangeEnd, &refinedProbeGenerator, nullptr, !runtimeDecoded, true);
             traceRefinementRequired = refinedProbe.has_value();
             if (traceRefinementRequired)
             {
@@ -11737,6 +11917,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"range_start", rangeStart},
                     {"range_end", rangeEnd},
                     {"generator", refinedProbeGenerator},
+                    {"evidence_mode", runtimeDecoded ? "dynamic-only" : "structure-and-dynamic"},
+                    {"structure_reused", runtimeDecoded},
                     {"reason", "payload_activation_boundary_required"},
                 });
                 report["diagnostics"].push_back({
@@ -11756,7 +11938,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 : hotspot + 4096;
             std::string refinedProbeGenerator;
             const std::optional<std::string> refinedProbe = buildTraceProbe(
-                rangeStart, rangeEnd, &refinedProbeGenerator, nullptr, true);
+                rangeStart, rangeEnd, &refinedProbeGenerator, nullptr, !runtimeDecoded, true);
             traceRefinementRequired = refinedProbe.has_value();
             if (traceRefinementRequired)
             {
@@ -11767,6 +11949,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"range_start", rangeStart},
                     {"range_end", rangeEnd},
                     {"generator", refinedProbeGenerator},
+                    {"evidence_mode", runtimeDecoded ? "dynamic-only" : "structure-and-dynamic"},
+                    {"structure_reused", runtimeDecoded},
                     {"reason", "unconfirmed_call_hotspot_boundary"},
                 });
                 report["diagnostics"].push_back({
