@@ -13810,6 +13810,8 @@ json luraphReachablePayloadIrArtifact(
     }
 
     json payloadActivationArguments = nullptr;
+    json rootArgumentTablePrototypes = json::array();
+    json rootArgumentTableIdentity = nullptr;
     const json payloadRoot = payloadClosure.value("payload_root", json(nullptr));
     const uint64_t payloadActivation = payloadRoot.is_object()
         ? payloadRoot.value("payload_activation", uint64_t(0)) : uint64_t(0);
@@ -13820,6 +13822,50 @@ json luraphReachablePayloadIrArtifact(
                 payloadActivationArguments = activation;
                 break;
             }
+    if (payloadActivationArguments.is_object() &&
+        !payloadActivationArguments.value("argument_object_conflict", false) &&
+        payloadActivationArguments.contains("argument_objects") &&
+        payloadActivationArguments["argument_objects"].is_array())
+    {
+        std::optional<uint64_t> rootObjectId;
+        for (const json& object : payloadActivationArguments["argument_objects"])
+            if (object.is_object() && object.value("argument_index", size_t(0)) == 1 &&
+                object.contains("object_id") && object["object_id"].is_number_unsigned())
+            {
+                const uint64_t objectId = object["object_id"].get<uint64_t>();
+                if (objectId > 0 && !rootObjectId)
+                    rootObjectId = objectId;
+                else if (objectId == 0 || (rootObjectId && *rootObjectId != objectId))
+                {
+                    rootObjectId.reset();
+                    break;
+                }
+            }
+        if (rootObjectId && payloadClosure.contains("activations") && payloadClosure["activations"].is_array())
+        {
+            std::set<uint64_t> sharedPrototypes;
+            for (const json& activation : payloadClosure["activations"])
+            {
+                if (!activation.is_object() || activation.value("argument_object_conflict", false) ||
+                    !activation.contains("argument_objects") || !activation["argument_objects"].is_array())
+                    continue;
+                for (const json& object : activation["argument_objects"])
+                    if (object.is_object() && object.value("argument_index", size_t(0)) == 1 &&
+                        object.value("object_id", uint64_t(0)) == *rootObjectId)
+                        sharedPrototypes.insert(activation.value("prototype", uint64_t(0)));
+            }
+            sharedPrototypes.erase(0);
+            for (uint64_t prototype : sharedPrototypes)
+                rootArgumentTablePrototypes.push_back(prototype);
+            rootArgumentTableIdentity = {
+                {"object_id", *rootObjectId},
+                {"argument_index", 1},
+                {"prototype_count", sharedPrototypes.size()},
+                {"evidence", "runtime_table_object_identity"},
+                {"complete_for_listed_prototypes", true},
+            };
+        }
+    }
 
     return {
         {"version", 1},
@@ -13827,6 +13873,8 @@ json luraphReachablePayloadIrArtifact(
         {"scope", "entry-reachable-instructions-only"},
         {"payload_root", payloadRoot},
         {"payload_activation_arguments", std::move(payloadActivationArguments)},
+        {"root_argument_table_identity", std::move(rootArgumentTableIdentity)},
+        {"root_argument_table_prototypes", std::move(rootArgumentTablePrototypes)},
         {"prototype_count", prototypes.size()},
         {"instruction_count", instructionCount},
         {"source_semantic_instructions", instructionCount - protectorInstructions},
@@ -15549,6 +15597,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"unobserved_branch_arms", semanticCandidate->unobserved_branch_arms},
             {"runtime_specializations", semanticCandidate->runtime_specializations},
             {"inferred_root_slots", semanticCandidate->inferred_root_slots},
+            {"root_argument_shared_prototypes", semanticCandidate->root_argument_shared_prototypes},
             {"root_argument_references_specialized", semanticCandidate->root_argument_references_specialized},
             {"absent_root_argument_references_specialized", semanticCandidate->absent_root_argument_references_specialized},
             {"root_argument_table_complete", semanticCandidate->root_argument_table_complete},
@@ -15684,6 +15733,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"runtime_specializations", semanticCandidate->runtime_specializations},
             {"direct_prototype_calls", semanticCandidate->direct_prototype_calls},
             {"inferred_root_slots", semanticCandidate->inferred_root_slots},
+            {"root_argument_shared_prototypes", semanticCandidate->root_argument_shared_prototypes},
             {"root_argument_references_specialized", semanticCandidate->root_argument_references_specialized},
             {"absent_root_argument_references_specialized", semanticCandidate->absent_root_argument_references_specialized},
             {"root_argument_table_complete", semanticCandidate->root_argument_table_complete},

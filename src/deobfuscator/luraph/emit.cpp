@@ -760,6 +760,7 @@ private:
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> captureClosureTargets;
     uint64_t rootPrototype = 0;
     std::map<int64_t, std::string> rootArgumentExpressions;
+    std::set<uint64_t> rootArgumentPrototypes;
     bool rootArgumentTableComplete = false;
     bool rootCallFrameSpecialized = false;
     std::set<std::tuple<uint64_t, size_t, int64_t>> remappedCaptureSites;
@@ -951,6 +952,17 @@ private:
     {
         const json payloadRoot = reachableIr.value("payload_root", json::object());
         rootPrototype = positiveUnsignedField(payloadRoot, "payload_prototype");
+        if (rootPrototype > 0)
+            rootArgumentPrototypes.insert(rootPrototype);
+        if (reachableIr.contains("root_argument_table_prototypes") &&
+            reachableIr["root_argument_table_prototypes"].is_array())
+            for (const json& prototype : reachableIr["root_argument_table_prototypes"])
+            {
+                const std::optional<uint64_t> prototypeId = nonnegativeInteger(prototype);
+                if (prototypeId && *prototypeId > 0)
+                    rootArgumentPrototypes.insert(*prototypeId);
+            }
+        result.root_argument_shared_prototypes = rootArgumentPrototypes.size();
         const json payloadArguments = reachableIr.value("payload_activation_arguments", json(nullptr));
         if (rootPrototype == 0 || !payloadArguments.is_object() ||
             !payloadArguments.contains("argument_table_entries") ||
@@ -2739,7 +2751,7 @@ private:
             const json index = value.value("index", json::object());
             if (table.is_object() && table.value("kind", "") == "upvalue_file")
                 return captureCellExpression(index, context, depth + 1);
-            if (context.prototype == rootPrototype && table.is_object() &&
+            if (rootArgumentPrototypes.contains(context.prototype) && table.is_object() &&
                 table.value("kind", "") == "register_read")
             {
                 const std::optional<int64_t> tableRegister = integerValue(table.value("index", json::object()));

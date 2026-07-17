@@ -361,7 +361,8 @@ SemanticCandidate emitWithTarget(json targetInstructions, int targetCaptureCount
     json extraPrototypes = json::array(), json extraCfg = json::array(),
     json observedLaneSequences = json::array(), json targetCfg = json(nullptr),
     json observedCaptureDomains = json::array(), json closureDescriptors = json::array(),
-    json payloadActivationArguments = json(nullptr), int payloadRoot = 1)
+    json payloadActivationArguments = json(nullptr), int payloadRoot = 1,
+    json rootArgumentTablePrototypes = json::array())
 {
     json prototypes = json::array({
         prototype(1, json::array({closureInstruction(1, descriptor(2, 1, targetCaptureCount))})),
@@ -378,6 +379,7 @@ SemanticCandidate emitWithTarget(json targetInstructions, int targetCaptureCount
     json ir = {
         {"payload_root", {{"payload_prototype", payloadRoot}, {"closure_descriptor", rootDescriptor()}}},
         {"payload_activation_arguments", std::move(payloadActivationArguments)},
+        {"root_argument_table_prototypes", std::move(rootArgumentTablePrototypes)},
         {"prototype_call_edges", json::array()},
         {"observed_transition_sequences", json::array()},
         {"observed_lane_sequences", std::move(observedLaneSequences)},
@@ -1307,6 +1309,51 @@ bool testCompleteRootArgumentTableProvesAbsentSlotsAreNil()
     return ok;
 }
 
+bool testSharedRootArgumentTableSpecializesChildPrototype()
+{
+    const json sharedRead = {
+        {"kind", "index_read"},
+        {"table", {{"kind", "register_read"}, {"index", immediate("D", 1)}}},
+        {"index", immediate("G", 22)},
+    };
+    json arguments = {
+        {"argument_count", 1},
+        {"argument_table_entries", json::array({{
+            {"argument_index", 1},
+            {"key", number(22)},
+            {"value", {
+                {"type", "global_reference"},
+                {"primitive", false},
+                {"path", "task"},
+            }},
+        }})},
+        {"argument_table_domains", json::array({{
+            {"argument_index", 1},
+            {"complete", true},
+            {"observed_entries", 1},
+        }})},
+    };
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({{{"pc", 1}, {"opcode", 1}, {"semantic_operation", {
+            {"kind", "return"}, {"values", json::array()}}}}}),
+        0, 1,
+        json::array({prototype(3, json::array({
+            {{"pc", 1}, {"opcode", 28}, {"semantic_operation", {
+                {"kind", "register_write"}, {"register", immediate("D", 4)}, {"value", sharedRead}}}},
+        }))}),
+        json::array({cfgPrototype(3, 1)}), json::array(), json(nullptr), json::array(), json::array(),
+        std::move(arguments), 2, json::array({2, 3}));
+
+    bool ok = true;
+    ok &= require(candidate.source.find("registers[4] = environment[\"task\"]") != std::string::npos,
+        "object-identical root argument table was not specialized in a child prototype");
+    ok &= require(candidate.root_argument_shared_prototypes == 2,
+        "shared root argument prototype metric did not retain the proven object-identity set");
+    ok &= require(candidate.root_argument_references_specialized == 1,
+        "child root argument specialization was not counted");
+    return ok;
+}
+
 bool testSequenceTerminalReturnSuppressesCfgFallthrough()
 {
     const json sequence = {
@@ -1925,6 +1972,7 @@ int main()
     ok &= testDescriptorSideTableSurvivesUnreachableConstructor();
     ok &= testTraceBackedRootArgumentsAreSpecializedWithoutGuessing();
     ok &= testCompleteRootArgumentTableProvesAbsentSlotsAreNil();
+    ok &= testSharedRootArgumentTableSpecializesChildPrototype();
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();

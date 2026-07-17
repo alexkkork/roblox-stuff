@@ -55,6 +55,7 @@ def main() -> int:
             "@@LPH_PROTO_OBJECT_V1@@\t1\t101",
             "@@LPH_PROTO_V1@@\t2\t1\tR,D",
             "@@LPH_PROTO_OBJECT_V1@@\t2\t202",
+            "@@LPH_ACT_ARG_OBJECT_V1@@\t1\t1\t1\t700",
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t2\t1\ts:6869|z:\t123",
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:3\tf:74726163656261636b",
             "@@LPH_ACT_ARG_TABLE_V1@@\t1\t1\t1\tn:4\tx:table",
@@ -101,6 +102,10 @@ def main() -> int:
                 or argument_entries["4"]["type"] != "global_reference"
                 or argument_entries["4"]["path"] != "string"
                 or argument_entries["1256"]["value"] != "256"
+                or activation["argument_objects"] != [{
+                    "argument_index": 1,
+                    "object_id": 700,
+                }]
                 or activation["argument_table_domains"] != [{
                     "argument_index": 1,
                     "complete": True,

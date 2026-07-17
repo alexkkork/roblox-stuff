@@ -28,6 +28,7 @@ struct SemanticCandidate
     size_t runtime_specializations = 0;
     size_t direct_prototype_calls = 0;
     size_t inferred_root_slots = 0;
+    size_t root_argument_shared_prototypes = 0;
     size_t root_argument_references_specialized = 0;
     size_t absent_root_argument_references_specialized = 0;
     bool root_argument_table_complete = false;
