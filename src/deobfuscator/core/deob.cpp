@@ -4621,6 +4621,139 @@ std::map<Luau::AstLocal*, double> proveLuraphGuardBindings(
     return bindings;
 }
 
+struct LuraphExecutedStatementPath
+{
+    std::vector<Luau::AstStat*> statements;
+    bool complete = true;
+    bool falls_through = true;
+    bool ambiguous = false;
+    size_t dispatcher_statements = 0;
+    size_t continuation_statements = 0;
+};
+
+using LuraphBranchDecision = std::function<std::optional<bool>(Luau::AstStatIf*)>;
+
+bool accumulateLuraphExecutedStatements(
+    Luau::AstStat* statement,
+    const LuraphBranchDecision& decide,
+    LuraphExecutedStatementPath& path);
+
+bool accumulateLuraphExecutedStatements(
+    Luau::AstStatBlock* block,
+    const LuraphBranchDecision& decide,
+    LuraphExecutedStatementPath& path,
+    size_t begin = 0)
+{
+    if (!block)
+        return true;
+    for (size_t index = begin; index < block->body.size && path.falls_through; ++index)
+        if (!accumulateLuraphExecutedStatements(block->body.data[index], decide, path))
+            return false;
+    return path.complete;
+}
+
+bool accumulateLuraphExecutedStatements(
+    Luau::AstStat* statement,
+    const LuraphBranchDecision& decide,
+    LuraphExecutedStatementPath& path)
+{
+    if (!statement || !path.falls_through)
+        return path.complete;
+    if (auto block = statement->as<Luau::AstStatBlock>())
+        return accumulateLuraphExecutedStatements(block, decide, path);
+    if (auto conditional = statement->as<Luau::AstStatIf>())
+    {
+        const std::optional<bool> decision = decide(conditional);
+        if (!decision)
+        {
+            path.complete = false;
+            path.ambiguous = true;
+            return false;
+        }
+        Luau::AstStat* selected = *decision
+            ? static_cast<Luau::AstStat*>(conditional->thenbody)
+            : conditional->elsebody;
+        return !selected || accumulateLuraphExecutedStatements(selected, decide, path);
+    }
+
+    path.statements.push_back(statement);
+    if (statement->is<Luau::AstStatReturn>() || statement->is<Luau::AstStatBreak>() ||
+        statement->is<Luau::AstStatContinue>())
+        path.falls_through = false;
+    return true;
+}
+
+LuraphExecutedStatementPath selectLuraphExecutedStatementPath(
+    Luau::AstStatIf* dispatcher,
+    Luau::AstStatBlock* loopBody,
+    const LuraphBranchDecision& decide)
+{
+    LuraphExecutedStatementPath path;
+    if (!dispatcher || !loopBody || !accumulateLuraphExecutedStatements(dispatcher, decide, path))
+        return path;
+
+    path.dispatcher_statements = path.statements.size();
+    if (!path.falls_through)
+        return path;
+
+    size_t dispatcherIndex = loopBody->body.size;
+    for (size_t index = 0; index < loopBody->body.size; ++index)
+        if (loopBody->body.data[index] == dispatcher)
+        {
+            dispatcherIndex = index;
+            break;
+        }
+    if (dispatcherIndex == loopBody->body.size)
+    {
+        path.complete = false;
+        path.ambiguous = true;
+        return path;
+    }
+
+    accumulateLuraphExecutedStatements(loopBody, decide, path, dispatcherIndex + 1);
+    path.continuation_statements = path.statements.size() - path.dispatcher_statements;
+    return path;
+}
+
+Luau::AstStatBlock luraphExecutedStatementBlock(const LuraphExecutedStatementPath& path)
+{
+    Luau::Location location;
+    if (!path.statements.empty())
+    {
+        location.begin = path.statements.front()->location.begin;
+        location.end = path.statements.back()->location.end;
+    }
+    return Luau::AstStatBlock(location,
+        Luau::AstArray<Luau::AstStat*>{
+            const_cast<Luau::AstStat**>(path.statements.data()), path.statements.size()});
+}
+
+json luraphExecutedStatementRanges(const LuraphExecutedStatementPath& path, const SourceView& view)
+{
+    json ranges = json::array();
+    for (Luau::AstStat* statement : path.statements)
+    {
+        const size_t begin = view.offset(statement->location.begin);
+        const size_t end = view.offset(statement->location.end);
+        ranges.push_back({{"begin", begin}, {"end", end}, {"bytes", end >= begin ? end - begin : 0}});
+    }
+    return ranges;
+}
+
+std::string luraphExecutedStatementSource(const LuraphExecutedStatementPath& path, const SourceView& view)
+{
+    std::string source;
+    for (Luau::AstStat* statement : path.statements)
+    {
+        if (!source.empty())
+            source += "\n";
+        source += view.slice(statement->location, 16384 - std::min<size_t>(source.size(), 16384));
+        if (source.size() >= 16384)
+            break;
+    }
+    return source;
+}
+
 struct LuraphGuardCondition
 {
     Luau::AstExpr* expression = nullptr;
@@ -7031,9 +7164,26 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     size_t missingHandlers = 0;
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
     {
-        bool selectionAmbiguous = false;
-        Luau::AstStatBlock* leaf = selectLeaf(
-            dispatcher, shape->opcode, opcode, &provenGuardBindings, &selectionAmbiguous);
+        const LuraphBranchDecision decide = [&](Luau::AstStatIf* conditional) {
+            return evaluateStateCondition(
+                conditional->condition, shape->opcode, opcode, &provenGuardBindings);
+        };
+        LuraphExecutedStatementPath path = selectLuraphExecutedStatementPath(
+            dispatcherCandidate->node, shape->body, decide);
+        if (!path.complete)
+        {
+            bool legacyAmbiguous = false;
+            if (Luau::AstStatBlock* candidate = selectLeaf(
+                    dispatcher, shape->opcode, opcode, &provenGuardBindings, &legacyAmbiguous))
+            {
+                path.statements.assign(candidate->body.begin(), candidate->body.end());
+                path.dispatcher_statements = path.statements.size();
+                path.continuation_statements = 0;
+            }
+            path.ambiguous = true;
+        }
+        Luau::AstStatBlock executed = luraphExecutedStatementBlock(path);
+        Luau::AstStatBlock* leaf = path.statements.empty() ? nullptr : &executed;
         bool opcodeLocalReused = false;
         if (leaf)
         {
@@ -7041,13 +7191,18 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             leaf->visit(&finder);
             opcodeLocalReused = finder.found;
         }
-        const bool resolved = leaf != nullptr && !selectionAmbiguous && !opcodeLocalReused;
+        const bool resolved = leaf != nullptr && path.complete && !path.ambiguous && !opcodeLocalReused;
         json row = {
             {"opcode", opcode},
             {"resolved", resolved},
             {"opcode_local_reused", opcodeLocalReused},
             {"selection_status", resolved ? "exact" : leaf ? "ambiguous" : "missing"},
-            {"unresolved_guard_path", selectionAmbiguous || opcodeLocalReused},
+            {"unresolved_guard_path", path.ambiguous || opcodeLocalReused},
+            {"executed_path_complete", path.complete},
+            {"executed_statement_count", path.statements.size()},
+            {"dispatcher_statement_count", path.dispatcher_statements},
+            {"continuation_statement_count", path.continuation_statements},
+            {"executed_statement_ranges", luraphExecutedStatementRanges(path, view)},
         };
         if (leaf)
         {
@@ -7058,24 +7213,49 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             row["normalization_complete"] = normalized.normalization_complete;
             row["vm_state_independent"] = normalized.vm_state_independent;
             row["normalized_handler_ir"] = normalized.ir;
-            row["semantic_operation"] = normalized.semantic_operation;
-            if (!row["semantic_operation"].is_null() && luraphJsonContainsKind(row["semantic_operation"], "helper_table"))
-                row["semantic_operation"]["protector_state"] = true;
-            if (!resolved)
+            json operation = normalized.semantic_operation;
+            if (!operation.is_null() && luraphJsonContainsKind(operation, "helper_table"))
+                operation["protector_state"] = true;
+            const bool fullEffectNormalization = resolved && normalized.normalization_complete &&
+                normalized.vm_state_independent && operation.is_object() &&
+                !operation.value("protector_state", false) &&
+                operation.value("source_semantic", true) &&
+                !luraphSemanticContainsUnknownState(operation);
+            row["full_effect_normalization"] = fullEffectNormalization;
+            row["full_effect_validation"] = false;
+            row["semantic_operation"] = nullptr;
+            if (!operation.is_null())
             {
-                row["candidate_semantic_operation"] = row["semantic_operation"];
-                row["semantic_operation"] = nullptr;
+                operation["candidate_only"] = true;
+                operation["path_complete"] = path.complete;
+                operation["full_effect_normalization"] = fullEffectNormalization;
+                operation["static_semantic"] = false;
+                row["candidate_semantic_operation"] = std::move(operation);
             }
         }
         if (leaf)
         {
-            const size_t begin = view.offset(leaf->location.begin);
-            const size_t end = view.offset(leaf->location.end);
-            row["range"] = {{"begin", begin}, {"end", end}, {"bytes", end >= begin ? end - begin : 0}};
-            row[resolved ? "handler_source" : "candidate_source"] = view.slice(leaf->location, 16384);
+            size_t begin = std::numeric_limits<size_t>::max();
+            size_t end = 0;
+            size_t bytes = 0;
+            for (Luau::AstStat* statement : path.statements)
+            {
+                const size_t statementBegin = view.offset(statement->location.begin);
+                const size_t statementEnd = view.offset(statement->location.end);
+                begin = std::min(begin, statementBegin);
+                end = std::max(end, statementEnd);
+                bytes += statementEnd >= statementBegin ? statementEnd - statementBegin : 0;
+            }
+            row["range"] = {
+                {"begin", begin}, {"end", end}, {"bytes", bytes},
+                {"span_bytes", end >= begin ? end - begin : 0},
+                {"contiguous", path.statements.size() <= 1},
+            };
+            row[resolved ? "handler_source" : "candidate_source"] =
+                luraphExecutedStatementSource(path, view);
             if (!resolved)
                 row["handler_source"] = nullptr;
-            row["handler_source_truncated"] = end > begin + 16384;
+            row["handler_source_truncated"] = bytes > 16384;
             if (resolved)
             {
                 uniqueRanges.emplace(begin, end);
@@ -7098,10 +7278,13 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     recognizeLuraphVarargCapture(handlers);
     for (json& row : handlers)
     {
-        if (row.value("selection_status", "missing") == "exact" ||
-            !row.contains("semantic_operation") || row["semantic_operation"].is_null())
+        if (!row.contains("semantic_operation") || row["semantic_operation"].is_null())
             continue;
         row["candidate_semantic_operation"] = row["semantic_operation"];
+        row["candidate_semantic_operation"]["candidate_only"] = true;
+        row["candidate_semantic_operation"]["path_complete"] =
+            row.value("executed_path_complete", false);
+        row["candidate_semantic_operation"]["static_semantic"] = false;
         row["semantic_operation"] = nullptr;
     }
     catalog.available = true;
@@ -9082,98 +9265,6 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
 
 using LuraphGuardDecisionKey = std::pair<size_t, size_t>;
 
-Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
-    Luau::AstStat* statement,
-    Luau::AstLocal* opcodeLocal,
-    int64_t opcode,
-    const std::map<Luau::AstLocal*, double>& bindings,
-    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
-    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
-    const SourceView& view,
-    size_t& decisionsUsed);
-
-Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
-    Luau::AstStatBlock* block,
-    Luau::AstLocal* opcodeLocal,
-    int64_t opcode,
-    const std::map<Luau::AstLocal*, double>& bindings,
-    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
-    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
-    const SourceView& view,
-    size_t& decisionsUsed)
-{
-    if (!block || block->body.size == 0)
-        return block;
-    for (Luau::AstStat* statement : block->body)
-    {
-        auto conditional = statement->as<Luau::AstStatIf>();
-        if (!conditional)
-            continue;
-        std::optional<bool> decision = evaluateStateCondition(
-            conditional->condition, opcodeLocal, opcode, &bindings);
-        if (!decision)
-        {
-            const LuraphGuardDecisionKey key{
-                view.offset(conditional->condition->location.begin),
-                view.offset(conditional->condition->location.end),
-            };
-            const auto observed = decisions.find(key);
-            size_t& offset = decisionOffsets[key];
-            if (observed == decisions.end() || offset >= observed->second.size())
-                return nullptr;
-            decision = observed->second[offset++];
-            ++decisionsUsed;
-        }
-        if (*decision)
-            return selectLuraphObservedGuardLeaf(
-                conditional->thenbody, opcodeLocal, opcode, bindings,
-                decisions, decisionOffsets, view, decisionsUsed);
-        if (conditional->elsebody)
-            return selectLuraphObservedGuardLeaf(
-                conditional->elsebody, opcodeLocal, opcode, bindings,
-                decisions, decisionOffsets, view, decisionsUsed);
-    }
-    return block;
-}
-
-Luau::AstStatBlock* selectLuraphObservedGuardLeaf(
-    Luau::AstStat* statement,
-    Luau::AstLocal* opcodeLocal,
-    int64_t opcode,
-    const std::map<Luau::AstLocal*, double>& bindings,
-    const std::map<LuraphGuardDecisionKey, std::vector<bool>>& decisions,
-    std::map<LuraphGuardDecisionKey, size_t>& decisionOffsets,
-    const SourceView& view,
-    size_t& decisionsUsed)
-{
-    if (!statement)
-        return nullptr;
-    if (auto block = statement->as<Luau::AstStatBlock>())
-        return selectLuraphObservedGuardLeaf(
-            block, opcodeLocal, opcode, bindings, decisions, decisionOffsets, view, decisionsUsed);
-    auto conditional = statement->as<Luau::AstStatIf>();
-    if (!conditional)
-        return nullptr;
-    std::optional<bool> decision = evaluateStateCondition(
-        conditional->condition, opcodeLocal, opcode, &bindings);
-    if (!decision)
-    {
-        const LuraphGuardDecisionKey key{
-            view.offset(conditional->condition->location.begin),
-            view.offset(conditional->condition->location.end),
-        };
-        const auto observed = decisions.find(key);
-        size_t& offset = decisionOffsets[key];
-        if (observed == decisions.end() || offset >= observed->second.size())
-            return nullptr;
-        decision = observed->second[offset++];
-        ++decisionsUsed;
-    }
-    return selectLuraphObservedGuardLeaf(
-        *decision ? static_cast<Luau::AstStat*>(conditional->thenbody) : conditional->elsebody,
-        opcodeLocal, opcode, bindings, decisions, decisionOffsets, view, decisionsUsed);
-}
-
 size_t attachLuraphObservedGuardSemantics(
     std::string_view source,
     LuraphRuntimeStructureTrace& trace)
@@ -9263,32 +9354,53 @@ size_t attachLuraphObservedGuardSemantics(
             continue;
         std::map<LuraphGuardDecisionKey, size_t> decisionOffsets;
         size_t decisionsUsed = 0;
-        Luau::AstStatBlock* leaf = selectLuraphObservedGuardLeaf(
-            dispatcher, shape->opcode, opcode, bindings, decisions,
-            decisionOffsets, view, decisionsUsed);
-        if (!leaf || decisionsUsed != path["decisions"].size())
+        const LuraphBranchDecision decide = [&](Luau::AstStatIf* conditional) -> std::optional<bool> {
+            if (std::optional<bool> staticDecision = evaluateStateCondition(
+                    conditional->condition, shape->opcode, opcode, &bindings))
+                return staticDecision;
+            const LuraphGuardDecisionKey key{
+                view.offset(conditional->condition->location.begin),
+                view.offset(conditional->condition->location.end),
+            };
+            const auto observed = decisions.find(key);
+            size_t& offset = decisionOffsets[key];
+            if (observed == decisions.end() || offset >= observed->second.size())
+                return std::nullopt;
+            ++decisionsUsed;
+            return observed->second[offset++];
+        };
+        LuraphExecutedStatementPath executedPath = selectLuraphExecutedStatementPath(
+            dispatcher, shape->body, decide);
+        if (!executedPath.complete || executedPath.statements.empty() ||
+            decisionsUsed != path["decisions"].size())
             continue;
+        Luau::AstStatBlock executed = luraphExecutedStatementBlock(executedPath);
         LuraphOpcodeReferenceFinder opcodeReference(shape->opcode);
-        leaf->visit(&opcodeReference);
+        executed.visit(&opcodeReference);
         if (opcodeReference.found)
             continue;
         const LuraphNormalizedHandler normalized = normalizeLuraphHandler(
-            leaf, semanticRoles, opcode);
-        if (!normalized.semantic_operation.is_object() ||
+            &executed, semanticRoles, opcode);
+        if (!normalized.normalization_complete || !normalized.vm_state_independent ||
+            !normalized.semantic_operation.is_object() ||
             normalized.semantic_operation.value("protector_state", false) ||
             !normalized.semantic_operation.value("source_semantic", true) ||
             luraphSemanticContainsUnknownState(normalized.semantic_operation))
             continue;
         step["guard_replay_candidate"] = normalized.semantic_operation;
+        step["guard_replay_candidate"]["candidate_only"] = true;
+        step["guard_replay_candidate"]["path_specific"] = true;
+        step["guard_replay_candidate"]["static_semantic"] = false;
         step["guard_replay"] = {
             {"complete", true},
             {"candidate_only", true},
             {"decisions_available", path["decisions"].size()},
             {"decisions_used", decisionsUsed},
-            {"handler_range", {
-                {"begin", view.offset(leaf->location.begin)},
-                {"end", view.offset(leaf->location.end)},
-            }},
+            {"executed_statement_count", executedPath.statements.size()},
+            {"dispatcher_statement_count", executedPath.dispatcher_statements},
+            {"continuation_statement_count", executedPath.continuation_statements},
+            {"executed_statement_ranges", luraphExecutedStatementRanges(executedPath, view)},
+            {"full_effect_normalization", true},
             {"proof", "recorded_condition_decisions_replayed_through_original_ast"},
         };
         ++attached;
@@ -9903,6 +10015,76 @@ std::optional<json> validateLuraphObservedCandidate(
         return std::nullopt;
 
     const std::string kind = operation.value("kind", "");
+    if (kind == "operation_sequence")
+    {
+        const json& operations = operation.value("operations", json::array());
+        if (!operations.is_array() || operations.empty())
+            return std::nullopt;
+
+        const json* principal = nullptr;
+        int64_t pcAdjustment = 0;
+        size_t validatedOperations = 0;
+        for (const json& item : operations)
+        {
+            if (!item.is_object())
+                return std::nullopt;
+            if (item.value("kind", "") == "compound_write" &&
+                item.value("target", json::object()).value("kind", "") == "program_counter")
+            {
+                const std::optional<double> value = luraphObservedExpressionNumber(
+                    item.value("value", json(nullptr)));
+                if (!value || !std::isfinite(*value) || std::floor(*value) != *value)
+                    return std::nullopt;
+                const int64_t adjustment = static_cast<int64_t>(*value);
+                const std::string operatorName = item.value("operator", "");
+                if (operatorName == "+")
+                    pcAdjustment += adjustment;
+                else if (operatorName == "-")
+                    pcAdjustment -= adjustment;
+                else
+                    return std::nullopt;
+                ++validatedOperations;
+                continue;
+            }
+            if (principal)
+                return std::nullopt;
+            principal = &item;
+        }
+        if (!principal)
+            return std::nullopt;
+
+        std::optional<json> principalValidation = validateLuraphObservedCandidate(
+            *principal, observations, pc, observedReturns);
+        if (!principalValidation)
+            return std::nullopt;
+        const std::string principalKind = principal->value("kind", "");
+        if (principalKind == "jump")
+        {
+            if (principalValidation->value("target_adjustment", std::numeric_limits<int64_t>::min()) !=
+                pcAdjustment)
+                return std::nullopt;
+        }
+        else if (principalKind == "register_write")
+        {
+            for (const json& observation : observations)
+                if (observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                    static_cast<int64_t>(pc) + pcAdjustment)
+                    return std::nullopt;
+        }
+        else if (pcAdjustment != 0)
+            return std::nullopt;
+
+        const size_t observationCount = principalValidation->value(
+            "observation_count", observations.size());
+        return json{
+            {"proof", "observed_complete_operation_sequence"},
+            {"validated_fields", json::array({"operations", "register_writes", "next_pc"})},
+            {"validated_operations", validatedOperations + 1},
+            {"pc_adjustment", pcAdjustment},
+            {"principal_validation", std::move(*principalValidation)},
+            {"observation_count", observationCount},
+        };
+    }
     if (kind == "return")
     {
         if (!observedReturns || observedReturns->empty() ||
@@ -10824,6 +11006,7 @@ json luraphRuntimeSemanticDispatchArtifact(
                         operation["candidate_proof"] = operation.value("proof", "");
                         operation["proof"] = "recorded_guard_path_candidate_runtime_validated";
                         operation["runtime_validation"] = *validation;
+                        operation["full_effect_validation"] = true;
                         operation["guard_replay_observations"] = observedSite->second.size();
                         row["guard_replay_validated_effect"] = std::move(operation);
                         row["guard_path_replayed"] = true;

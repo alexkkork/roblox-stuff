@@ -950,6 +950,105 @@ std::vector<int64_t> successors(const Block& block)
     return {};
 }
 
+class StronglyConnectedFinder
+{
+public:
+    StronglyConnectedFinder(const Region& region, const std::set<int64_t>& members)
+        : region(region)
+        , members(members)
+    {
+    }
+
+    std::vector<std::set<int64_t>> run()
+    {
+        for (int64_t state : members)
+            if (!indices.contains(state))
+                visit(state);
+        return std::move(components);
+    }
+
+private:
+    const Region& region;
+    const std::set<int64_t>& members;
+    std::map<int64_t, size_t> indices;
+    std::map<int64_t, size_t> lowLinks;
+    std::vector<int64_t> stack;
+    std::set<int64_t> onStack;
+    std::vector<std::set<int64_t>> components;
+    size_t nextIndex = 0;
+
+    void visit(int64_t state)
+    {
+        const size_t index = nextIndex++;
+        indices[state] = index;
+        lowLinks[state] = index;
+        stack.push_back(state);
+        onStack.insert(state);
+        for (int64_t next : successors(region.blocks.at(state)))
+        {
+            if (next == ExitState || !members.contains(next))
+                continue;
+            if (!indices.contains(next))
+            {
+                visit(next);
+                lowLinks[state] = std::min(lowLinks[state], lowLinks[next]);
+            }
+            else if (onStack.contains(next))
+                lowLinks[state] = std::min(lowLinks[state], indices[next]);
+        }
+        if (lowLinks[state] != indices[state])
+            return;
+
+        std::set<int64_t> component;
+        while (!stack.empty())
+        {
+            const int64_t member = stack.back();
+            stack.pop_back();
+            onStack.erase(member);
+            component.insert(member);
+            if (member == state)
+                break;
+        }
+        components.push_back(std::move(component));
+    }
+};
+
+bool hasOnlyReducibleCycles(const Region& region, const std::set<int64_t>& members,
+    const std::map<int64_t, std::set<int64_t>>& predecessors)
+{
+    for (const std::set<int64_t>& component : StronglyConnectedFinder(region, members).run())
+    {
+        const bool cyclic = component.size() > 1 ||
+            std::any_of(component.begin(), component.end(), [&](int64_t state) {
+                const std::vector<int64_t> outgoing = successors(region.blocks.at(state));
+                return std::find(outgoing.begin(), outgoing.end(), state) != outgoing.end();
+            });
+        if (!cyclic)
+            continue;
+
+        std::set<int64_t> entries;
+        if (component.contains(region.entry))
+            entries.insert(region.entry);
+        for (int64_t state : component)
+        {
+            const auto incoming = predecessors.find(state);
+            if (incoming == predecessors.end())
+                continue;
+            for (int64_t predecessor : incoming->second)
+                if (!component.contains(predecessor))
+                    entries.insert(state);
+        }
+        if (entries.size() != 1)
+            return false;
+
+        std::set<int64_t> nested(component);
+        nested.erase(*entries.begin());
+        if (!nested.empty() && !hasOnlyReducibleCycles(region, nested, predecessors))
+            return false;
+    }
+    return true;
+}
+
 bool safelyDiscardableCondition(std::string_view condition)
 {
     condition = trimView(condition);
@@ -1109,69 +1208,10 @@ private:
                     predecessors[next].insert(state);
         }
 
-        std::map<int64_t, size_t> sccIndices;
-        std::map<int64_t, size_t> sccLowLinks;
-        std::vector<int64_t> sccStack;
-        std::set<int64_t> sccOnStack;
-        std::vector<std::set<int64_t>> components;
-        size_t nextSccIndex = 0;
-        std::function<void(int64_t)> visitScc = [&](int64_t state) {
-            const size_t index = nextSccIndex++;
-            sccIndices[state] = index;
-            sccLowLinks[state] = index;
-            sccStack.push_back(state);
-            sccOnStack.insert(state);
-            for (int64_t next : successors(region.blocks.at(state)))
-            {
-                if (next == ExitState || !reachable.contains(next))
-                    continue;
-                if (!sccIndices.contains(next))
-                {
-                    visitScc(next);
-                    sccLowLinks[state] = std::min(sccLowLinks[state], sccLowLinks[next]);
-                }
-                else if (sccOnStack.contains(next))
-                    sccLowLinks[state] = std::min(sccLowLinks[state], sccIndices[next]);
-            }
-            if (sccLowLinks[state] != sccIndices[state])
-                return;
-            std::set<int64_t> component;
-            while (!sccStack.empty())
-            {
-                const int64_t member = sccStack.back();
-                sccStack.pop_back();
-                sccOnStack.erase(member);
-                component.insert(member);
-                if (member == state)
-                    break;
-            }
-            components.push_back(std::move(component));
-        };
-        for (int64_t state : reachable)
-            if (!sccIndices.contains(state))
-                visitScc(state);
-
-        for (const std::set<int64_t>& component : components)
+        if (!hasOnlyReducibleCycles(region, reachable, predecessors))
         {
-            const bool cyclic = component.size() > 1 ||
-                std::any_of(component.begin(), component.end(), [&](int64_t state) {
-                    const std::vector<int64_t> outgoing = successors(region.blocks.at(state));
-                    return std::find(outgoing.begin(), outgoing.end(), state) != outgoing.end();
-                });
-            if (!cyclic)
-                continue;
-            std::set<int64_t> entries;
-            if (component.contains(region.entry))
-                entries.insert(region.entry);
-            for (int64_t state : component)
-                for (int64_t predecessor : predecessors[state])
-                    if (!component.contains(predecessor))
-                        entries.insert(state);
-            if (entries.size() > 1)
-            {
-                failureReason = "irreducible_loop";
-                return false;
-            }
+            failureReason = "irreducible_loop";
+            return false;
         }
 
         std::set<int64_t> postdomUniverse = reachable;

@@ -1501,6 +1501,169 @@ return three_exit_loop
         self.assertIn('output = "one"', rewritten)
         self.assertIn('output = "two"', rewritten)
 
+    def test_nested_loop_branch_join_stays_outside_the_inner_loop(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function nested_loops(run_outer, run_inner, leave_inner)
+  local output = ""
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(20, pc)
+    if pc == 1 then
+      if run_outer then
+        pc = 2
+      else
+        pc = 8
+      end
+    elseif pc == 2 then
+      if run_inner then
+        pc = 3
+      else
+        pc = 4
+      end
+    elseif pc == 3 then
+      output ..= "body"
+      if leave_inner then
+        pc = 5
+      else
+        pc = 6
+      end
+    elseif pc == 4 then
+      output ..= "left"
+      pc = 7
+    elseif pc == 5 then
+      output ..= "right"
+      pc = 7
+    elseif pc == 6 then
+      run_inner = false
+      pc = 2
+    elseif pc == 7 then
+      run_outer = false
+      pc = 1
+    elseif pc == 8 then
+      return output
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return nested_loops
+"""
+        )
+
+        rewritten = artifact["source"]
+        metrics = artifact["metrics"]
+        self.assertEqual(metrics["regions_structured"], 1)
+        self.assertEqual(metrics["blocks_structured"], 8)
+        self.assertEqual(metrics["residual_state_machines"], 0)
+        self.assertNotIn("local pc =", rewritten)
+        self.assertEqual(rewritten.count("while true do"), 2)
+        self.assertIn("local loop_exit_2", rewritten)
+        self.assertIn("if run_outer then", rewritten)
+        self.assertIn("if run_inner then", rewritten)
+        self.assertIn("if leave_inner then", rewritten)
+        self.assertIn('output ..= "left"', rewritten)
+        self.assertIn('output ..= "right"', rewritten)
+
+    def test_reducible_prototypes_around_nested_irreducible_cycle_are_prioritized(self) -> None:
+        irreducible_region = """  local pc = 1
+  while pc ~= nil do
+    semantic_step(22, pc)
+    if pc == 1 then
+      if choose_left then
+        pc = 2
+      else
+        pc = 3
+      end
+    elseif pc == 2 then
+      touch("left")
+      pc = 3
+    elseif pc == 3 then
+      touch("right")
+      if repeat_cycle then
+        pc = 2
+      else
+        pc = 4
+      end
+    elseif pc == 4 then
+      pc = 1
+    else
+      return nil
+    end
+  end
+  return nil
+"""
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function touch(_)
+end
+
+local function first_reducible(flag)
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(21, pc)
+    if pc == 1 then
+      if flag then
+        pc = 2
+      else
+        pc = 3
+      end
+    elseif pc == 2 then
+      return "yes"
+    elseif pc == 3 then
+      return "no"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+local function nested_irreducible(choose_left, repeat_cycle)
+"""
+            + irreducible_region
+            + """end
+
+local function last_reducible()
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(23, pc)
+    if pc == 1 then
+      touch("last")
+      pc = 2
+    elseif pc == 2 then
+      return true
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return first_reducible, nested_irreducible, last_reducible
+"""
+        )
+
+        rewritten = artifact["source"]
+        metrics = artifact["metrics"]
+        self.assertEqual(metrics["regions_found"], 3)
+        self.assertEqual(metrics["regions_structured"], 2)
+        self.assertEqual(metrics["blocks_structured"], 5)
+        self.assertEqual(metrics["residual_state_machines"], 1)
+        self.assertEqual(metrics["residual_reasons"], {"irreducible_loop": 1})
+        self.assertIn(irreducible_region, rewritten)
+        self.assertNotIn("semantic_step(21, pc)", rewritten)
+        self.assertNotIn("semantic_step(23, pc)", rewritten)
+        self.assertEqual(rewritten.count("local pc ="), 1)
+        self.assertIn("if flag then", rewritten)
+        self.assertIn('touch("last")', rewritten)
+
     def test_parenthesized_index_lvalue_becomes_valid_plain_luau(self) -> None:
         artifact = self.rewrite(
             """local function semantic_step(_, _)

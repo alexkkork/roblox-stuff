@@ -129,6 +129,15 @@ def audit_handler_partition(deobfuscator: pathlib.Path) -> None:
             "guarded handler candidates were promoted to static semantics for opcodes "
             + ", ".join(map(str, promoted)),
         )
+        path_promoted = [
+            row.get("opcode") for row in handlers
+            if row.get("semantic_operation") is not None
+        ]
+        require(
+            not path_promoted,
+            "branch-path results were promoted to general semantics for opcodes "
+            + ", ".join(map(str, path_promoted)),
+        )
         for row in ambiguous:
             require(row.get("unresolved_guard_path") is True,
                     f"ambiguous opcode {row.get('opcode')} lost its guard-path label")
@@ -137,6 +146,34 @@ def audit_handler_partition(deobfuscator: pathlib.Path) -> None:
                     f"missing opcode {row.get('opcode')} carries static semantics")
             require(row.get("candidate_semantic_operation") is None,
                     f"missing opcode {row.get('opcode')} carries a candidate operation")
+
+        continuation = handlers[186]
+        require(continuation.get("executed_path_complete") is True,
+                "opcode 186 no longer has a complete executed-statement path")
+        require(continuation.get("executed_statement_count") == 2,
+                "opcode 186 did not retain both executed writes")
+        require(continuation.get("dispatcher_statement_count") == 1
+                and continuation.get("continuation_statement_count") == 1,
+                "opcode 186 did not distinguish its enclosing continuation")
+        effects = continuation.get("effects") or {}
+        require(effects.get("register_writes") == 1 and effects.get("pc_writes") == 1,
+                f"opcode 186 effects dropped a write: {effects}")
+        require(continuation.get("semantic_operation") is None,
+                "opcode 186 path result was promoted to general semantics")
+        operation = continuation.get("candidate_semantic_operation")
+        require(isinstance(operation, dict) and operation.get("kind") == "operation_sequence",
+                "opcode 186 candidate was collapsed back to a one-write operation")
+        operations = operation.get("operations") or []
+        require([item.get("kind") for item in operations] == ["register_write", "compound_write"],
+                f"opcode 186 operation order is incomplete: {operations}")
+        require((operations[1].get("target") or {}).get("kind") == "program_counter",
+                "opcode 186 continuation is not represented as a PC write")
+        require(continuation.get("full_effect_normalization") is True,
+                "opcode 186 complete sequence did not normalize as a whole")
+        require(continuation.get("full_effect_validation") is False
+                and operation.get("candidate_only") is True
+                and operation.get("static_semantic") is False,
+                "opcode 186 path evidence crossed the static semantic boundary")
 
 
 def build_guarded_trace(opcode: int, lanes: list[str]) -> str:
@@ -270,18 +307,19 @@ def audit_guarded_runtime_candidate(deobfuscator: pathlib.Path) -> None:
             f"guarded runtime evidence was assigned to the wrong semantic class: {partition}",
         )
 
-        exact = next(
+        exact_path = next(
             (
                 row for row in handlers
                 if row.get("selection_status") == "exact"
-                and isinstance(row.get("semantic_operation"), dict)
+                and row.get("semantic_operation") is None
+                and isinstance(row.get("candidate_semantic_operation"), dict)
             ),
             None,
         )
-        require(exact is not None, "locked fixture has no exact static semantic handler")
+        require(exact_path is not None, "locked fixture has no exact path candidate")
         partition_trace = root / "semantic-partition-trace.log"
         partition_trace.write_text(
-            build_semantic_partition_trace(int(exact["opcode"]), int(candidate["opcode"]), lanes),
+            build_semantic_partition_trace(int(exact_path["opcode"]), int(candidate["opcode"]), lanes),
             encoding="utf-8",
         )
         completed, output, report = run_deobfuscator(
@@ -290,10 +328,10 @@ def audit_guarded_runtime_candidate(deobfuscator: pathlib.Path) -> None:
         require(completed.returncode == 2, f"partition trace crossed the recovery boundary: {completed.returncode}")
         partition = semantic_coverage_partition(report)
         expected = {
-            "static_semantic": 1,
+            "static_semantic": 0,
             "runtime_validated_observational_semantic": 1,
             "trace_evidence_only": 1,
-            "unresolved": 1,
+            "unresolved": 2,
         }
         require(
             {name: partition.get(name) for name in expected} == expected,

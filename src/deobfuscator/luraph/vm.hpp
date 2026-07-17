@@ -63,6 +63,61 @@ struct NormalizedContainer
     std::vector<NormalizedPrototype> prototypes;
 };
 
+enum class NormalizedOperandLane
+{
+    D,
+    G,
+    p,
+};
+
+struct NamedRuntimeOperandLaneSequence
+{
+    std::string name;
+    std::vector<int64_t> values;
+};
+
+// An anchor is identified only when exactly one static prototype has this
+// instruction count. Every named sequence must contain one value per PC.
+struct RuntimeOperandLaneAnchor
+{
+    size_t instruction_count = 0;
+    std::vector<NamedRuntimeOperandLaneSequence> lanes;
+};
+
+struct OperandLaneProjectionBinding
+{
+    std::string runtime_name;
+    NormalizedOperandLane normalized_lane = NormalizedOperandLane::D;
+
+    bool operator==(const OperandLaneProjectionBinding&) const = default;
+};
+
+// Bindings are stored in normalized D, G, p order. Runtime names are distinct.
+struct OperandLaneProjection
+{
+    std::array<OperandLaneProjectionBinding, 3> bindings;
+
+    bool operator==(const OperandLaneProjection&) const = default;
+};
+
+enum class OperandLaneProjectionStatus
+{
+    Unique,
+    Ambiguous,
+    Contradictory,
+    InsufficientEvidence,
+    InvalidEvidence,
+};
+
+struct OperandLaneProjectionResult
+{
+    OperandLaneProjectionStatus status = OperandLaneProjectionStatus::InvalidEvidence;
+    size_t uniquely_matched_anchor_count = 0;
+    std::vector<size_t> anchor_metadata_indices;
+    std::vector<OperandLaneProjection> candidates;
+    std::string diagnostic;
+};
+
 struct CaptureDescriptorShape
 {
     unsigned int kind_code = 0;
@@ -207,6 +262,12 @@ NormalizedInstruction normalizeInstruction(
     size_t constantCount,
     size_t prototypeCount);
 NormalizedContainer normalizeContainer(const ContainerAnalysis& container);
+// A candidate survives only when each selected runtime sequence equals the
+// corresponding normalized static lane at every PC of every usable anchor.
+// At least two distinct uniquely count-matched prototypes are required.
+OperandLaneProjectionResult inferOperandLaneProjection(
+    const NormalizedContainer& staticContainer,
+    const std::vector<RuntimeOperandLaneAnchor>& runtimeAnchors);
 
 // Digests are stable summary values. Exact field equality, never a digest
 // collision assumption, drives correspondence decisions.
@@ -230,6 +291,8 @@ PrototypeCorrespondenceResult correlateRuntimePrototypes(
     const std::vector<RuntimePrototypeRecord>& runtimePrototypes);
 
 const char* toString(ReferenceKind kind);
+const char* toString(NormalizedOperandLane lane);
+const char* toString(OperandLaneProjectionStatus status);
 const char* toString(CorrespondenceStatus status);
 const char* toString(CorrespondenceProof proof);
 

@@ -111,6 +111,17 @@ InstructionShape instructionShape(const NormalizedInstruction& instruction)
     };
 }
 
+const OperandLane& operandLane(const NormalizedInstruction& instruction, NormalizedOperandLane lane)
+{
+    switch (lane)
+    {
+    case NormalizedOperandLane::D: return instruction.D;
+    case NormalizedOperandLane::G: return instruction.G;
+    case NormalizedOperandLane::p: return instruction.p;
+    }
+    return instruction.D;
+}
+
 } // namespace
 
 OperandLane normalizeLane(int64_t rawWord, size_t pc, size_t constantCount, size_t prototypeCount)
@@ -175,6 +186,172 @@ NormalizedContainer normalizeContainer(const ContainerAnalysis& container)
             normalized.instructions.push_back(
                 normalizeInstruction(instruction, container.constants.size(), container.prototypes.size()));
         result.prototypes.push_back(std::move(normalized));
+    }
+    return result;
+}
+
+OperandLaneProjectionResult inferOperandLaneProjection(
+    const NormalizedContainer& staticContainer,
+    const std::vector<RuntimeOperandLaneAnchor>& runtimeAnchors)
+{
+    OperandLaneProjectionResult result;
+    const auto invalid = [&](std::string diagnostic) {
+        result.status = OperandLaneProjectionStatus::InvalidEvidence;
+        result.uniquely_matched_anchor_count = 0;
+        result.anchor_metadata_indices.clear();
+        result.candidates.clear();
+        result.diagnostic = std::move(diagnostic);
+        return result;
+    };
+
+    if (staticContainer.prototypes.empty())
+        return invalid("normalized static container has no prototypes");
+
+    std::set<size_t> staticMetadataIndices;
+    std::map<size_t, std::vector<const NormalizedPrototype*>> staticByInstructionCount;
+    for (const NormalizedPrototype& prototype : staticContainer.prototypes)
+    {
+        if (!staticMetadataIndices.insert(prototype.metadata_index).second)
+            return invalid("normalized static prototype metadata indices are not unique");
+        for (size_t index = 0; index < prototype.instructions.size(); ++index)
+        {
+            const NormalizedInstruction& instruction = prototype.instructions[index];
+            if (instruction.metadata_index != index || instruction.pc != index + 1)
+                return invalid("normalized static prototype instruction order is inconsistent");
+        }
+        staticByInstructionCount[prototype.instructions.size()].push_back(&prototype);
+    }
+
+    if (runtimeAnchors.empty())
+    {
+        result.status = OperandLaneProjectionStatus::InsufficientEvidence;
+        result.diagnostic = "no runtime operand-lane anchors were supplied";
+        return result;
+    }
+
+    struct MatchedAnchor
+    {
+        const NormalizedPrototype* prototype = nullptr;
+        std::map<std::string, const std::vector<int64_t>*> sequences;
+    };
+
+    std::vector<std::string> expectedNames;
+    std::vector<MatchedAnchor> matchedAnchors;
+    std::set<size_t> distinctAnchorMetadataIndices;
+    for (size_t anchorIndex = 0; anchorIndex < runtimeAnchors.size(); ++anchorIndex)
+    {
+        const RuntimeOperandLaneAnchor& anchor = runtimeAnchors[anchorIndex];
+        std::map<std::string, const std::vector<int64_t>*> sequences;
+        for (const NamedRuntimeOperandLaneSequence& lane : anchor.lanes)
+        {
+            if (lane.name.empty() || !sequences.emplace(lane.name, &lane.values).second)
+                return invalid("runtime operand-lane names must be nonempty and unique within each anchor");
+            if (lane.values.size() != anchor.instruction_count)
+                return invalid("runtime operand-lane sequence length does not equal its anchor instruction count");
+        }
+
+        std::vector<std::string> names;
+        names.reserve(sequences.size());
+        for (const auto& [name, values] : sequences)
+        {
+            (void)values;
+            names.push_back(name);
+        }
+        if (anchorIndex == 0)
+        {
+            if (names.size() < 3)
+                return invalid("runtime anchors must expose at least three named operand lanes");
+            expectedNames = names;
+        }
+        else if (names != expectedNames)
+        {
+            return invalid("runtime anchors do not expose the same operand-lane names");
+        }
+
+        auto staticRows = staticByInstructionCount.find(anchor.instruction_count);
+        if (staticRows == staticByInstructionCount.end() || staticRows->second.size() != 1)
+            continue;
+
+        const NormalizedPrototype* prototype = staticRows->second.front();
+        matchedAnchors.push_back({prototype, std::move(sequences)});
+        result.anchor_metadata_indices.push_back(prototype->metadata_index);
+        distinctAnchorMetadataIndices.insert(prototype->metadata_index);
+    }
+
+    result.uniquely_matched_anchor_count = matchedAnchors.size();
+    if (distinctAnchorMetadataIndices.size() < 2)
+    {
+        result.status = OperandLaneProjectionStatus::InsufficientEvidence;
+        result.diagnostic = "fewer than two distinct runtime anchors uniquely match static instruction counts";
+        return result;
+    }
+
+    constexpr std::array<NormalizedOperandLane, 3> normalizedLanes{
+        NormalizedOperandLane::D,
+        NormalizedOperandLane::G,
+        NormalizedOperandLane::p,
+    };
+    std::array<std::vector<std::string>, 3> matchingNames;
+    for (size_t laneIndex = 0; laneIndex < normalizedLanes.size(); ++laneIndex)
+    {
+        const NormalizedOperandLane normalizedLane = normalizedLanes[laneIndex];
+        for (const std::string& name : expectedNames)
+        {
+            bool matchesEveryAnchor = true;
+            for (const MatchedAnchor& anchor : matchedAnchors)
+            {
+                const std::vector<int64_t>& runtimeSequence = *anchor.sequences.at(name);
+                const std::vector<NormalizedInstruction>& staticInstructions = anchor.prototype->instructions;
+                if (!std::equal(runtimeSequence.begin(), runtimeSequence.end(), staticInstructions.begin(),
+                        staticInstructions.end(), [&](int64_t runtimeValue, const NormalizedInstruction& instruction) {
+                            return runtimeValue == operandLane(instruction, normalizedLane).base_value;
+                        }))
+                {
+                    matchesEveryAnchor = false;
+                    break;
+                }
+            }
+            if (matchesEveryAnchor)
+                matchingNames[laneIndex].push_back(name);
+        }
+    }
+
+    for (const std::string& dName : matchingNames[0])
+    {
+        for (const std::string& gName : matchingNames[1])
+        {
+            if (gName == dName)
+                continue;
+            for (const std::string& pName : matchingNames[2])
+            {
+                if (pName == dName || pName == gName)
+                    continue;
+                OperandLaneProjection projection;
+                projection.bindings = {{
+                    {dName, NormalizedOperandLane::D},
+                    {gName, NormalizedOperandLane::G},
+                    {pName, NormalizedOperandLane::p},
+                }};
+                result.candidates.push_back(std::move(projection));
+            }
+        }
+    }
+
+    if (result.candidates.empty())
+    {
+        result.status = OperandLaneProjectionStatus::Contradictory;
+        result.diagnostic = "no injective operand-lane projection matches every uniquely count-matched anchor";
+    }
+    else if (result.candidates.size() == 1)
+    {
+        result.status = OperandLaneProjectionStatus::Unique;
+        result.diagnostic = "one operand-lane projection exactly matches every uniquely count-matched anchor";
+    }
+    else
+    {
+        result.status = OperandLaneProjectionStatus::Ambiguous;
+        result.diagnostic = std::to_string(result.candidates.size()) +
+            " operand-lane projections exactly match every uniquely count-matched anchor";
     }
     return result;
 }
@@ -771,6 +948,30 @@ const char* toString(ReferenceKind kind)
     case ReferenceKind::None: return "none";
     case ReferenceKind::Constant: return "constant";
     case ReferenceKind::Prototype: return "prototype";
+    }
+    return "unknown";
+}
+
+const char* toString(NormalizedOperandLane lane)
+{
+    switch (lane)
+    {
+    case NormalizedOperandLane::D: return "D";
+    case NormalizedOperandLane::G: return "G";
+    case NormalizedOperandLane::p: return "p";
+    }
+    return "unknown";
+}
+
+const char* toString(OperandLaneProjectionStatus status)
+{
+    switch (status)
+    {
+    case OperandLaneProjectionStatus::Unique: return "unique";
+    case OperandLaneProjectionStatus::Ambiguous: return "ambiguous";
+    case OperandLaneProjectionStatus::Contradictory: return "contradictory";
+    case OperandLaneProjectionStatus::InsufficientEvidence: return "insufficient_evidence";
+    case OperandLaneProjectionStatus::InvalidEvidence: return "invalid_evidence";
     }
     return "unknown";
 }

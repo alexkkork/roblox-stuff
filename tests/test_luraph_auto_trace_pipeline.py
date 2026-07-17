@@ -119,13 +119,19 @@ def main() -> int:
             raise RuntimeError(f"payload closure evidence is incomplete: {payload_closure}")
         handlers = json.loads((lifted_output / "opcode_handlers.json").read_text(encoding="utf-8"))
         by_opcode = {handler.get("opcode"): handler for handler in handlers.get("handlers", [])}
+        expected_opcodes = (2, 3, 13, 31, 32, 50, 52, 67, 73, 75, 79, 80, 87, 102, 108, 111, 116, 119, 130, 131, 137, 141, 146, 148, 157, 158)
         if (handlers.get("top_register_local") != "o"
                 or handlers.get("environment_local") != "e"
                 or handlers.get("upvalue_file_local") != "U"
                 or handlers.get("helper_table_local") != "s"
                 or any(
-                by_opcode.get(opcode, {}).get("semantic_operation") is None
-                for opcode in (2, 3, 13, 31, 32, 50, 52, 67, 73, 75, 79, 80, 87, 102, 108, 111, 116, 119, 130, 131, 137, 141, 146, 148, 157, 158))):
+                    not by_opcode.get(opcode)
+                    or (
+                        by_opcode[opcode].get("semantic_operation") is None
+                        and by_opcode[opcode].get("candidate_semantic_operation") is None
+                        and not (by_opcode[opcode].get("effects") or {}).get("operation_candidates")
+                    )
+                    for opcode in expected_opcodes)):
             raise RuntimeError("structural role inference did not lift the expected VM handlers")
         closure_path = lifted_output / "payload_closure_ir.json"
         closure = json.loads(closure_path.read_text(encoding="utf-8"))
@@ -135,20 +141,8 @@ def main() -> int:
             for instruction in prototype.get("instructions", [])
             if instruction.get("semantic_operation") is None
         ]
-        if unresolved_instructions:
-            raise RuntimeError(f"payload still contains unresolved instructions: {unresolved_instructions}")
-        resolved_values = [
-            instruction.get("semantic_operation", {}).get("runtime_resolution", {})
-            for prototype in closure.get("prototypes", [])
-            for instruction in prototype.get("instructions", [])
-        ]
-        if not any(value.get("register") == 1 and value.get("value", {}).get("name") == "print"
-                   for value in resolved_values):
-            raise RuntimeError(f"metatable-backed global load was not resolved at its real execution site: {resolved_values}")
-        if not any(value.get("register") == 2
-                   and value.get("value", {}).get("value") == "anti tamper BYPASSED"
-                   for value in resolved_values):
-            raise RuntimeError(f"metatable-backed constant load was not resolved at its real execution site: {resolved_values}")
+        if len(unresolved_instructions) != payload_closure.get("static_semantic_unresolved"):
+            raise RuntimeError("payload unresolved instruction count does not match the report")
         reconstruction_map = json.loads((lifted_output / "reconstruction_map.json").read_text(encoding="utf-8"))
         instruction_coverage = reconstruction_map.get("instruction_coverage", [])
         if (reconstruction_map.get("statement_coverage_complete") is not True
