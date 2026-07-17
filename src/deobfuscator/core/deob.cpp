@@ -10746,13 +10746,18 @@ std::optional<json> validateLuraphObservedCandidate(
                 bool matchedRegisterOrigin = false;
                 for (const json& source : *origin)
                 {
-                    if (!source.is_object() ||
-                        source.value("index", std::numeric_limits<int64_t>::min()) != *expectedRegisterOrigin)
+                    if (!source.is_object())
                         return std::nullopt;
                     const std::string sourceKind = source.value("kind", "");
                     if (sourceKind == "register")
-                        matchedRegisterOrigin = true;
-                    else if (sourceKind != "argument")
+                    {
+                        if (source.value("index", std::numeric_limits<int64_t>::min()) ==
+                            *expectedRegisterOrigin)
+                            matchedRegisterOrigin = true;
+                    }
+                    else if (sourceKind != "argument" ||
+                        source.value("index", std::numeric_limits<int64_t>::min()) !=
+                            *expectedRegisterOrigin)
                         return std::nullopt;
                 }
                 if (!matchedRegisterOrigin)
@@ -11317,6 +11322,101 @@ json inferLuraphObservationalSiteOperation(
                 {"proof", "complete_write_origin_set"},
             });
         operation["argument_bindings"] = std::move(bindings);
+        return operation;
+    }
+
+    std::optional<int64_t> moveDestination;
+    std::optional<int64_t> moveSource;
+    bool observedRegisterMove = !observations.empty();
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json origins = observation.value("write_origins", json::object());
+        if (!guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) ||
+            observation.value("next_pc", int64_t(-1)) != static_cast<int64_t>(pc + 1) ||
+            !writes.is_array() || writes.size() != 1 || !writes[0].is_object())
+        {
+            observedRegisterMove = false;
+            break;
+        }
+        const int64_t destination = writes[0].value(
+            "register", std::numeric_limits<int64_t>::min());
+        const auto origin = origins.is_object()
+            ? origins.find(std::to_string(destination)) : origins.end();
+        if (destination == std::numeric_limits<int64_t>::min() || origin == origins.end() ||
+            !origin->is_array() || origin->empty())
+        {
+            observedRegisterMove = false;
+            break;
+        }
+
+        std::set<int64_t> registerOrigins;
+        std::vector<int64_t> argumentOrigins;
+        for (const json& source : *origin)
+        {
+            if (!source.is_object())
+            {
+                observedRegisterMove = false;
+                break;
+            }
+            const int64_t index = source.value(
+                "index", std::numeric_limits<int64_t>::min());
+            if (index == std::numeric_limits<int64_t>::min())
+            {
+                observedRegisterMove = false;
+                break;
+            }
+            const std::string kind = source.value("kind", "");
+            if (kind == "register")
+                registerOrigins.insert(index);
+            else if (kind == "argument")
+                argumentOrigins.push_back(index);
+            else
+            {
+                observedRegisterMove = false;
+                break;
+            }
+        }
+        if (!observedRegisterMove || registerOrigins.size() != 1)
+        {
+            observedRegisterMove = false;
+            break;
+        }
+        const int64_t source = *registerOrigins.begin();
+        if (std::any_of(argumentOrigins.begin(), argumentOrigins.end(),
+                [source](int64_t argument) { return argument != source; }) ||
+            (moveDestination && *moveDestination != destination) ||
+            (moveSource && *moveSource != source))
+        {
+            observedRegisterMove = false;
+            break;
+        }
+        moveDestination = destination;
+        moveSource = source;
+    }
+    if (observedRegisterMove && moveDestination && moveSource)
+    {
+        const auto constant = [](int64_t value) {
+            return json{{"kind", "constant"}, {"value", value}};
+        };
+        json operation = evidence("move");
+        operation["kind"] = "register_write";
+        operation["register"] = constant(*moveDestination);
+        operation["value"] = {
+            {"kind", "register_read"},
+            {"index", constant(*moveSource)},
+        };
+        operation["proof"] = "complete_observation_set_and_unique_register_origin";
+        operation["source_claim"] = false;
+        operation["runtime_validation"] = {
+            {"validated_fields", json::array({
+                "destination_register", "unique_source_register", "guard_path", "next_pc",
+            })},
+            {"destination_register", *moveDestination},
+            {"source_register", *moveSource},
+        };
         return operation;
     }
 
