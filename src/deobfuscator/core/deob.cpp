@@ -12469,6 +12469,34 @@ json luraphRuntimeSemanticDispatchArtifact(
                 else
                     ++opcode89SitesRejected;
             }
+            if (!semanticAccepted && opcode == 193 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null())
+            {
+                ++opcode193SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode193EmptyTable(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode193_empty_table_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", false},
+                };
+                opcode193RecognitionStatusCounts[recognized.status] =
+                    opcode193RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode193ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["observational_semantic_operation"] = std::move(recognized.operation);
+                    ++observationalSemanticLifted;
+                    ++opcode193SitesObservational;
+                    observationalOperationCounts["table_constructor"] =
+                        observationalOperationCounts.value("table_constructor", size_t(0)) + 1;
+                }
+                else
+                    ++opcode193SitesRejected;
+            }
             if (!semanticAccepted && observedSite != observationsBySite.end() &&
                 row["observational_semantic_operation"].is_null())
             {
