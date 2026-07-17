@@ -1,7 +1,10 @@
 #include "luraph/vm.hpp"
 
+#include <algorithm>
 #include <array>
 #include <iostream>
+#include <optional>
+#include <vector>
 #include <string_view>
 
 namespace luraph = alex::deobfuscator::luraph;
@@ -24,6 +27,132 @@ luraph::InstructionMetadata instruction(size_t index, std::array<int64_t, 4> wor
     for (size_t word = 0; word < words.size(); ++word)
         result.words[word].value = words[word];
     return result;
+}
+
+void addInstructions(luraph::PrototypeMetadata& prototype, size_t count)
+{
+    prototype.instruction_count = count;
+    prototype.instructions.reserve(count);
+    for (size_t index = 0; index < count; ++index)
+        prototype.instructions.push_back(instruction(index, {0, 0, 0, 0}));
+}
+
+luraph::DescriptorMetadata captureDescriptor(
+    size_t index,
+    size_t parent,
+    unsigned int kind,
+    uint64_t sourceIndex)
+{
+    luraph::DescriptorMetadata descriptor;
+    descriptor.index = index;
+    descriptor.capture_semantics_verified = true;
+    descriptor.capture_kind_code = kind;
+    descriptor.capture_source_index = sourceIndex;
+    descriptor.parent_prototype_index = parent;
+    descriptor.source_index_validated = true;
+    descriptor.source_index_in_bounds = true;
+    return descriptor;
+}
+
+luraph::ContainerAnalysis starContainer(size_t prototypeCount, size_t rootIndex, bool uniqueInstructionCounts)
+{
+    luraph::ContainerAnalysis container;
+    container.prototype_count = prototypeCount;
+    container.root_selector = rootIndex + 1;
+    container.root_metadata_index = rootIndex;
+    container.root_selector_in_bounds = true;
+    container.root_selector_graph_validated = true;
+    container.prototype_graph_complete = true;
+    container.prototypes.resize(prototypeCount);
+
+    for (size_t index = 0; index < prototypeCount; ++index)
+    {
+        luraph::PrototypeMetadata& prototype = container.prototypes[index];
+        prototype.index = index;
+        const size_t instructionCount = index == rootIndex
+            ? prototypeCount + 1
+            : (uniqueInstructionCounts ? index + 1 : 1);
+        addInstructions(prototype, instructionCount);
+        prototype.register_capacity = prototypeCount + 8;
+        prototype.register_capacity_verified = true;
+        prototype.secondary_meta = prototype.register_capacity;
+        if (index == rootIndex)
+            continue;
+        prototype.parent_prototype_index = rootIndex;
+        prototype.incoming_prototype_reference_count = 1;
+        prototype.descriptors.push_back(captureDescriptor(0, rootIndex, 0, index));
+        prototype.descriptor_count = 1;
+        ++container.prototypes_with_capture_descriptors;
+        ++container.validated_capture_descriptor_count;
+    }
+
+    size_t sourcePc = 1;
+    luraph::PrototypeMetadata& root = container.prototypes[rootIndex];
+    for (size_t child = 0; child < prototypeCount; ++child)
+    {
+        if (child == rootIndex)
+            continue;
+        luraph::PrototypeReferenceMetadata reference;
+        reference.instruction_index = sourcePc - 1;
+        reference.operand_word_index = 2;
+        reference.wrapper_index = static_cast<int64_t>(child + 1);
+        reference.metadata_index = child;
+        reference.in_bounds = true;
+        reference.opcode = 112;
+        reference.closure_target = true;
+        reference.capture_descriptor_count = 1;
+        root.prototype_references.push_back(reference);
+        ++sourcePc;
+    }
+    container.prototype_reference_count = root.prototype_references.size();
+    container.valid_prototype_reference_count = root.prototype_references.size();
+    container.closure_target_count = root.prototype_references.size();
+    for (const luraph::PrototypeMetadata& prototype : container.prototypes)
+        container.instruction_count += prototype.instruction_count;
+    return container;
+}
+
+std::vector<vm::RuntimePrototypeRecord> runtimeRecords(const vm::StaticPrototypeIndex& index)
+{
+    std::vector<vm::RuntimePrototypeRecord> records;
+    records.reserve(index.prototypes.size());
+    const auto runtimeId = [](size_t staticIndex) { return uint64_t(100000 + staticIndex * 17); };
+    for (const vm::StaticPrototypeShape& prototype : index.prototypes)
+    {
+        vm::RuntimePrototypeRecord row;
+        row.runtime_id = runtimeId(prototype.metadata_index);
+        row.instruction_count = prototype.fingerprint.instruction_count;
+        row.is_root = prototype.fingerprint.is_root;
+        row.captures = prototype.fingerprint.captures;
+        row.captures_complete = true;
+        row.closure_targets_complete = true;
+        if (prototype.parent_metadata_index)
+        {
+            row.parent_runtime_id = runtimeId(*prototype.parent_metadata_index);
+            row.parent_closure_pc = prototype.parent_closure_pc;
+        }
+        for (const vm::StaticPrototypeShape::ClosureEdge& edge : prototype.closure_edges)
+        {
+            vm::RuntimeClosureEvidence closure;
+            closure.source_pc = edge.source_pc;
+            closure.target_runtime_id = runtimeId(edge.target_metadata_index);
+            closure.captures = index.prototypes[edge.target_metadata_index].fingerprint.captures;
+            closure.captures_complete = true;
+            row.closure_targets.push_back(std::move(closure));
+        }
+        records.push_back(std::move(row));
+    }
+    std::reverse(records.begin(), records.end());
+    return records;
+}
+
+const vm::PrototypeCorrespondence* correspondence(
+    const vm::PrototypeCorrespondenceResult& result,
+    uint64_t runtimeId)
+{
+    auto row = std::find_if(result.records.begin(), result.records.end(),
+        [&](const vm::PrototypeCorrespondence& item) { return item.runtime_id == runtimeId; });
+    return row == result.records.end() ? nullptr : &*row;
 }
 
 } // namespace
@@ -90,6 +219,85 @@ int main()
     container.root_selector = 0;
     const vm::NormalizedContainer invalidRoot = vm::normalizeContainer(container);
     ok &= require(!invalidRoot.root_valid && !invalidRoot.root_metadata_index.has_value(), "invalid root selector was accepted");
+
+    const luraph::ContainerAnalysis exactShape = starContainer(399, 265, true);
+    const vm::StaticPrototypeIndex staticIndex = vm::buildStaticPrototypeIndex(exactShape);
+    ok &= require(staticIndex.valid && staticIndex.prototypes.size() == 399 &&
+                      staticIndex.root_metadata_index == std::optional<size_t>(265) &&
+                      staticIndex.prototypes[265].wrapper_index == 266,
+        "399-prototype static graph or root selector 266 was not indexed exactly");
+    ok &= require(staticIndex.prototypes[265].closure_edges.size() == 398 &&
+                      staticIndex.prototypes[0].parent_metadata_index == std::optional<size_t>(265) &&
+                      staticIndex.prototypes[0].parent_closure_pc == std::optional<size_t>(1) &&
+                      staticIndex.prototypes[0].fingerprint.captures ==
+                          std::vector<vm::CaptureDescriptorShape>{{0, 0}},
+        "closure targets, parents, or capture descriptors were not retained in the static index");
+    const uint64_t firstDigest = staticIndex.prototypes[265].fingerprint.digest;
+    const vm::StaticPrototypeIndex repeatedIndex = vm::buildStaticPrototypeIndex(exactShape);
+    ok &= require(firstDigest != 0 && repeatedIndex.valid &&
+                      repeatedIndex.prototypes[265].fingerprint.digest == firstDigest,
+        "structural fingerprint is not deterministic");
+
+    const std::vector<vm::RuntimePrototypeRecord> exactRuntime = runtimeRecords(staticIndex);
+    const vm::PrototypeCorrespondenceResult exactMapping =
+        vm::correlateRuntimePrototypes(staticIndex, exactRuntime);
+    ok &= require(exactMapping.static_evidence_valid && exactMapping.runtime_evidence_valid &&
+                      exactMapping.matched_count == 399 && exactMapping.ambiguous_count == 0 &&
+                      exactMapping.unmatched_count == 0,
+        "complete runtime graph did not map all 399 prototypes deterministically");
+    const vm::PrototypeCorrespondence* mappedRoot = correspondence(exactMapping, 100000 + 265 * 17);
+    ok &= require(mappedRoot && mappedRoot->status == vm::CorrespondenceStatus::Matched &&
+                      mappedRoot->static_metadata_index == std::optional<size_t>(265) &&
+                      std::find(mappedRoot->proof.begin(), mappedRoot->proof.end(),
+                          vm::CorrespondenceProof::GraphRoot) != mappedRoot->proof.end() &&
+                      std::find(mappedRoot->proof.begin(), mappedRoot->proof.end(),
+                          vm::CorrespondenceProof::CompleteStructuralFingerprint) != mappedRoot->proof.end(),
+        "runtime root was not mapped to static wrapper selector 266 with explicit proof");
+
+    const luraph::ContainerAnalysis duplicateShape = starContainer(3, 0, false);
+    const vm::StaticPrototypeIndex duplicateIndex = vm::buildStaticPrototypeIndex(duplicateShape);
+    std::vector<vm::RuntimePrototypeRecord> ambiguousRuntime(2);
+    for (size_t index = 0; index < ambiguousRuntime.size(); ++index)
+    {
+        ambiguousRuntime[index].runtime_id = 700 + index;
+        ambiguousRuntime[index].instruction_count = 1;
+        ambiguousRuntime[index].is_root = false;
+        ambiguousRuntime[index].captures = {{0, 1 + index}};
+        ambiguousRuntime[index].captures_complete = false;
+    }
+    const vm::PrototypeCorrespondenceResult ambiguousMapping =
+        vm::correlateRuntimePrototypes(duplicateIndex, ambiguousRuntime);
+    ok &= require(ambiguousMapping.runtime_evidence_valid && ambiguousMapping.matched_count == 0 &&
+                      ambiguousMapping.ambiguous_count == 2 &&
+                      ambiguousMapping.records[0].candidate_metadata_indices.size() == 2,
+        "duplicate runtime shapes were guessed instead of remaining ambiguous");
+
+    std::vector<vm::RuntimePrototypeRecord> edgeRuntime = runtimeRecords(duplicateIndex);
+    const vm::PrototypeCorrespondenceResult edgeMapping =
+        vm::correlateRuntimePrototypes(duplicateIndex, edgeRuntime);
+    ok &= require(edgeMapping.matched_count == 3 && edgeMapping.ambiguous_count == 0,
+        "proven parent closure PCs did not disambiguate duplicate child shapes");
+
+    std::vector<vm::RuntimePrototypeRecord> invalidRuntime = edgeRuntime;
+    invalidRuntime.push_back(invalidRuntime.front());
+    const vm::PrototypeCorrespondenceResult invalidMapping =
+        vm::correlateRuntimePrototypes(duplicateIndex, invalidRuntime);
+    ok &= require(!invalidMapping.runtime_evidence_valid && !invalidMapping.records.empty() &&
+                      std::all_of(invalidMapping.records.begin(), invalidMapping.records.end(),
+                          [](const vm::PrototypeCorrespondence& row) {
+                              return row.status == vm::CorrespondenceStatus::InvalidEvidence;
+                          }),
+        "duplicate runtime identifiers were not rejected as invalid evidence");
+
+    luraph::ContainerAnalysis unproved = exactShape;
+    unproved.prototype_graph_complete = false;
+    const vm::StaticPrototypeIndex unprovedIndex = vm::buildStaticPrototypeIndex(unproved);
+    ok &= require(!unprovedIndex.valid && unprovedIndex.prototypes.empty(),
+        "unproved static graph was accepted for runtime correspondence");
+    ok &= require(std::string_view(vm::toString(vm::CorrespondenceStatus::Ambiguous)) == "ambiguous" &&
+                      std::string_view(vm::toString(vm::CorrespondenceProof::ParentClosureEdge)) ==
+                          "parent_closure_edge",
+        "correspondence status or proof labels are unstable");
 
     if (!ok)
         return 1;

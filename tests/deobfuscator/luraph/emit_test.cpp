@@ -292,6 +292,19 @@ json callArgumentInstruction(int pc, int functionRegister, int firstArgument, in
     return instruction;
 }
 
+json pathSpecificInstruction(int pc, json operation)
+{
+    operation["path_specific"] = true;
+    operation["static_semantic"] = false;
+    operation["proof"] = "complete_observation_set";
+    return {
+        {"pc", pc},
+        {"opcode", 200 + pc},
+        {"semantic_operation", nullptr},
+        {"observational_semantic_operation", std::move(operation)},
+    };
+}
+
 json prototype(int id, json instructions)
 {
     return {{"runtime_id", id}, {"entry_pc", 1}, {"instructions", std::move(instructions)}};
@@ -888,9 +901,10 @@ bool testClosureConstructionEmitsDirectCallback()
         "            [1] = registers[5],\n"
         "            [2] = captured_values[0],\n"
         "          }\n"
-        "          registers[7] = function(...)\n"
+        "          local recovered_callback_2_1 = function(...)\n"
         "            return recovered_routine_3(callback_captures, ...)\n"
-        "          end";
+        "          end\n"
+        "          registers[7] = recovered_callback_2_1";
     bool ok = true;
     ok &= require(candidate.source.find(expected) != std::string::npos,
         "complete closure descriptor was not reconstructed as a direct callback with declarative captures");
@@ -1318,6 +1332,164 @@ bool testSequenceTerminalReturnSuppressesCfgFallthrough()
         "a sequence-wrapped return retained the CFG fallthrough transition");
 }
 
+bool testPathSpecificWritesCallAndReturnRenderCleanly()
+{
+    json returned = pathSpecificInstruction(4, {
+        {"kind", "return"},
+        {"values", json::array()},
+    });
+    returned["observed_returns"] = json::array({{
+        {"arity", 1},
+        {"complete", true},
+        {"values", json::array({number(7)})},
+    }});
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "register_write"},
+            {"register", immediate("D", 2)},
+            {"value", {{"kind", "constant"}, {"value", number(7)}}},
+        }),
+        pathSpecificInstruction(2, {
+            {"kind", "table_write"},
+            {"table", {{"kind", "register_read"}, {"index", immediate("D", 1)}}},
+            {"index", {{"kind", "constant"}, {"value", "answer"}}},
+            {"value", {{"kind", "register_read"}, {"index", immediate("D", 2)}}},
+        }),
+        pathSpecificInstruction(3, {
+            {"kind", "call"},
+            {"function", {{"kind", "register_read"}, {"index", immediate("D", 3)}}},
+            {"arguments", json::array({
+                {{"kind", "register_read"}, {"index", immediate("D", 2)}},
+            })},
+        }),
+        std::move(returned),
+    }), 0, 4);
+
+    bool ok = true;
+    ok &= require(candidate.source.find("registers[2] = 7;") != std::string::npos,
+        "path-specific register write was not rendered");
+    ok &= require(candidate.source.find("(registers[1])[\"answer\"] = registers[2];") != std::string::npos,
+        "path-specific table write was not rendered");
+    ok &= require(candidate.source.find("(registers[3])(registers[2]);") != std::string::npos,
+        "path-specific call was not rendered");
+    ok &= require(candidate.source.find("return 7") != std::string::npos,
+        "stable observed return value was not rendered");
+    ok &= require(candidate.path_specific_operations == 4 &&
+            candidate.path_specific_register_writes == 1 && candidate.path_specific_table_writes == 1 &&
+            candidate.path_specific_calls == 1 && candidate.path_specific_returns == 1,
+        "path-specific operation metrics were not recorded by semantic family");
+    ok &= require(candidate.verified_return_sites == 1 && candidate.return_arity_mismatches == 0,
+        "stable path-specific return evidence was not verified");
+    ok &= require(candidate.unsupported_path_specific_operations == 0,
+        "fully described path-specific operations were marked unsupported");
+    return ok;
+}
+
+bool testPathSpecificClosureAndJumpUseRecoveredMetadata()
+{
+    json childDescriptor = descriptor(3, 7, 1);
+    childDescriptor["captures"][0] = {
+        {"capture_index", 0}, {"capture_kind", 2}, {"slot", 0},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "closure"},
+            {"descriptor", childDescriptor},
+        }),
+        pathSpecificInstruction(2, {
+            {"kind", "jump"},
+            {"target", immediate("G", 2)},
+        }),
+        {{"pc", 3}, {"opcode", 31}, {"semantic_operation", {
+            {"kind", "return"}, {"values", json::array()},
+        }}},
+    }), 1, 3,
+        json::array({prototype(3, json::array({
+            {{"pc", 1}, {"opcode", 31}, {"semantic_operation", {
+                {"kind", "return"}, {"values", json::array()},
+            }}},
+        }))}),
+        json::array({cfgPrototype(3, 1)}));
+
+    bool ok = true;
+    ok &= require(candidate.source.find("local recovered_callback_2_1 = function(...)") != std::string::npos &&
+            candidate.source.find("registers[7] = recovered_callback_2_1") != std::string::npos,
+        "path-specific closure metadata was not rendered as a synthetic callback");
+    ok &= require(candidate.source.find("[0] = captured_values[0],") != std::string::npos,
+        "inherited path-specific capture metadata was not rendered");
+    ok &= require(candidate.source.find("pc = 3") != std::string::npos,
+        "path-specific jump did not use its validated CFG destination");
+    ok &= require(candidate.path_specific_closures == 1 && candidate.path_specific_control_flow == 1,
+        "path-specific closure or control-flow metrics were not recorded");
+    ok &= require(candidate.unresolved_closure_descriptors == 0,
+        "complete path-specific closure metadata was marked unresolved");
+    return ok;
+}
+
+bool testConditionlessPathSpecificBranchUsesOrderedReplay()
+{
+    const json returnOperation = {{"kind", "return"}, {"values", json::array()}};
+    json ir = {
+        {"payload_root", {{"payload_prototype", 2}, {"closure_descriptor", descriptor(2, 1, 0)}}},
+        {"prototype_call_edges", json::array()},
+        {"observed_transition_sequences", json::array({{
+            {"prototype", 2}, {"pc", 1}, {"next_pcs", json::array({2, 3})},
+            {"activation_sequences", json::array({
+                {{"activation", 10}, {"next_pcs", json::array({2})}},
+                {{"activation", 20}, {"next_pcs", json::array({3})}},
+            })},
+            {"repeat_from_sequence", 0},
+        }})},
+        {"prototypes", json::array({prototype(2, json::array({
+            pathSpecificInstruction(1, {
+                {"kind", "branch"}, {"condition", nullptr},
+                {"observed_targets", json::array({2, 3})},
+            }),
+            {{"pc", 2}, {"opcode", 31}, {"semantic_operation", returnOperation}},
+            {{"pc", 3}, {"opcode", 31}, {"semantic_operation", returnOperation}},
+        }))})},
+    };
+    json cfg = {{"prototypes", json::array({sparseCfgPrototype(2, 1, json::array({
+        {{"id", "p2_b1"}, {"start_pc", 1}, {"end_pc", 1}, {"reachable", true},
+            {"successors", json::array({"p2_b2", "p2_b3"})}, {"terminator", "observed_branch"}},
+        {{"id", "p2_b2"}, {"start_pc", 2}, {"end_pc", 2}, {"reachable", true},
+            {"successors", json::array()}, {"terminator", "return"}},
+        {{"id", "p2_b3"}, {"start_pc", 3}, {"end_pc", 3}, {"reachable", true},
+            {"successors", json::array()}, {"terminator", "return"}},
+    }))})}};
+
+    const SemanticCandidate candidate = emitSemanticCandidate(ir, cfg);
+    return require(candidate.source.find("if nil then") == std::string::npos,
+               "missing branch predicate was rendered as a false condition") &&
+        require(candidate.source.find(
+            "replay_activation_transition(replay_positions, 2, 1, {{2}, {3}}, 0)") != std::string::npos,
+            "conditionless observed branch did not use ordered path replay") &&
+        require(candidate.path_specific_control_flow == 1,
+            "conditionless path-specific branch was not counted") &&
+        require(candidate.unsupported_path_specific_operations == 0,
+            "ordered branch replay was incorrectly marked unsupported");
+}
+
+bool testIncompletePathSpecificCallStopsExplicitly()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "call"},
+            {"callee_prototypes", json::array({3})},
+            {"callee_activations", json::array({{{"activation", 9}, {"prototype", 3}}})},
+        }),
+    }), 0);
+    return require(candidate.source.find("Unsupported recovered operation; execution stops instead of guessing") !=
+               std::string::npos,
+               "incomplete path-specific call was not marked explicitly") &&
+        require(candidate.source.find("call target or argument expressions were not recovered") != std::string::npos,
+            "incomplete path-specific call did not explain its recovery boundary") &&
+        require(candidate.unsupported_path_specific_operations == 1 && candidate.unsupported_operations >= 1,
+            "incomplete path-specific call was not counted as unsupported") &&
+        require(!candidate.fully_rendered(),
+            "candidate with an incomplete path-specific call claimed full rendering");
+}
+
 } // namespace
 
 int main()
@@ -1350,6 +1522,10 @@ int main()
     ok &= testTraceBackedRootArgumentsAreSpecializedWithoutGuessing();
     ok &= testCompleteRootArgumentTableProvesAbsentSlotsAreNil();
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
+    ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
+    ok &= testPathSpecificClosureAndJumpUseRecoveredMetadata();
+    ok &= testConditionlessPathSpecificBranchUsesOrderedReplay();
+    ok &= testIncompletePathSpecificCallStopsExplicitly();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
     return ok ? 0 : 1;

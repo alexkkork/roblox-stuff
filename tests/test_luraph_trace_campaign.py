@@ -439,7 +439,11 @@ def main() -> int:
             "window guard-path count drifted",
         )
         require(
-            guard_path_report["vm_windows"]["windows"][0]["execution_vm_counts"] == 2,
+            sum(
+                window["execution_vm_counts"]
+                for window in guard_path_report["vm_windows"]["windows"]
+            )
+            == 2,
             "guard paths inflated window execution coverage",
         )
 
@@ -462,6 +466,56 @@ def main() -> int:
         )
         require(decoded_guard_paths[-1]["fields"][-1] == "", "JSONL lost the empty zero-decision path")
 
+        guard_path_edges = temp / "guard-path-edges.log"
+        guard_path_edges.write_text(
+            "\n".join(
+                [
+                    marker("@@LPH_GUARD_PATH_V1@@", 30, 6, 9, 80, 2, 0, "1:2:1|1:2:0"),
+                    marker("@@LPH_GUARD_PATH_V1@@", 31, 6, 10, 81, 1, 0, "3:4:1"),
+                    marker("@@LPH_GUARD_PATH_V1@@", 31, 6, 10, 81, 1, 1, "3:4:1"),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        guard_path_edge_report = run_campaign(
+            [guard_path_edges],
+            temp / "guard-path-edges-merged.log",
+            temp / "guard-path-edges-report.json",
+        )["guard_paths"]
+        require(guard_path_edge_report["records"] == 3, "valid edge-case guard paths were discarded")
+        require(
+            guard_path_edge_report["conditions_with_both_outcomes"] == 1,
+            "repeated condition spans were not preserved",
+        )
+        require(
+            guard_path_edge_report["conflicts"]["completion_conflicts"] == 1,
+            "completion conflict was not reported",
+        )
+        require(
+            guard_path_edge_report["execution_vm_counts"] == 0
+            and guard_path_edge_report["execution_vm_count_coverage_ratio"] is None,
+            "path-only evidence was presented as execution coverage",
+        )
+
+        maximum_entries = "|".join(
+            f"{index * 2}:{index * 2 + 1}:{index % 2}" for index in range(4096)
+        )
+        maximum_guard_path = temp / "maximum-guard-path.log"
+        maximum_guard_path.write_text(
+            marker("@@LPH_GUARD_PATH_V1@@", 40, 7, 11, 82, 4096, 1, maximum_entries) + "\n",
+            encoding="utf-8",
+        )
+        maximum_guard_path_report = run_campaign(
+            [maximum_guard_path],
+            temp / "maximum-guard-path-merged.log",
+            temp / "maximum-guard-path-report.json",
+        )["guard_paths"]
+        require(
+            maximum_guard_path_report["decision_observations"] == 4096,
+            "maximum valid guard path was rejected or truncated",
+        )
+
         invalid_guard_paths = {
             "missing field": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 0),
             "extra field": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 0, 0, "", "extra"),
@@ -481,6 +535,19 @@ def main() -> int:
             "decision range": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "1:2:2"),
             "negative integer": marker("@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, "-1:2:1"),
             "noncanonical integer": marker("@@LPH_GUARD_PATH_V1@@", "01", 1, 1, 1, 0, 0, ""),
+            "plus integer": marker("@@LPH_GUARD_PATH_V1@@", "+1", 1, 1, 1, 0, 0, ""),
+            "space integer": marker("@@LPH_GUARD_PATH_V1@@", " 1", 1, 1, 1, 0, 0, ""),
+            "float integer": marker("@@LPH_GUARD_PATH_V1@@", "1.0", 1, 1, 1, 0, 0, ""),
+            "unicode integer": marker("@@LPH_GUARD_PATH_V1@@", "١", 1, 1, 1, 0, 0, ""),
+            "vm overflow": marker(
+                "@@LPH_GUARD_PATH_V1@@", (1 << 64), 1, 1, 1, 0, 0, ""
+            ),
+            "pc overflow": marker(
+                "@@LPH_GUARD_PATH_V1@@", 1, 1, (1 << 63), 1, 0, 0, ""
+            ),
+            "span overflow": marker(
+                "@@LPH_GUARD_PATH_V1@@", 1, 1, 1, 1, 1, 0, f"0:{1 << 64}:1"
+            ),
         }
         for case, invalid_guard_path in invalid_guard_paths.items():
             invalid_path = temp / f"invalid-guard-path-{case.replace(' ', '-')}.log"
@@ -495,6 +562,28 @@ def main() -> int:
                 pass
             else:
                 raise AssertionError(f"invalid guard-path row was accepted: {case}")
+
+        invalid_guard_path_json = {
+            "null entry": [1, 1, 1, 1, 0, 0, None],
+            "boolean overflow": [1, 1, 1, 1, 0, False, ""],
+            "float count": [1, 1, 1, 1, 0.0, 0, ""],
+        }
+        for case, fields in invalid_guard_path_json.items():
+            invalid_path = temp / f"invalid-guard-path-json-{case.replace(' ', '-')}.jsonl"
+            invalid_path.write_text(
+                json.dumps({"marker": "@@LPH_GUARD_PATH_V1@@", "fields": fields}) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                run_campaign(
+                    [invalid_path],
+                    temp / f"invalid-guard-path-json-{case.replace(' ', '-')}-merged.log",
+                    temp / f"invalid-guard-path-json-{case.replace(' ', '-')}-report.json",
+                )
+            except CampaignError:
+                pass
+            else:
+                raise AssertionError(f"invalid guard-path JSON row was accepted: {case}")
 
         help_result = subprocess.run(
             [sys.executable, str(TOOL), "--help"],

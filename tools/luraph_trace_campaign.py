@@ -160,6 +160,13 @@ def parse_record(line: str, *, location: str) -> Record | None:
             raise CampaignError(f"{location}: invalid Luraph marker")
         if not isinstance(fields, list):
             raise CampaignError(f"{location}: JSONL fields must be an array")
+        if marker == GUARD_PATH_MARKER and any(
+            isinstance(value, bool) or value is None or not isinstance(value, (str, int))
+            for value in fields
+        ):
+            raise CampaignError(
+                f"{location}: guard-path JSONL fields must contain only strings or integers"
+            )
         record = Record(marker, tuple(_json_field(value) for value in fields))
         if marker == GUARD_MARKER:
             parse_guard_record(record, location=location)

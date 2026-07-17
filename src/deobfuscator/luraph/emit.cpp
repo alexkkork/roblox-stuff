@@ -968,9 +968,8 @@ private:
         {
             (void)pc;
             for (const json& instruction : rows)
-                if (instruction.contains("semantic_operation") &&
-                    (writesRegister(instruction["semantic_operation"], 1) ||
-                        rootArgumentTableEscapes(instruction["semantic_operation"])))
+                if (const json* semantic = semanticOperationForInstruction(instruction);
+                    semantic && (writesRegister(*semantic, 1) || rootArgumentTableEscapes(*semantic)))
                 {
                     rootArgumentExpressions.clear();
                     rootArgumentTableComplete = false;
@@ -1146,13 +1145,34 @@ private:
                     instruction["observed_returns"].empty())
                     continue;
                 result.observed_return_events += instruction["observed_returns"].size();
-                if (!instruction.contains("semantic_operation") || !instruction["semantic_operation"].is_object() ||
-                    instruction["semantic_operation"].value("kind", "") != "return")
+                const json* semantic = semanticOperationForInstruction(instruction);
+                if (!semantic || semantic->value("kind", "") != "return")
                 {
                     ++result.return_arity_mismatches;
                     continue;
                 }
-                const json values = instruction["semantic_operation"].value("values", json::array());
+                const json values = semantic->value("values", json::array());
+                if (isPathSpecificOperation(*semantic) && values.is_array() && values.empty())
+                {
+                    const json& first = instruction["observed_returns"].front();
+                    const bool stable = first.is_object() && first.value("complete", false) &&
+                        first.contains("values") && first["values"].is_array() &&
+                        std::all_of(instruction["observed_returns"].begin(),
+                            instruction["observed_returns"].end(), [&](const json& returned) {
+                                return returned.is_object() && returned.value("complete", false) &&
+                                    returned.value("arity", std::numeric_limits<size_t>::max()) ==
+                                        first["values"].size() &&
+                                    returned.value("values", json(nullptr)) == first["values"];
+                            }) &&
+                        std::all_of(first["values"].begin(), first["values"].end(), [](const json& returned) {
+                            return specializationPrimitiveLiteral(returned).has_value();
+                        });
+                    if (stable)
+                        ++result.verified_return_sites;
+                    else
+                        ++result.return_arity_mismatches;
+                    continue;
+                }
                 bool explicitArity = values.is_array();
                 if (explicitArity && !values.empty() && values.back().is_object())
                 {
@@ -1677,8 +1697,8 @@ private:
         if (!evidence.argument_count_complete || !evidence.argument_count)
             return std::nullopt;
         std::vector<const json*> calls;
-        if (instruction.contains("semantic_operation") && instruction["semantic_operation"].is_object())
-            collectCallExpressions(instruction["semantic_operation"], calls);
+        if (const json* semantic = semanticOperationForInstruction(instruction))
+            collectCallExpressions(*semantic, calls);
         if (calls.size() == 1)
         {
             const json& call = *calls.front();
@@ -1757,6 +1777,39 @@ private:
         return false;
     }
 
+    static bool isPathSpecificOperation(const json& value)
+    {
+        return value.is_object() && value.value("path_specific", false) &&
+            !value.value("static_semantic", true) && !value.value("proof", "").empty();
+    }
+
+    static const json* semanticOperationForInstruction(const json& instruction)
+    {
+        if (instruction.contains("semantic_operation") && instruction["semantic_operation"].is_object())
+            return &instruction["semantic_operation"];
+        if (instruction.contains("observational_semantic_operation") &&
+            isPathSpecificOperation(instruction["observational_semantic_operation"]))
+            return &instruction["observational_semantic_operation"];
+        return nullptr;
+    }
+
+    void recordPathSpecificOperation(const json& value)
+    {
+        ++result.path_specific_operations;
+        if (containsOperationKind(value, "register_write"))
+            ++result.path_specific_register_writes;
+        if (containsOperationKind(value, "table_write"))
+            ++result.path_specific_table_writes;
+        if (containsOperationKind(value, "jump") || containsOperationKind(value, "branch"))
+            ++result.path_specific_control_flow;
+        if (containsOperationKind(value, "call"))
+            ++result.path_specific_calls;
+        if (containsOperationKind(value, "return"))
+            ++result.path_specific_returns;
+        if (containsOperationKind(value, "closure"))
+            ++result.path_specific_closures;
+    }
+
     static bool hasCallableRuntimeResolution(const json& value)
     {
         if (value.is_array())
@@ -1831,9 +1884,10 @@ private:
                 if (instruction->contains("closure_descriptor") && (*instruction)["closure_descriptor"].is_object() &&
                     (*instruction)["closure_descriptor"].value("destination_register", int64_t(-1)) == registerIndex)
                     return std::nullopt;
-                if (!instruction->contains("semantic_operation") || !(*instruction)["semantic_operation"].is_object())
+                const json* semantic = semanticOperationForInstruction(*instruction);
+                if (!semantic)
                     continue;
-                const std::optional<json> written = registerWriteValue((*instruction)["semantic_operation"], registerIndex);
+                const std::optional<json> written = registerWriteValue(*semantic, registerIndex);
                 if (!written)
                     continue;
 
@@ -1930,10 +1984,11 @@ private:
                 if (instruction->contains("closure_descriptor") && (*instruction)["closure_descriptor"].is_object() &&
                     (*instruction)["closure_descriptor"].value("destination_register", int64_t(-1)) == registerIndex)
                     return std::nullopt;
-                if (!instruction->contains("semantic_operation") || !(*instruction)["semantic_operation"].is_object())
+                const json* semantic = semanticOperationForInstruction(*instruction);
+                if (!semantic)
                     continue;
                 const std::optional<RegisterWriteInfo> write =
-                    lastRegisterWrite((*instruction)["semantic_operation"], registerIndex);
+                    lastRegisterWrite(*semantic, registerIndex);
                 if (!write)
                     continue;
                 if (const std::optional<RegisterIdentitySlice> identity = observedRegisterIdentity(*write, row->first))
@@ -2047,8 +2102,8 @@ private:
             const auto& [callee, observedCalls] = *targets.begin();
             const std::optional<json> instruction = instructionAt(site.first, site.second);
             const Block* block = blockContaining(site.first, site.second);
-            if (!instruction || !block || !instruction->contains("semantic_operation") ||
-                !(*instruction)["semantic_operation"].is_object() || !completeCaptureIdentityDomain(site.first))
+            if (!instruction || !block || !semanticOperationForInstruction(*instruction) ||
+                !completeCaptureIdentityDomain(site.first))
                 continue;
             const auto frameEvidence = observedCallFrames.find({site.first, site.second, callee});
             if (frameEvidence == observedCallFrames.end())
@@ -2153,10 +2208,11 @@ private:
         {
             const auto instruction = instructionAt(site.first, site.second);
             const Block* block = blockContaining(site.first, site.second);
-            if (!instruction || !block || !instruction->contains("semantic_operation"))
+            const json* semantic = instruction ? semanticOperationForInstruction(*instruction) : nullptr;
+            if (!instruction || !block || !semantic)
                 continue;
             std::set<int64_t> functionRegisters;
-            collectCallFunctionRegisters((*instruction)["semantic_operation"], functionRegisters);
+            collectCallFunctionRegisters(*semantic, functionRegisters);
             if (functionRegisters.size() != 1)
                 continue;
             std::set<std::tuple<uint64_t, size_t, size_t, int64_t>> visited;
@@ -2186,10 +2242,10 @@ private:
                 (void)pc;
                 for (const json& instruction : instructionRows)
                 {
-                    if (!instruction.contains("semantic_operation") ||
-                        !hasCallableRuntimeResolution(instruction["semantic_operation"]))
+                    const json* semantic = semanticOperationForInstruction(instruction);
+                    if (!semantic || !hasCallableRuntimeResolution(*semantic))
                         continue;
-                    collectCaptureKeys(instruction["semantic_operation"], callableCaptureKeys[prototype]);
+                    collectCaptureKeys(*semantic, callableCaptureKeys[prototype]);
                 }
             }
 
@@ -2203,8 +2259,8 @@ private:
                 if (site.first != prototype)
                     continue;
                 const std::optional<json> instruction = instructionAt(site.first, site.second);
-                if (instruction && instruction->contains("semantic_operation") &&
-                    containsOperationKind((*instruction)["semantic_operation"], "call"))
+                const json* semantic = instruction ? semanticOperationForInstruction(*instruction) : nullptr;
+                if (semantic && containsOperationKind(*semantic, "call"))
                     reachableCallTargets.insert(callee);
             }
             if (reachableCallTargets.size() != 1)
@@ -2255,10 +2311,10 @@ private:
                         const int64_t destination = descriptor.value("destination_register", int64_t(-1));
                         if (target != 0 && destination >= 0)
                             closureRegisterTargets[prototype][destination].insert(target);
-                        if (target != 0 && instruction.contains("semantic_operation"))
+                        if (const json* semantic = semanticOperationForInstruction(instruction); target != 0 && semantic)
                         {
                             std::set<int64_t> semanticDestinations;
-                            collectRegisterWriteDestinations(instruction["semantic_operation"], semanticDestinations);
+                            collectRegisterWriteDestinations(*semantic, semanticDestinations);
                             if (semanticDestinations.size() == 1)
                                 closureRegisterTargets[prototype][*semanticDestinations.begin()].insert(target);
                         }
@@ -2305,10 +2361,11 @@ private:
                 for (const json& instruction : instructionRows)
                 {
 
-                    if (!instruction.contains("semantic_operation") || !instruction["semantic_operation"].is_object())
+                    const json* semantic = semanticOperationForInstruction(instruction);
+                    if (!semantic)
                         continue;
                     std::set<std::string> lanes;
-                    collectUpvalueIndexLanes(instruction["semantic_operation"], lanes);
+                    collectUpvalueIndexLanes(*semantic, lanes);
                     const json runtimeOverrides = instruction.value("runtime_lane_overrides", json::object());
                     const json staticLanes = instruction.value("static_lanes", json::object());
                     const json currentLanes = instruction.value("lanes", json::object());
@@ -2520,6 +2577,31 @@ private:
                 return context.runtime_lanes_variable + "[" + quoteLuau(lane) + "]";
             return primitiveLiteral(value.value("value", json(nullptr)));
         }
+        if (kind == "operand")
+        {
+            const std::string lane = jsonStringOr(value, "lane");
+            std::string source;
+            if (const auto stable = context.stable_lane_literals.find(lane);
+                !lane.empty() && stable != context.stable_lane_literals.end())
+                source = stable->second;
+            else if (!lane.empty() && !context.runtime_lanes_variable.empty() &&
+                context.runtime_lane_names.contains(lane))
+                source = context.runtime_lanes_variable + "[" + quoteLuau(lane) + "]";
+            else if (context.instruction && context.instruction->contains("lanes") &&
+                (*context.instruction)["lanes"].is_object() && (*context.instruction)["lanes"].contains(lane))
+                source = primitiveLiteral((*context.instruction)["lanes"][lane]);
+            if (source.empty())
+            {
+                ++result.unsupported_expressions;
+                return "unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+                    std::to_string(context.pc) + ", \"operand\", \"missing runtime lane " +
+                    identifier(lane.empty() ? "unknown" : lane) + "\")";
+            }
+            const int64_t adjustment = value.value("adjustment", int64_t(0));
+            if (adjustment != 0)
+                source = "(" + source + " + (" + std::to_string(adjustment) + "))";
+            return source;
+        }
         if (kind == "constant")
             return primitiveLiteral(value.value("value", json(nullptr)));
         if (kind == "observed_register_value")
@@ -2653,6 +2735,68 @@ private:
         return "state[\"unsupported_target\"]";
     }
 
+    void unsupportedOperation(std::string_view kind, std::string_view reason, size_t depth, const Context& context)
+    {
+        ++result.unsupported_operations;
+        if (context.path_specific)
+            ++result.unsupported_path_specific_operations;
+        const std::string prefix = indentation(depth);
+        append(prefix + "-- Unsupported recovered operation; execution stops instead of guessing.\n");
+        append(prefix + "unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+            std::to_string(context.pc) + ", " + quoteLuau(kind) + ", " + quoteLuau(reason) + ")\n");
+    }
+
+    std::optional<std::vector<std::string>> observedReturnLiterals(
+        const json& operation, const Context& context) const
+    {
+        const json* observations = nullptr;
+        if (operation.contains("observed_returns") && operation["observed_returns"].is_array())
+            observations = &operation["observed_returns"];
+        else if (context.instruction && context.instruction->contains("observed_returns") &&
+            (*context.instruction)["observed_returns"].is_array())
+            observations = &(*context.instruction)["observed_returns"];
+        if (!observations || observations->empty())
+            return std::nullopt;
+
+        const json* referenceValues = nullptr;
+        size_t referenceArity = std::numeric_limits<size_t>::max();
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object() || !observation.value("complete", false) ||
+                !observation.contains("arity") ||
+                !observation.contains("values") || !observation["values"].is_array())
+                return std::nullopt;
+            const json& arityValue = observation["arity"];
+            size_t arity = 0;
+            if (arityValue.is_number_unsigned())
+                arity = arityValue.get<size_t>();
+            else if (arityValue.is_number_integer() && arityValue.get<int64_t>() >= 0)
+                arity = static_cast<size_t>(arityValue.get<int64_t>());
+            else
+                return std::nullopt;
+            if (observation["values"].size() != arity)
+                return std::nullopt;
+            if (!referenceValues)
+            {
+                referenceValues = &observation["values"];
+                referenceArity = arity;
+            }
+            else if (referenceArity != arity || *referenceValues != observation["values"])
+                return std::nullopt;
+        }
+
+        std::vector<std::string> literals;
+        literals.reserve(referenceArity);
+        for (const json& value : *referenceValues)
+        {
+            const std::optional<std::string> literal = specializationPrimitiveLiteral(value);
+            if (!literal)
+                return std::nullopt;
+            literals.push_back(*literal);
+        }
+        return literals;
+    }
+
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
     {
         ++result.operations;
@@ -2668,6 +2812,12 @@ private:
         }
         if (kind == "register_write")
         {
+            if (!value.contains("register") || !value["register"].is_object() ||
+                !value.contains("value") || !value["value"].is_object())
+            {
+                unsupportedOperation(kind, "register destination or value is incomplete", depth, context);
+                return;
+            }
             const std::string registerIndex = expression(value.value("register", json::object()), context);
             const bool structuralCapture = hasCallArgumentIdentityResolution(
                 context.prototype, value.value("value", json::object()));
@@ -2679,9 +2829,27 @@ private:
         }
         if (kind == "table_write")
         {
+            if (!value.contains("table") || !value["table"].is_object() ||
+                !value.contains("index") || !value["index"].is_object() ||
+                !value.contains("value") || !value["value"].is_object())
+            {
+                unsupportedOperation(kind, "table, index, or value evidence is incomplete", depth, context);
+                return;
+            }
             append(prefix + "(" + expression(value.value("table", json::object()), context) + ")[" +
                 expression(value.value("index", json::object()), context) + "] = " +
                 expression(value.value("value", json::object()), context) + ";\n");
+            return;
+        }
+        if (kind == "call")
+        {
+            if (!value.contains("function") || !value["function"].is_object() ||
+                !value.contains("arguments") || !value["arguments"].is_array())
+            {
+                unsupportedOperation(kind, "call target or argument expressions were not recovered", depth, context);
+                return;
+            }
+            append(prefix + expression(value, context) + ";\n");
             return;
         }
         if (kind == "expression")
@@ -2794,15 +2962,39 @@ private:
         }
         if (kind == "return")
         {
-            append(prefix + "return");
             const json values = value.value("values", json::array());
-            for (size_t index = 0; index < values.size(); ++index)
-                append((index == 0 ? " " : ", ") + expression(values[index], context));
+            if (!values.is_array())
+            {
+                unsupportedOperation(kind, "return value list is incomplete", depth, context);
+                return;
+            }
+            std::vector<std::string> renderedValues;
+            for (const json& item : values)
+                renderedValues.push_back(expression(item, context));
+            if (context.path_specific && renderedValues.empty())
+            {
+                const std::optional<std::vector<std::string>> observed = observedReturnLiterals(value, context);
+                if (!observed)
+                {
+                    unsupportedOperation(kind, "observed return arity or values are incomplete or inconsistent", depth, context);
+                    return;
+                }
+                renderedValues = *observed;
+            }
+            append(prefix + "return");
+            for (size_t index = 0; index < renderedValues.size(); ++index)
+                append((index == 0 ? " " : ", ") + renderedValues[index]);
             append("\n");
             return;
         }
         if (kind == "branch")
         {
+            if (!value.contains("condition") || !value["condition"].is_object())
+            {
+                if (!controlHandled)
+                    unsupportedOperation(kind, "branch condition was not recovered", depth, context);
+                return;
+            }
             append(prefix + "if " + expression(value.value("condition", json::object()), context) + " then\n");
             for (const json& child : value.value("then", json::array()))
                 operation(child, depth + 1, context, controlHandled);
@@ -2820,8 +3012,8 @@ private:
             append(prefix + "pc = (" + expression(value.value("target", json::object()), context) + ") + 1;\n");
             return;
         }
-        ++result.unsupported_operations;
-        append(prefix + "-- unsupported semantic operation: " + (kind.empty() ? std::string("unknown") : kind) + "\n");
+        unsupportedOperation(kind.empty() ? std::string_view("unknown") : std::string_view(kind),
+            "operation kind is not implemented by the semantic emitter", depth, context);
     }
 
     std::optional<json> instructionAt(uint64_t prototype, size_t pc) const
@@ -2835,16 +3027,24 @@ private:
         return row->second.front();
     }
 
-    bool closureConstruction(const json& instruction, size_t depth, Context& context)
+    bool closureConstruction(const json& instruction, const json& semanticOperation,
+        size_t depth, Context& context)
     {
-        if (instruction.value("opcode", int64_t(-1)) != 22)
+        const bool semanticClosure = semanticOperation.value("kind", "") == "closure";
+        if (!semanticClosure && instruction.value("opcode", int64_t(-1)) != 22)
             return false;
-        if (!instruction.contains("closure_descriptor") || !instruction["closure_descriptor"].is_object())
+        const json* descriptorValue = nullptr;
+        if (instruction.contains("closure_descriptor") && instruction["closure_descriptor"].is_object())
+            descriptorValue = &instruction["closure_descriptor"];
+        else if (semanticClosure && semanticOperation.contains("descriptor") &&
+            semanticOperation["descriptor"].is_object())
+            descriptorValue = &semanticOperation["descriptor"];
+        if (!descriptorValue)
         {
             ++result.unresolved_closure_descriptors;
             return false;
         }
-        const json& descriptor = instruction["closure_descriptor"];
+        const json& descriptor = *descriptorValue;
         const uint64_t targetPrototype = descriptor.contains("target_prototype") &&
                 descriptor["target_prototype"].is_number_unsigned()
             ? descriptor["target_prototype"].get<uint64_t>()
@@ -2860,11 +3060,14 @@ private:
             return false;
         }
         const std::string prefix = indentation(depth);
+        std::set<int64_t> captureIndices;
         for (const json& capture : descriptor["captures"])
         {
             const int64_t captureIndex = capture.value("capture_index", int64_t(-1));
+            const int64_t kind = capture.value("capture_kind", int64_t(-1));
             const int64_t slot = capture.value("slot", int64_t(-1));
-            if (captureIndex < 0 || slot < 0)
+            if (captureIndex < 0 || !captureIndices.insert(captureIndex).second ||
+                kind < 0 || kind > 3 || slot < 0)
             {
                 ++result.unresolved_closure_descriptors;
                 return false;
@@ -2888,9 +3091,12 @@ private:
             append(prefix + "    [" + std::to_string(captureIndex) + "] = " + source + ",\n");
         }
         append(prefix + "  }\n");
-        append(prefix + "  registers[" + std::to_string(destination) + "] = function(...)\n");
+        const std::string callbackName = "recovered_callback_" + std::to_string(context.prototype) + "_" +
+            std::to_string(context.pc);
+        append(prefix + "  local " + callbackName + " = function(...)\n");
         append(prefix + "    return " + prototypeName(targetPrototype) + "(callback_captures, ...)\n");
         append(prefix + "  end\n");
+        append(prefix + "  registers[" + std::to_string(destination) + "] = " + callbackName + "\n");
         append(prefix + "end\n");
         ++result.closure_constructors;
         return true;
@@ -2977,13 +3183,15 @@ private:
     void transition(const Block& block, const std::optional<json>& lastInstruction, size_t depth, Context& context)
     {
         const std::string prefix = indentation(depth);
-        const json operation = lastInstruction && (*lastInstruction).contains("semantic_operation")
-            ? (*lastInstruction)["semantic_operation"] : json(nullptr);
-        const json& terminalOperation = directSequenceTerminal(operation);
+        const json* selectedOperation = lastInstruction
+            ? semanticOperationForInstruction(*lastInstruction) : nullptr;
+        const json& terminalOperation = selectedOperation
+            ? directSequenceTerminal(*selectedOperation) : json(nullptr);
         const std::string kind = terminalOperation.is_object() ? terminalOperation.value("kind", "") : "";
         if (kind == "return")
             return;
-        if (kind == "branch")
+        if (kind == "branch" && terminalOperation.contains("condition") &&
+            terminalOperation["condition"].is_object())
         {
             const auto [whenTrue, whenFalse] = branchTargets(block, terminalOperation);
             append(prefix + "if " + expression(terminalOperation.value("condition", json::object()), context) + " then\n");
@@ -3042,8 +3250,12 @@ private:
             else
             {
                 ++result.symbolic_transitions;
+                ++result.unsupported_operations;
+                if (context.path_specific)
+                    ++result.unsupported_path_specific_operations;
                 append(prefix + "-- Multiple destinations were observed here without an ordered trace.\n");
-                append(prefix + "pc = " + std::to_string(block.successors.front()) + "\n");
+                append(prefix + "unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+                    std::to_string(block.end) + ", \"dynamic_transition\", \"ordered branch evidence is unavailable\")\n");
             }
         }
         else if (kind == "jump")
@@ -3149,6 +3361,7 @@ private:
                 currentBucket = bucket;
             }
             const size_t firstLine = line;
+            std::set<size_t> pathSpecificPcs;
             append(std::string(firstBlock ? "      if pc == " : "      elseif pc == ") +
                 std::to_string(block.start) + " then\n");
             firstBlock = false;
@@ -3172,11 +3385,26 @@ private:
                     auto callee = callEdges.find({id, pc});
                     context.callee = callee == callEdges.end() ? std::nullopt : std::optional<uint64_t>(callee->second);
                     context.callee_consumed = false;
-                    if (instruction.contains("semantic_operation") && instruction["semantic_operation"].is_object())
+                    context.path_specific = false;
+                    if (const json* semantic = semanticOperationForInstruction(instruction))
                     {
+                        context.path_specific = isPathSpecificOperation(*semantic);
+                        if (context.path_specific)
+                        {
+                            pathSpecificPcs.insert(pc);
+                            recordPathSpecificOperation(*semantic);
+                        }
                         const bool controlHandled = pc == block.end;
-                        if (!closureConstruction(instruction, 4, context))
-                            operation(instruction["semantic_operation"], 4, context, controlHandled);
+                        if (!closureConstruction(instruction, *semantic, 4, context))
+                            operation(*semantic, 4, context, controlHandled);
+                    }
+                    else if (instruction.contains("observational_semantic_operation") &&
+                        instruction["observational_semantic_operation"].is_object())
+                    {
+                        context.path_specific = true;
+                        pathSpecificPcs.insert(pc);
+                        unsupportedOperation("observational_semantic_operation",
+                            "path-specific proof metadata is incomplete", 4, context);
                     }
                 }
             }
@@ -3188,6 +3416,8 @@ private:
                 {"pc_end", block.end},
                 {"terminator", block.terminator},
                 {"successors", block.successors},
+                {"path_specific", !pathSpecificPcs.empty()},
+                {"path_specific_pcs", pathSpecificPcs},
                 {"line_start", firstLine},
                 {"line_end", line > 0 ? line - 1 : 0},
             });
