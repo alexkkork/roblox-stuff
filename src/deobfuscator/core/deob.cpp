@@ -8785,11 +8785,18 @@ json luraphRuntimeSemanticDispatchArtifact(
                 if (semanticAccepted)
                     ++semanticLifted;
             }
-            if (!semanticAccepted && observedSite != observationsBySite.end())
+            const auto observedReturnsForSite = returnsBySite.find({id, pc});
+            const auto childActivationsForSite = childActivationsBySite.find({id, pc});
+            if (!semanticAccepted && (observedSite != observationsBySite.end() ||
+                observedReturnsForSite != returnsBySite.end() ||
+                childActivationsForSite != childActivationsBySite.end()))
             {
                 json observations = json::array();
                 std::set<int64_t> nextPcs;
-                for (const json& observed : observedSite->second)
+                static const std::vector<json> noObservations;
+                const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
+                    ? observedSite->second : noObservations;
+                for (const json& observed : siteObservations)
                 {
                     nextPcs.insert(observed.value("next_pc", int64_t(-1)));
                     observations.push_back({
@@ -8810,7 +8817,7 @@ json luraphRuntimeSemanticDispatchArtifact(
                     {"observations", std::move(observations)},
                 };
                 row["trace_specialized_operation"]["observed_effect"] =
-                    observedEffect(id, pc, observedSite->second);
+                    observedEffect(id, pc, siteObservations);
                 row["path_effect_classified"] = true;
                 ++traceSpecialized;
                 ++traceEffectClassified;
@@ -9131,6 +9138,93 @@ json luraphObservedCfgArtifact(const LuraphRuntimeStructureTrace& runtime)
         {"invalid_edge_targets", invalidTargets},
         {"nodes", std::move(nodes)},
         {"edges", std::move(edges)},
+    };
+}
+
+json luraphCompactObservedSemanticArtifact(const json& runtimeSemantic)
+{
+    json prototypes = json::array();
+    size_t retainedInstructions = 0;
+    size_t observedReturns = 0;
+    if (runtimeSemantic.contains("prototypes") && runtimeSemantic["prototypes"].is_array())
+        for (const json& prototype : runtimeSemantic["prototypes"])
+        {
+            json instructions = json::array();
+            if (prototype.contains("instructions") && prototype["instructions"].is_array())
+                for (const json& instruction : prototype["instructions"])
+                {
+                    const json semantic = instruction.value("semantic_operation", json(nullptr));
+                    const json specialized = instruction.value("trace_specialized_operation", json(nullptr));
+                    const json returns = instruction.value("observed_returns", json::array());
+                    if (semantic.is_null() && specialized.is_null() && (!returns.is_array() || returns.empty()))
+                        continue;
+                    json row = {
+                        {"pc", instruction.value("pc", size_t(0))},
+                        {"opcode", instruction.value("opcode", int64_t(-1))},
+                        {"static_opcode", instruction.value("static_opcode", int64_t(-1))},
+                        {"effect_classified", instruction.value("effect_classified", false)},
+                        {"path_effect_classified", instruction.value("path_effect_classified", false)},
+                        {"semantic_operation", semantic},
+                        {"observed_returns", returns},
+                    };
+                    if (specialized.is_object())
+                    {
+                        row["trace_specialized_operation"] = {
+                            {"kind", specialized.value("kind", "trace_specialized_instruction")},
+                            {"static_semantic", false},
+                            {"scope", specialized.value("scope", "bounded-runtime-observation")},
+                            {"observation_count", specialized.value("observation_count", size_t(0))},
+                            {"next_pcs", specialized.value("next_pcs", json::array())},
+                            {"observed_effect", specialized.value("observed_effect", json(nullptr))},
+                        };
+                    }
+                    else
+                        row["trace_specialized_operation"] = nullptr;
+                    if (returns.is_array())
+                        observedReturns += returns.size();
+                    instructions.push_back(std::move(row));
+                    ++retainedInstructions;
+                }
+            prototypes.push_back({
+                {"runtime_id", prototype.value("runtime_id", uint64_t(0))},
+                {"complete", false},
+                {"observed_instruction_count", instructions.size()},
+                {"instructions", std::move(instructions)},
+            });
+        }
+
+    json activations = json::array();
+    if (runtimeSemantic.contains("activations") && runtimeSemantic["activations"].is_array())
+        for (const json& activation : runtimeSemantic["activations"])
+            activations.push_back({
+                {"activation", activation.value("activation", uint64_t(0))},
+                {"prototype", activation.value("prototype", uint64_t(0))},
+                {"caller_activation", activation.value("caller_activation", json(nullptr))},
+                {"caller_pc", activation.value("caller_pc", json(nullptr))},
+                {"caller_opcode", activation.value("caller_opcode", json(nullptr))},
+                {"argument_count", activation.value("argument_count", json(nullptr))},
+                {"entry_pc", activation.value("entry_pc", json(nullptr))},
+            });
+
+    return {
+        {"version", 2},
+        {"kind", "luraph-observed-effect-ir"},
+        {"status", "bounded-observed-effects-not-full-static-semantics"},
+        {"scope", "bounded-offline-execution-window"},
+        {"complete", false},
+        {"source_recovered", false},
+        {"path_specific", true},
+        {"instruction_count", runtimeSemantic.value("instruction_count", size_t(0))},
+        {"observed_instruction_count", retainedInstructions},
+        {"unobserved_instruction_count", runtimeSemantic.value("instruction_count", size_t(0)) -
+            std::min(runtimeSemantic.value("instruction_count", size_t(0)), retainedInstructions)},
+        {"trace_effect_classified_instructions", runtimeSemantic.value("trace_effect_classified_instructions", size_t(0))},
+        {"static_semantic_instructions", runtimeSemantic.value("semantic_lifted_instructions", size_t(0))},
+        {"observed_step_count", runtimeSemantic.value("observed_step_count", size_t(0))},
+        {"observed_return_count", observedReturns},
+        {"activation_count", activations.size()},
+        {"activations", std::move(activations)},
+        {"prototypes", std::move(prototypes)},
     };
 }
 
@@ -11462,6 +11556,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeUnresolved = 0;
     size_t runtimeSemanticLifted = 0;
     size_t runtimeTraceSpecialized = 0;
+    size_t runtimeTraceEffects = 0;
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -11484,6 +11579,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     runtimeSemanticDocument = luraphRuntimeSemanticDispatchArtifact(
                         *runtimeStructure, opcodeCatalog, runtimeEffectClassified, runtimeUnresolved, runtimeSemanticLifted);
                     runtimeTraceSpecialized = runtimeSemanticDocument->value("trace_specialized_instructions", size_t(0));
+                    runtimeTraceEffects = runtimeSemanticDocument->value("trace_effect_classified_instructions", size_t(0));
                 }
                 catch (const std::exception& error)
                 {
@@ -11508,6 +11604,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"scope", "runtime-opcode-handler-effects"},
                 {"effect_classified_instructions", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
+                {"observed_effect_classified_sites", runtimeTraceEffects},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved_instructions", runtimeUnresolved},
                 {"semantic_lifted_instructions", runtimeSemanticLifted},
@@ -12214,6 +12311,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"observed_steps", runtimeStructure ? json(runtimeStructure->steps.size()) : json(0)},
                     {"effect_classified", runtimeEffectClassified},
                     {"trace_specialized_sites", runtimeTraceSpecialized},
+                    {"observed_effect_classified_sites", runtimeTraceEffects},
                     {"trace_specialized_is_path_specific", true},
                     {"unresolved", runtimeUnresolved},
                     {"semantic_lifted", runtimeSemanticLifted},
@@ -12591,12 +12689,12 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     }
     else if (runtimeSemanticDocument)
     {
-        json primaryRuntimeIr = *runtimeSemanticDocument;
+        json primaryRuntimeIr = luraphCompactObservedSemanticArtifact(*runtimeSemanticDocument);
         primaryRuntimeIr["status"] = runtimeSemanticLifted == runtimeStructure->instruction_count
             ? "runtime-prototypes-semantically-classified"
-            : "runtime-prototypes-decoded-opcode-semantics-incomplete";
+            : "bounded-observed-effects-static-semantics-incomplete";
         primaryRuntimeIr["adapter"] = luraphAdapterName(analysis);
-        primaryRuntimeIr["scope"] = "runtime-decoded-prototype-lanes";
+        primaryRuntimeIr["scope"] = "bounded-observed-effects";
         primaryRuntimeIr["container_decoded"] = decodedContainer;
         primaryRuntimeIr["prototype_count"] = runtimeStructure->prototypes.size();
         primaryRuntimeIr["static_serialized_schema_recovered"] = false;
@@ -12885,6 +12983,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"observed_steps", runtimeStructure ? json(runtimeStructure->steps.size()) : json(0)},
                 {"effect_classified", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
+                {"observed_effect_classified_sites", runtimeTraceEffects},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
@@ -12928,6 +13027,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"observed_steps", runtimeStructure ? json(runtimeStructure->steps.size()) : json(0)},
                 {"effect_classified", runtimeEffectClassified},
                 {"trace_specialized_sites", runtimeTraceSpecialized},
+                {"observed_effect_classified_sites", runtimeTraceEffects},
                 {"trace_specialized_is_path_specific", true},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
