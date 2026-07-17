@@ -1,0 +1,13 @@
+{
+  "schema": "rbx-luau-runtime.baseline.v1",
+  "captured_at": "2026-07-12",
+  "note": "Workspace root had no .git directory; hashes preserve the pre-upgrade implementation baseline.",
+  "files": {
+    "CMakeLists.txt": "e710731e8cacdfaa2813a8165e3bb32f6153496340e69544d939e16c1ff30e83",
+    "src/main.cpp": "7e7904e785d0b3876307e66741d54183694e55bc4a37d1ec208739815c757d37",
+    "src/runtime_v2.cpp": "f475421ebf11d15bcf7e6e3f8829ec44f8c9b664f1f8bec0bd1410ed66a20374",
+    "src/runtime_v2.hpp": "d9e34494c64aa927c71c919c6b7b872694a9daec33db47220acd26c34aee4ddb",
+    "build/rbx_luau_runtime": "393732c00569b8be39cbdda008e66ceb478f8ab3f385bcbe9ec7d70bbca1bef2"
+  },
+  "source_lines": 8889
+}

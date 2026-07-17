@@ -1,0 +1,30 @@
+.DS_Store
+.codex/
+.secrets/
+keys/*.private
+
+# Local credentials and deployment state
+**/.env
+**/.env.*
+!**/.env.example
+**/.vercel/
+
+# Build and package output
+build/
+build-*/
+dist/
+**/bin/
+**/obj/
+**/publish/
+**/node_modules/
+*.dSYM/
+*.zip
+*.tar.gz
+
+# Runtime captures and generated analysis output
+captures/
+outputs/
+work/
+*.trace
+*.log
+*.tmp

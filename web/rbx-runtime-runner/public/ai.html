@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3f8">
+  <title>AI Config · ALEX Runtime</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="content-page">
+  <a class="skip-link" href="#mainContent">Skip to AI configuration</a>
+  <div class="shell">
+    <header class="app-header">
+      <a class="app-brand" href="/" aria-label="ALEX Runtime">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-copy"><strong>ALEX</strong><span>Runtime</span></span>
+      </a>
+      <nav class="app-nav" aria-label="Primary navigation">
+        <a href="/">Runner</a>
+        <a href="/deobfuscator">Deobfuscator</a>
+        <a class="active" href="/ai" aria-current="page">AI Config</a>
+        <a href="/documentation">Docs</a>
+      </nav>
+      <div class="header-status"><span class="release-chip"><span class="live-dot"></span> Config stays local</span></div>
+    </header>
+
+    <main id="mainContent">
+      <section class="content-hero" aria-labelledby="aiTitle">
+        <div>
+          <span class="eyebrow">AI-assisted setup</span>
+          <h1 id="aiTitle">From AI response to runnable config.</h1>
+          <p>Use a guided prompt, paste the result, and review everything before anything runs.</p>
+        </div>
+        <div class="hero-note"><span class="note-icon" aria-hidden="true">✓</span><div><strong>You stay in control</strong><span>Parsing happens in your browser. Execution starts only when you choose Run.</span></div></div>
+      </section>
+
+      <div class="runner ai">
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title"><span>Step 1</span><h2>Copy the prepared prompt</h2></div>
+            <button id="copyAiPrompt" class="button quiet">Copy prompt</button>
+          </div>
+          <div class="panel-body stack short">
+            <div class="hint-grid">
+              <div class="hint-card">
+                <span class="hint-number">01</span>
+                <strong>Copy</strong>
+                <span>Use the prompt below with the assistant preparing your config.</span>
+              </div>
+              <div class="hint-card">
+                <span class="hint-number">02</span>
+                <strong>Paste</strong>
+                <span>Bring back one JSON object containing a <code>script</code> field.</span>
+              </div>
+              <div class="hint-card">
+                <span class="hint-number">03</span>
+                <strong>Review</strong>
+                <span>We repair common formatting mistakes and show you the result first.</span>
+              </div>
+            </div>
+            <textarea id="prompt" readonly spellcheck="false"></textarea>
+            <div class="status helper-note">If the response contains <code>PASTE_THE_PROTECTED_LUAU_HERE</code>, replace it with your script before running.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title"><span>Step 2</span><h2>Paste the AI response</h2></div>
+            <div class="actions">
+              <button id="extract">Extract JSON</button>
+              <button class="secondary" id="openRunner" disabled>Open in Runner</button>
+              <button class="primary" id="runAi" disabled>Run config</button>
+            </div>
+          </div>
+          <div class="panel-body stack">
+            <div id="aiStatus" class="status">Ready for your AI response.</div>
+            <textarea id="aiInput" spellcheck="false" placeholder='Paste the AI response here. Good: {"script":"print(\"hello\")","profile":"executor-client","networkPolicy":"offline"}'></textarea>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title"><span>Step 3</span><h2>Review the config and result</h2></div>
+          </div>
+          <div class="panel-body output-grid">
+            <label>Parsed config
+              <pre id="parsed" class="result-box"></pre>
+            </label>
+            <label>Run result
+              <pre id="aiOutput" class="result-box"></pre>
+            </label>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <div class="footbar">
+        <span>AI responses are parsed in your browser.</span>
+        <a href="/documentation#ai-config">View the complete configuration schema →</a>
+      </div>
+    </footer>
+  </div>
+  <script src="/ai.js"></script>
+</body>
+</html>

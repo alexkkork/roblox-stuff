@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "instances": [
+    {
+      "id": "sidecar",
+      "class": "ModuleScript",
+      "name": "SidecarModule",
+      "parent": "ReplicatedStorage"
+    }
+  ],
+  "module_sources": {
+    "sidecar": "return false"
+  }
+}

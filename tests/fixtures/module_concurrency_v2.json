@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "instances": [
+    {"id": "module-root", "class": "Folder", "name": "ModuleTests", "parent": "workspace"},
+    {"id": "slow", "class": "ModuleScript", "name": "Slow", "parent": "module-root"},
+    {"id": "true", "class": "ModuleScript", "name": "TrueValue", "parent": "module-root"},
+    {"id": "nil", "class": "ModuleScript", "name": "NilValue", "parent": "module-root"},
+    {"id": "multiple", "class": "ModuleScript", "name": "Multiple", "parent": "module-root"},
+    {"id": "cycle-a", "class": "ModuleScript", "name": "CycleA", "parent": "module-root"},
+    {"id": "cycle-b", "class": "ModuleScript", "name": "CycleB", "parent": "module-root"}
+  ],
+  "module_sources": {
+    "slow": "_G.slowLoads += 1\ntask.wait(0.05)\nreturn false",
+    "true": "_G.trueLoads = (_G.trueLoads or 0) + 1\ntask.wait(0.05)\nreturn true",
+    "nil": "_G.nilLoaded()\nreturn nil",
+    "multiple": "_G.multiLoads = (_G.multiLoads or 0) + 1\nreturn 1, 2",
+    "cycle-a": "return require(workspace.ModuleTests.CycleB)",
+    "cycle-b": "return require(workspace.ModuleTests.CycleA)"
+  }
+}

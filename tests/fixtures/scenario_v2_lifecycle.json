@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "instances": [
+    {"id": "root", "class": "Folder", "name": "RuntimeFixtures", "parent": "workspace"},
+    {"id": "probe", "class": "Part", "name": "Probe", "parent": "root", "properties": {"Transparency": 0}},
+    {"id": "echo", "class": "RemoteFunction", "name": "Echo", "parent": "root"}
+  ],
+  "http_fixtures": {
+    "GET https://fixture.test/slow": {"body": "slow-ok", "latency_ms": 15},
+    "GET https://fixture.test/error": {"error": "fixture-network-error", "latency_ms": 5}
+  },
+  "remote_fixtures": {
+    "game.Workspace.RuntimeFixtures.Echo": {"returns": ["remote-ok", 729], "latency_ms": 10}
+  },
+  "scheduled_property_changes": [
+    {"at": 0.025, "target": "workspace.RuntimeFixtures.Probe", "property": "Transparency", "value": 0.75}
+  ],
+  "player_lifecycle": [
+    {"at": 0.02, "action": "add", "name": "FixtureGuest", "display_name": "Fixture Guest", "user_id": 72942, "character": true, "character_name": "FixtureCharacter"},
+    {"at": 0.12, "action": "remove", "user_id": 72942}
+  ],
+  "input_events": [
+    {"at": 0.03, "state": "began", "key_code": "A", "input_type": "Keyboard", "game_processed": false}
+  ]
+}

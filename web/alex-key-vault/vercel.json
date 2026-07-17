@@ -1,0 +1,74 @@
+{
+  "version": 2,
+  "functions": {
+    "api/compile-token.js": {
+      "maxDuration": 10
+    },
+    "api/admin-session.js": {
+      "maxDuration": 10
+    },
+    "api/worker.js": {
+      "maxDuration": 300,
+      "includeFiles": "bin/alexfuscator-linux-x64"
+    },
+    "api/private-vault.js": {
+      "maxDuration": 10
+    },
+    "api/external-key.js": {
+      "maxDuration": 10
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/v2/compile",
+      "destination": "/api/worker?route=compile"
+    },
+    {
+      "source": "/v2/key/:capability",
+      "destination": "/api/worker?route=key&capability=:capability"
+    },
+    {
+      "source": "/v2/admin/users",
+      "destination": "/api/worker?route=admin_users"
+    },
+    {
+      "source": "/v2/admin/credits",
+      "destination": "/api/worker?route=admin_credits"
+    },
+    {
+      "source": "/worker-health",
+      "destination": "/api/worker?route=health"
+    },
+    {
+      "source": "/admin2",
+      "destination": "/admin2.html"
+    },
+    {
+      "source": "/vault-key-:slug",
+      "destination": "/api/external-key?slug=:slug"
+    },
+    {
+      "source": "/vault-mDRz6Mz5Ym66cly1x9TwT9hLi3D6AKAYkJ2fNl0gicd5dwuaoHRuDx7g54kAJnKO",
+      "destination": "/api/private-vault?token=mDRz6Mz5Ym66cly1x9TwT9hLi3D6AKAYkJ2fNl0gicd5dwuaoHRuDx7g54kAJnKO"
+    },
+    {
+      "source": "/vault-:slug",
+      "destination": "/api/private-vault?slug=:slug"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, no-cache, must-revalidate, max-age=0"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
+      ]
+    }
+  ]
+}

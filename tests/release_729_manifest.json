@@ -1,0 +1,59 @@
+{
+  "schema": "rbx-luau-runtime.release-test-manifest.v1",
+  "engine_release": "729",
+  "studio_build": "0.729.0.7290838",
+  "report_schema_version": 3,
+  "scenario_schema_version": 2,
+  "luau": {
+    "tag": "0.729",
+    "commit": "6e9b580e2e24643214caf0f4bbbb3db911ca30f3",
+    "sentinels": [
+      {
+        "path": "vendor/luau/CMakeLists.txt",
+        "bytes": 15929,
+        "sha256": "fb7b06c9c98c9461d34bcd6d7e5a3e7f2621cb7c54bd0d7dd4a38fb271ed0583"
+      },
+      {
+        "path": "vendor/luau/Sources.cmake",
+        "bytes": 21039,
+        "sha256": "71b136eb2e2be88c15a91f7643a6d005193b07b989b58a7005ae0fb9ac9231ca"
+      },
+      {
+        "path": "vendor/luau/VM/src/lvmexecute.cpp",
+        "bytes": 151906,
+        "sha256": "46f3f14d07ac3343170ad8eef25b09b5296b59af1496b6b83d73bef4221f385e"
+      },
+      {
+        "path": "vendor/luau/Compiler/src/Compiler.cpp",
+        "bytes": 189030,
+        "sha256": "e377fef714442c4cb83a099376d8d9d22ea0d69336fd9cfec2d2e15b55f475d5"
+      }
+    ]
+  },
+  "api_dump": {
+    "path": "data/roblox/release-729/Full-API-Dump.json",
+    "bytes": 6801794,
+    "sha256": "88de6ce88153b2c7d226d7c2d22752e6e04d266c28b36809d9d61bf8256cf6bd"
+  },
+  "oracle": {
+    "context": "studio-edit",
+    "capture_repetitions_required": 2,
+    "refresh_requires_identical_normalized_results": true,
+    "probe": {
+      "path": "tests/roblox_oracle/probes/core.luau",
+      "bytes": 1638,
+      "sha256": "dbd2d32751a3666858edff70b6831e6a939aac1121dc645740a933c56a0c6aa6"
+    },
+    "fixture": {
+      "path": "tests/roblox_oracle/fixtures/release-729/core.json",
+      "bytes": 621,
+      "sha256": "aeaba8290d1963f8dc746d7df725149dd66aa2a717f7956d967352c02dfd9047"
+    }
+  },
+  "subject": {
+    "path": "tests/fixtures/luraph/subject_ea93959c47e6.luau",
+    "manifest_path": "tests/fixtures/luraph/subject_manifest.json",
+    "bytes": 368779,
+    "sha256": "ea93959c47e6ada393fdf3d5ad884b6fd713aa5d76ac7259e84bd18464153e15"
+  }
+}

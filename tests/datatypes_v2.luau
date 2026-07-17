@@ -1,0 +1,51 @@
+local v2a = Vector2.new(8, 12)
+local v2b = Vector2.new(2, 3)
+assert(v2a / v2b == Vector2.new(4, 4))
+assert(v2a * v2b == Vector2.new(16, 36))
+assert(v2a:Dot(v2b) == 52 and v2a:Cross(v2b) == 0)
+assert(v2a:Lerp(v2b, 0.5) == Vector2.new(5, 7.5))
+assert(Vector2.zero == Vector2.new() and Vector2.xAxis == Vector2.new(1, 0))
+
+local v3a = Vector3.new(1, 2, 3)
+local v3b = Vector3.new(4, 6, 8)
+assert(v3a:Dot(v3b) == 40)
+assert(v3a:Cross(v3b) == Vector3.new(-2, 4, -2))
+assert(v3a:Lerp(v3b, 0.5):FuzzyEq(Vector3.new(2.5, 4, 5.5)))
+assert(Vector3.zero == Vector3.new() and Vector3.zAxis == Vector3.new(0, 0, 1))
+
+local red = Color3.fromRGB(255, 0, 0)
+assert(red == Color3.fromHex("#FF0000") and red:ToHex() == "FF0000")
+assert(Color3.fromHSV(0, 1, 1) == red)
+local hue, saturation, value = red:ToHSV()
+assert(hue == 0 and saturation == 1 and value == 1)
+assert(red:Lerp(Color3.new(0, 0, 1), 0.5) == Color3.new(0.5, 0, 0.5))
+
+local u1 = UDim.new(0.5, 12)
+local u2 = UDim.new(0.25, -2)
+assert(u1 + u2 == UDim.new(0.75, 10))
+assert(u1 - u2 == UDim.new(0.25, 14))
+local d1 = UDim2.new(0.5, 4, 0.25, 8)
+local d2 = UDim2.fromOffset(2, 3)
+assert(d1 + d2 == UDim2.new(0.5, 6, 0.25, 11))
+assert(d1 - d2 == UDim2.new(0.5, 2, 0.25, 5))
+
+local identity = CFrame.identity
+local ix, iy, iz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = identity:GetComponents()
+assert(ix == 0 and iy == 0 and iz == 0)
+assert(r00 == 1 and r01 == 0 and r02 == 0 and r10 == 0 and r11 == 1 and r12 == 0 and r20 == 0 and r21 == 0 and r22 == 1)
+
+local position = Vector3.new(5, 6, 7)
+local frame = CFrame.lookAt(position, Vector3.new(5, 6, 6))
+assert(frame.Position == position and frame.LookVector:FuzzyEq(Vector3.new(0, 0, -1)))
+assert(frame:PointToWorldSpace(Vector3.new(1, 0, 0)) == Vector3.new(6, 6, 7))
+assert(frame:PointToObjectSpace(Vector3.new(6, 6, 7)):FuzzyEq(Vector3.new(1, 0, 0)))
+assert((frame + Vector3.new(1, 2, 3)).Position == Vector3.new(6, 8, 10))
+assert((frame - Vector3.new(1, 2, 3)).Position == Vector3.new(4, 4, 4))
+
+local rotated = CFrame.Angles(0, math.pi, 0)
+local midpoint = identity:Lerp(rotated, 0.5)
+assert(math.abs(midpoint.LookVector.Magnitude - 1) < 1e-9)
+assert(midpoint.Position == Vector3.zero)
+
+print("runtime-v2-datatypes-ok")
+return true

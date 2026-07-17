@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3f8">
+  <title>Documentation · ALEX Runtime</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="content-page docs-page">
+  <a class="skip-link" href="#mainContent">Skip to documentation</a>
+  <div class="shell">
+    <header class="app-header">
+      <a class="app-brand" href="/" aria-label="ALEX Runtime">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-copy"><strong>ALEX</strong><span>Runtime</span></span>
+      </a>
+      <nav class="app-nav" aria-label="Primary navigation">
+        <a href="/">Runner</a>
+        <a href="/deobfuscator">Deobfuscator</a>
+        <a href="/ai">AI Config</a>
+        <a class="active" href="/documentation" aria-current="page">Docs</a>
+      </nav>
+      <div class="header-status"><span class="release-chip">Release 729</span></div>
+    </header>
+
+    <main id="mainContent">
+      <section class="content-hero docs-hero" aria-labelledby="docsTitle">
+        <div>
+          <span class="eyebrow">Documentation</span>
+          <h1 id="docsTitle">Everything you need, without the scavenger hunt.</h1>
+          <p>Understand runtime behavior, safety controls, analysis tools, and every supported configuration option.</p>
+        </div>
+        <a class="hero-cta" href="/">Open the Runner <span aria-hidden="true">→</span></a>
+      </section>
+
+      <div class="docs-layout">
+        <aside class="docs-sidebar" aria-label="On this page">
+          <span>On this page</span>
+          <nav>
+            <a href="#overview">Overview</a>
+            <a href="#network">Network modes</a>
+            <a href="#outcomes">Run outcomes</a>
+            <a href="#hooks">Hook options</a>
+            <a href="#ai-config">AI config</a>
+            <a href="#deobfuscator">Deobfuscator</a>
+            <a href="#jobs">Deobfuscation jobs</a>
+            <a href="#local-run">Local run</a>
+            <a href="#docker">Docker</a>
+          </nav>
+        </aside>
+
+      <article class="doc">
+        <section id="overview">
+          <span class="section-number">01</span>
+          <h2>What it does</h2>
+          <p>The runner executes Luau in the local Roblox-compatible runtime and returns stdout, stderr, capture files, capture index, compatibility trace, owner-protection status, and Luraph recovery reports when present.</p>
+          <p>Use <code>executor-client</code> for analysis and capture hooks. Use <code>roblox-client</code> for cleaner script-visible behavior with analysis helpers hidden by default.</p>
+        </section>
+
+        <section id="network">
+          <span class="section-number">02</span>
+          <h2>Network modes</h2>
+          <ul>
+            <li><code>offline</code>: blocks runtime HTTP. This is the default.</li>
+            <li><code>allowlist</code>: permits only hosts listed in Allow hosts.</li>
+            <li><code>live</code>: permits live HTTP. Use this only when you trust the script.</li>
+          </ul>
+          <p>When an offline run reaches HTTP(S), the console displays the exact host and URL. <strong>Allow host and retry</strong> reruns with allowlist mode and only that host. Redirects are checked at every hop and cannot escape the approved host.</p>
+          <p>Executor requests use the Opiumware-compatible <code>Roblox/WinInet</code> default User-Agent, preserve script-supplied headers and cookies, and return non-2xx responses with <code>Success=false</code>. Opiumware-shaped identity headers use a fresh random 96-character value for each runtime process; no hardware identifier is read, forwarded, or retained.</p>
+          <p>In <code>executor-client</code>, <code>game:HttpGet</code>, <code>game:HttpGetAsync</code>, <code>game:HttpPost</code>, and <code>game:HttpPostAsync</code> use the same consent-aware network policy. These executor aliases remain unavailable in <code>roblox-client</code>.</p>
+          <p>The runner accepts local <code>.lua</code>, <code>.luau</code>, and <code>.txt</code> files up to 900 KB. Fetch URL retrieves remote Luau without executing it, then exposes the complete captured artifact in Files with a SHA-256 identifier and download action.</p>
+        </section>
+
+        <section id="outcomes">
+          <span class="section-number">03</span>
+          <h2>Run outcomes</h2>
+          <ul>
+            <li><code>completed</code>: execution and scheduled work completed normally.</li>
+            <li><code>virtual_budget</code>: a yielding script reached the deterministic simulation limit. This is a successful bounded run.</li>
+            <li><code>network_required</code>: execution needs explicit approval for one or more HTTP(S) hosts.</li>
+            <li><code>wall_timeout</code>: CPU-bound execution exceeded the watchdog.</li>
+            <li><code>runtime_error</code>: compilation or script execution failed.</li>
+          </ul>
+          <p>API responses include <code>terminationReason</code> and a deduplicated <code>networkRequirements</code> array with <code>host</code>, <code>url</code>, and <code>policy</code> fields.</p>
+        </section>
+
+        <section id="hooks">
+          <span class="section-number">04</span>
+          <h2>Hook options</h2>
+          <ul>
+            <li><code>analysisHooks</code>: exposes capture and executor-analysis hooks when on.</li>
+            <li><code>captureStringHooks</code>: hooks large string-producing paths such as <code>table.concat</code>, <code>string.gsub</code>, coroutine returns, and buffer output.</li>
+            <li><code>traceCalls</code>: writes script-visible API calls to the compatibility trace.</li>
+            <li><code>tracePcallErrors</code>: captures normalized protected-call errors.</li>
+            <li><code>autorunLoadstring</code>: executes loaded chunks immediately for analysis.</li>
+          </ul>
+        </section>
+
+        <section id="ai-config">
+          <span class="section-number">05</span>
+          <h2>AI configuration schema</h2>
+          <p>Ask another assistant to return only this JSON. Paste the response at <a href="/ai">/ai</a>.</p>
+          <pre class="schema">{
+  "script": "print(\"hello\")",
+          "profile": "executor-client",
+          "analysisHooks": "on",
+          "clockMode": "virtual",
+          "unsupported": "trace-nil",
+          "registerOverflow": "error",
+          "frameRate": 60,
+          "maxVirtualSeconds": 30,
+          "scenario": {"version": 2, "instances": [], "module_sources": {}, "http_fixtures": {}, "scheduled_events": []},
+          "ownerProtection": "respect",
+  "networkPolicy": "offline",
+  "allowHosts": ["raw.githubusercontent.com"],
+  "timeout": 10,
+  "captureMin": 100,
+  "captureStringHooks": true,
+  "traceCalls": false,
+  "tracePcallErrors": false,
+  "autorunLoadstring": false,
+  "passSourceAsArg": false,
+  "stopAfterCapture": false,
+  "nativeCodegen": true,
+  "luraphMode": "auto",
+  "luraphMaxSteps": 50000000,
+  "progressInterval": 0,
+  "chunkName": "Web Runner Script",
+  "playerName": "Player",
+  "userId": 123456,
+  "placeId": 0,
+  "gameId": 0,
+  "jobId": "web-runner-job"
+}</pre>
+        </section>
+
+        <section id="deobfuscator">
+          <span class="section-number">06</span>
+          <h2>Automatic deobfuscator</h2>
+          <p>The <a href="/deobfuscator">deobfuscator workbench</a> combines static recovery with bounded runtime captures. It runs offline, removes its temporary workspace before responding, and exposes source, VM disassembly, semantic IR, CFG, provenance, and report views.</p>
+          <p><code>Exact</code> succeeds only for verified source-bearing evidence. <code>Readable</code> may infer structure and generated names, so it is always labeled reconstructed. <code>VM only</code> never emits a source claim. Completed source responses include a 0–100 source-quality score that measures residual VM-shaped names, register tables, aliases, capture wrappers, numeric noise, and state-machine artifacts separately from runtime equivalence.</p>
+        </section>
+
+        <section id="jobs">
+          <span class="section-number">07</span>
+          <h2>Deobfuscation jobs</h2>
+          <p>Create returns capability URLs for status and the finished response. Poll status once per second until <code>state</code> is <code>completed</code> or <code>failed</code>.</p>
+          <pre class="schema">curl -X POST https://YOUR_HOST/jobs/create \
+  -H 'content-type: application/json' \
+  --data-binary @request.json
+
+curl https://YOUR_HOST/jobs/status/JOB_ID
+curl https://YOUR_HOST/jobs/finished/JOB_ID</pre>
+          <pre class="schema">{
+  "source": "print('hello')",
+  "mode": "reconstruct",
+  "profile": "executor-client",
+  "time_limit": "auto"
+}</pre>
+          <p><code>time_limit</code> accepts <code>auto</code>, <code>custom</code>, or <code>unlimited</code>. Custom jobs also send <code>wall_timeout</code> from 1 to 280 seconds. Unlimited removes the analyzer watchdog; hosted jobs remain subject to the platform maximum.</p>
+        </section>
+
+        <section id="local-run">
+          <span class="section-number">08</span>
+          <h2>Local run</h2>
+          <p>From the project root:</p>
+          <pre class="schema">cd web/rbx-runtime-runner
+RBX_RUNTIME_BINARY=../../build/rbx_luau_runtime PORT=8794 npm run dev</pre>
+          <p>Then open <code>http://127.0.0.1:8794/</code>.</p>
+        </section>
+
+        <section id="docker">
+          <span class="section-number">09</span>
+          <h2>Docker</h2>
+          <p>The production image compiles the Linux runtime from source and runs as a non-root user with a read-only root filesystem and tmpfs artifacts.</p>
+          <pre class="schema">cd web/rbx-runtime-runner
+docker compose up --build</pre>
+          <p>Open <code>http://127.0.0.1:8795/</code>. Set <code>ALEX_RUNTIME_PORT</code> to choose another host port. Health is available at <code>/api/health</code>.</p>
+        </section>
+      </article>
+      </div>
+    </main>
+
+    <footer>
+      <div class="footbar">
+        <span>Built for careful, inspectable Luau analysis.</span>
+        <a href="/">Return to the Runner →</a>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

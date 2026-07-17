@@ -1,0 +1,19 @@
+{
+  "schema": "rbx-luau-runtime.release.v1",
+  "engine_release": "729",
+  "studio_version": "0.729.0.7290838",
+  "luau": {
+    "tag": "0.729",
+    "commit": "6e9b580e2e24643214caf0f4bbbb3db911ca30f3"
+  },
+  "api": {
+    "source": "Full-API-Dump.json",
+    "sha256": "88de6ce88153b2c7d226d7c2d22752e6e04d266c28b36809d9d61bf8256cf6bd"
+  },
+  "oracle": {
+    "context": "studio-edit",
+    "core_sha256": "aeaba8290d1963f8dc746d7df725149dd66aa2a717f7956d967352c02dfd9047"
+  },
+  "report_schema": 3,
+  "scenario_schema": 2
+}

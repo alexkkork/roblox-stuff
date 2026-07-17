@@ -1,0 +1,91 @@
+{
+  "version": 2,
+  "functions": {
+    "api/run.js": {
+      "maxDuration": 300,
+      "includeFiles": "bin/**"
+    },
+    "api/deobfuscate.js": {
+      "maxDuration": 60,
+      "includeFiles": "{bin/**,tools/**,scripts/deobfuscate-handler.js}"
+    },
+    "api/jobs.js": {
+      "maxDuration": 300,
+      "includeFiles": "{bin/**,tools/**,scripts/**}"
+    },
+    "api/deobfuscation-report.js": {
+      "maxDuration": 30
+    },
+    "api/cleanup-deobfuscation-reports.js": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cleanup-deobfuscation-reports",
+      "schedule": "17 4 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/jobs/create",
+      "destination": "/api/jobs?action=create"
+    },
+    {
+      "source": "/jobs/status/:id",
+      "destination": "/api/jobs?action=status&id=:id"
+    },
+    {
+      "source": "/jobs/finished/:id",
+      "destination": "/api/jobs?action=finished&id=:id"
+    },
+    {
+      "source": "/ai",
+      "destination": "/ai.html"
+    },
+    {
+      "source": "/deobfuscator",
+      "destination": "/deobfuscator.html"
+    },
+    {
+      "source": "/documentation",
+      "destination": "/documentation.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, no-cache, must-revalidate, max-age=0"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
+      ]
+    }
+  ]
+}

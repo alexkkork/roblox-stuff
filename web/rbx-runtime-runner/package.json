@@ -1,0 +1,16 @@
+{
+  "name": "rbx-runtime-runner",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@vercel/blob": "^2.6.1",
+    "@vercel/functions": "^3.4.3"
+  },
+  "scripts": {
+    "dev": "node scripts/local-server.js",
+    "check": "node --check api/run.js && node --check api/deobfuscate.js && node --check api/jobs.js && node --check api/deobfuscation-report.js && node --check api/cleanup-deobfuscation-reports.js && node --check scripts/deobfuscate-handler.js && node --check scripts/jobs-handler.js && node --check scripts/runtime-routing.js && node --check scripts/job-store.js && node --check scripts/report-handler.js && node --check scripts/failure-report-token.js && node --check scripts/local-server.js && node --check public/app.js && node --check public/ai.js && node --check public/deobfuscator.js",
+    "test": "node --test scripts/*.test.js",
+    "docker:build": "docker build -f Dockerfile -t alex-runtime:local ../..",
+    "docker:up": "docker compose up --build"
+  }
+}

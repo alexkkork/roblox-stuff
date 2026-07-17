@@ -1,0 +1,10 @@
+{
+  "schema": "rbx-luau-runtime.subject.v1",
+  "family": "luraph",
+  "filename": "subject_1b642e9523c1.luau",
+  "bytes": 126789,
+  "sha256": "1b642e9523c17bf0731bc9778294b159933d6786005929a1b576cea3bfd35f24",
+  "source": "user-supplied attachment",
+  "expected_stdout": ["anti tamper BYPASSED"],
+  "acceptance": "must complete under the release-729 roblox-client runtime"
+}

@@ -1,0 +1,223 @@
+name: build-runtime
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: "17 9 * * *"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-15
+            output: rbx_luau_runtime_macos_arm64
+          - name: ubuntu-x86_64
+            runner: ubuntu-24.04
+            output: rbx_luau_runtime_ubuntu_x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libcurl4-openssl-dev libicu-dev libssl-dev
+
+      - name: Configure
+        run: cmake -S . -B work/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRBX_RUNTIME_ENABLE_SUBJECT_TESTS=${{ github.event_name == 'schedule' && 'ON' || 'OFF' }} -DRBX_RUNTIME_ENABLE_STRESS_TESTS=${{ github.event_name == 'schedule' && 'ON' || 'OFF' }} -DRBX_RUNTIME_MODEL_OPERATIONS=1000
+
+      - name: Build
+        run: cmake --build work/build --target rbx_luau_runtime alexfuscator -j 4
+
+      - name: Verify immutable release pins
+        run: ctest --test-dir work/build --output-on-failure -R "release_729_(manifest|subject_identity)"
+
+      - name: Smoke test
+        run: |
+          ./work/build/rbx_luau_runtime --out work/smoke-captures --capture-min 20 work/smoke.lua
+          ./work/build/rbx_luau_runtime --out work/high-captures --capture-min 20 --place-id 12345 --game-id 67890 --job-id job-test work/high_fidelity_smoke.lua
+          ./work/build/rbx_luau_runtime --out work/policy-captures --capture-min 20 --fixture http://fixture.test/payload=work/fixture_payload.txt work/http_policy_smoke.lua
+          printf 'local a = false and error("bad-and")\nlocal b = true or error("bad-or")\nlocal Players = game:GetService("Players")\nlocal t = {10, 20, 30}\nprint(tostring(a), tostring(b), Players.LocalPlayer.Name, t[1] + t[2] + t[3])\n' > work/alexfuscator_ci_smoke.luau
+          ./work/build/alexfuscator work/alexfuscator_ci_smoke.luau -o work/alexfuscator_ci_smoke.obf.luau --profile maximum --format one-line --environment-binding portable --seed 424242
+          test "$(wc -l < work/alexfuscator_ci_smoke.obf.luau | tr -d ' ')" = "0"
+          ! grep -q 'bad-and\|bad-or\|Players\|GetService' work/alexfuscator_ci_smoke.obf.luau
+          ./work/build/rbx_luau_runtime --profile executor-client --network-policy live --out work/alexfuscator-captures work/alexfuscator_ci_smoke.obf.luau > work/alexfuscator_stdout.txt
+          grep -q $'false\ttrue\tPlayer\t60' work/alexfuscator_stdout.txt
+
+      - name: vNext differential semantics
+        if: runner.os == 'Linux'
+        run: python3 tests/run_vnext_differential.py --programs ${{ github.event_name == 'schedule' && '10000' || '500' }} --alexfuscator work/build/alexfuscator --runtime work/build/rbx_luau_runtime
+
+      - name: Register VM v5 structure and tamper contracts
+        if: runner.os == 'Linux'
+        run: python3 tests/test_alexfuscator_v5.py --seeds 100 --alexfuscator work/build/alexfuscator --runtime work/build/rbx_luau_runtime
+
+      - name: Roblox fidelity release-729 contracts
+        if: runner.os == 'Linux' && github.event_name != 'schedule'
+        run: ctest --test-dir work/build --output-on-failure -R runtime_fidelity_release_729
+
+      - name: Nightly Roblox lifecycle model (100 x 10,000)
+        if: runner.os == 'Linux' && github.event_name == 'schedule'
+        run: python3 tests/run_roblox_fidelity.py --runtime work/build/rbx_luau_runtime --seeds 100 --operations 10000
+
+      - name: Nightly Instance create/destroy retention (100,000)
+        if: runner.os == 'Linux' && github.event_name == 'schedule'
+        run: python3 tests/test_instance_retention.py --runtime work/build/rbx_luau_runtime --iterations 100000 --timeout 480
+
+      - name: Runtime network security contracts
+        if: runner.os == 'Linux'
+        run: ctest --test-dir work/build --output-on-failure -R runtime_network_security
+
+      - name: Release-729 CLI and reflection contracts
+        if: runner.os == 'Linux'
+        run: ctest --test-dir work/build --output-on-failure -R "runtime_(instance_reflection_v3|release_729_cli)"
+
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/rbx-runtime-runner/package-lock.json
+
+      - name: Install site integration dependencies
+        if: runner.os == 'Linux'
+        working-directory: web/rbx-runtime-runner
+        run: npm ci
+
+      - name: Runtime website integration contracts
+        if: runner.os == 'Linux'
+        run: ctest --test-dir work/build --output-on-failure -R "runtime_web_(artifact_download|heavy_jobs)"
+
+      - name: Bounded supplied-subject run
+        if: runner.os == 'Linux' && github.event_name == 'schedule'
+        run: ctest --test-dir work/build --output-on-failure -R runtime_release_729_subject_bounded
+
+      - name: Automatic deobfuscator provenance contracts
+        if: runner.os == 'Linux'
+        run: python3 tests/test_auto_deobfuscator.py --runtime work/build/rbx_luau_runtime --alexfuscator work/build/alexfuscator
+
+      - name: Game lock and hidden signatures
+        if: runner.os == 'Linux'
+        run: |
+          python3 tests/test_game_id_lock.py --alexfuscator work/build/alexfuscator --runtime work/build/rbx_luau_runtime
+          python3 tests/test_hidden_signatures.py --alexfuscator work/build/alexfuscator
+
+      - name: Package
+        run: |
+          mkdir -p outputs
+          cp work/build/rbx_luau_runtime "outputs/${{ matrix.output }}"
+          cp work/build/alexfuscator "outputs/alexfuscator_${{ matrix.name }}"
+          shasum -a 256 "outputs/${{ matrix.output }}" > "outputs/${{ matrix.output }}.sha256"
+          shasum -a 256 "outputs/alexfuscator_${{ matrix.name }}" > "outputs/alexfuscator_${{ matrix.name }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: outputs/*
+
+  site:
+    name: runtime-site
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/rbx-runtime-runner/package-lock.json
+      - name: Install exact site dependencies
+        working-directory: web/rbx-runtime-runner
+        run: npm ci
+      - name: Check site sources
+        working-directory: web/rbx-runtime-runner
+        run: npm run check
+      - name: Test runtime jobs and UI models
+        working-directory: web/rbx-runtime-runner
+        run: npm test
+
+  sanitizers:
+    name: linux-asan-ubsan
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libcurl4-openssl-dev libicu-dev libssl-dev
+      - name: Configure sanitizers
+        run: cmake -S . -B work/build-sanitized -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON -DRBX_RUNTIME_ENABLE_SANITIZERS=ON -DRBX_RUNTIME_MODEL_OPERATIONS=100
+      - name: Build sanitized runtime
+        run: cmake --build work/build-sanitized --target rbx_luau_runtime -j 4
+      - name: Run release and fidelity checks
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          RBX_RUNTIME_TEST_TIMEOUT_SCALE: "8"
+        run: ctest --test-dir work/build-sanitized --output-on-failure -R "release_729_manifest|runtime_fidelity_release_729"
+
+  windows-runtime:
+    name: windows-x86_64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install native dependencies
+        shell: pwsh
+        run: vcpkg install curl:x64-windows openssl:x64-windows
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B work/build-windows -A x64 -DBUILD_TESTING=ON "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - name: Build runtime
+        run: cmake --build work/build-windows --config Release --target rbx_luau_runtime --parallel 4
+      - name: Verify release pins
+        run: ctest --test-dir work/build-windows -C Release --output-on-failure -R "release_729_(manifest|subject_identity)"
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          Set-Content -Path work/windows-smoke.luau -Value 'print("windows-runtime-ok")' -NoNewline
+          & work/build-windows/Release/rbx_luau_runtime.exe --profile roblox-client --execution-mode faithful --network-policy offline work/windows-smoke.luau | Tee-Object -FilePath work/windows-smoke.txt
+          Select-String -Path work/windows-smoke.txt -Pattern 'windows-runtime-ok' -Quiet
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force outputs | Out-Null
+          Copy-Item work/build-windows/Release/rbx_luau_runtime.exe outputs/rbx_luau_runtime_windows_x86_64.exe
+          (Get-FileHash outputs/rbx_luau_runtime_windows_x86_64.exe -Algorithm SHA256).Hash.ToLower() | Set-Content outputs/rbx_luau_runtime_windows_x86_64.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rbx_luau_runtime_windows_x86_64
+          path: outputs/*
+
+  source-package:
+    name: source-package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Package source
+        run: |
+          mkdir -p outputs
+          tar --exclude='./vendor/luau/.git' --exclude='./work/build' --exclude='./outputs' -czf outputs/roblox_luau_runtime_project.tar.gz .
+          sha256sum outputs/roblox_luau_runtime_project.tar.gz > outputs/roblox_luau_runtime_project.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roblox_luau_runtime_project
+          path: outputs/*

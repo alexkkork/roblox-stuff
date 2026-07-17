@@ -1,0 +1,8 @@
+bin/
+obj/
+captures/
+publish/
+TestResults/
+artifacts/
+.codex/
+.DS_Store

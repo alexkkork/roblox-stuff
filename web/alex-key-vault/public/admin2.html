@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Alexfuscator Admin2</title>
+    <link rel="stylesheet" href="/admin2.css">
+  </head>
+  <body>
+    <main class="adminShell">
+      <header>
+        <a class="brand" href="/">Alexfuscator</a>
+        <span class="slash">/</span>
+        <strong>Admin2</strong>
+        <div class="headerActions">
+          <span id="liveState">Locked</span>
+          <button id="refresh" class="iconButton" type="button" title="Refresh usage" aria-label="Refresh usage">↻</button>
+          <button id="signOut" type="button" hidden>Sign out</button>
+        </div>
+      </header>
+
+      <section id="loginPanel" class="loginPanel">
+        <div class="loginMark" aria-hidden="true"></div>
+        <p>ADMIN ACCESS</p>
+        <h1>Control plane</h1>
+        <form id="loginForm">
+          <label for="password">Password</label>
+          <div class="passwordRow">
+            <input id="password" type="password" autocomplete="current-password" required autofocus>
+            <button type="submit">Unlock</button>
+          </div>
+        </form>
+        <span id="loginStatus"></span>
+      </section>
+
+      <section id="dashboard" class="dashboard" hidden>
+        <section class="metrics" aria-label="Usage summary">
+          <div><span>Known users</span><strong id="metricUsers">0</strong></div>
+          <div><span>Active jobs</span><strong id="metricActive">0</strong></div>
+          <div><span>Used this hour</span><strong id="metricUsed">0</strong></div>
+          <div><span>Bonus balance</span><strong id="metricBonus">0</strong></div>
+        </section>
+
+        <section class="userBand">
+          <div>
+            <h1>Usage ledger</h1>
+            <span id="updatedAt">Not synced</span>
+          </div>
+          <label class="searchLabel">Search<input id="search" type="search" placeholder="Hashed user ID"></label>
+        </section>
+
+        <section class="tableFrame">
+          <table>
+            <thead><tr><th>User</th><th>Last seen</th><th>Profile</th><th>Active</th><th>Used</th><th>Bonus</th><th>Available</th><th>Grant</th></tr></thead>
+            <tbody id="users"></tbody>
+          </table>
+          <div id="emptyState">No usage records.</div>
+        </section>
+      </section>
+
+      <footer><span id="status">Admin session required.</span><span>HMAC identities only</span></footer>
+    </main>
+    <script src="/admin2.js?v=1"></script>
+  </body>
+</html>

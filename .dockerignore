@@ -1,0 +1,11 @@
+.git
+.secrets
+build
+captures
+outputs
+work
+**/.DS_Store
+**/.env
+**/.env.*
+**/.vercel
+**/node_modules

@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3f8">
+  <title>ALEX Runtime</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="runner-page">
+  <a class="skip-link" href="#mainContent">Skip to workspace</a>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="app-brand" href="/" aria-label="ALEX Runtime">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-copy"><strong>ALEX</strong><span>Runtime</span></span>
+      </a>
+
+      <nav class="app-nav" aria-label="Primary navigation">
+        <a class="active" href="/" aria-current="page">Runner</a>
+        <a href="/deobfuscator">Deobfuscator</a>
+        <a href="/ai">AI Config</a>
+        <a href="/documentation">Docs</a>
+      </nav>
+
+      <div class="header-status">
+        <span class="release-chip"><span class="live-dot"></span> Release 729 · Ready</span>
+        <button id="openAdvanced" class="button quiet settings-button" type="button"><span class="settings-glyph" aria-hidden="true"></span>Settings</button>
+      </div>
+    </header>
+
+    <main id="mainContent" class="runtime-main">
+      <section class="workspace-heading" aria-labelledby="runnerTitle">
+        <div>
+          <span class="eyebrow">Runtime workspace</span>
+          <h1 id="runnerTitle">Run Luau with confidence.</h1>
+          <p>Test scripts in a controlled Roblox-compatible environment, then inspect every useful detail in one place.</p>
+        </div>
+        <div class="trust-list" aria-label="Runtime safeguards">
+          <span><i class="trust-dot safe" aria-hidden="true"></i>Network starts offline</span>
+          <span><i class="trust-dot" aria-hidden="true"></i>Deterministic virtual time</span>
+          <span><i class="trust-dot" aria-hidden="true"></i>Artifacts stay visible</span>
+        </div>
+      </section>
+
+      <section class="command-bar" aria-label="Run controls">
+        <div class="command-group">
+          <span class="control-label">Client</span>
+          <div class="segmented" id="profileSegments" role="group" aria-label="Client profile">
+            <button type="button" data-value="roblox-client">Roblox</button>
+            <button class="selected" type="button" data-value="executor-client">Executor</button>
+          </div>
+          <input id="profile" type="hidden" value="executor-client">
+        </div>
+
+        <div class="command-group clock-control">
+          <span class="control-label">Clock</span>
+          <div class="segmented" id="clockSegments" role="group" aria-label="Clock mode">
+            <button class="selected" type="button" data-value="virtual">Virtual</button>
+            <button type="button" data-value="realtime">Realtime</button>
+          </div>
+          <input id="clockMode" type="hidden" value="virtual">
+        </div>
+
+        <div class="command-group network-control">
+          <label class="control-label" for="networkPolicy">Network</label>
+          <select id="networkPolicy" class="compact-select">
+            <option value="offline" selected>Offline</option>
+            <option value="allowlist">Allowlist</option>
+            <option value="live">Live</option>
+          </select>
+        </div>
+
+        <button id="watchMode" class="button watch-mode active" type="button" aria-pressed="true"><span class="watch-pulse" aria-hidden="true"></span><span>Show live activity</span></button>
+
+        <div class="command-actions">
+          <button id="sample" class="button quiet desktop-only" type="button">Load sample</button>
+          <button id="uploadFile" class="button quiet" type="button">Upload file</button>
+          <input id="localFileInput" type="file" accept=".lua,.luau,.txt,text/plain" hidden>
+          <button id="openFetch" class="button quiet" type="button">Fetch URL</button>
+          <button id="copyPrompt" class="button quiet desktop-only" type="button">AI setup</button>
+          <button id="run" class="button run-button" type="button"><span class="run-glyph" aria-hidden="true"></span><span>Run script</span></button>
+        </div>
+      </section>
+
+      <section class="workbench">
+        <section class="workspace-pane editor-pane" aria-label="Script editor">
+          <div class="pane-header">
+            <div class="pane-title">
+              <span class="file-dot"></span>
+              <strong id="sourceName">web_runner_script.luau</strong>
+              <span id="sourceSize">0 B</span>
+            </div>
+            <div class="pane-tools">
+              <button id="clear" class="text-action" type="button">Clear</button>
+              <span class="language-chip">Luau</span>
+            </div>
+          </div>
+          <div class="editor-shell">
+            <pre id="lineNumbers" class="line-numbers" aria-hidden="true">1</pre>
+            <textarea id="script" aria-label="Luau source" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+            <div id="fileDropOverlay" class="file-drop-overlay" aria-hidden="true">
+              <strong>Drop script to load</strong>
+              <span>.lua, .luau, or .txt</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-pane output-pane" aria-label="Run output">
+          <div class="output-header">
+            <div class="output-tabs" role="tablist" aria-label="Output views">
+              <button id="consoleTab" class="output-tab selected" type="button" data-tab="console" role="tab" aria-selected="true" aria-controls="consolePanel" tabindex="0">Console</button>
+              <button id="liveTraceTab" class="output-tab live-trace-tab" type="button" data-tab="live" role="tab" aria-selected="false" aria-controls="livePanel" tabindex="-1" hidden>Live Trace <span id="liveTraceBadge" class="tab-badge">0</span></button>
+              <button id="runtimeTab" class="output-tab" type="button" data-tab="runtime" role="tab" aria-selected="false" aria-controls="runtimePanel" tabindex="-1">Runtime <span id="runtimeBadge" class="tab-badge">0</span></button>
+              <button id="hooksTab" class="output-tab" type="button" data-tab="hooks" role="tab" aria-selected="false" aria-controls="hooksPanel" tabindex="-1">Hooks <span id="hookBadge" class="tab-badge">0</span></button>
+              <button id="filesTab" class="output-tab" type="button" data-tab="files" role="tab" aria-selected="false" aria-controls="filesPanel" tabindex="-1">Files <span id="fileBadge" class="tab-badge">0</span></button>
+            </div>
+            <button id="copyOutput" class="text-action" type="button">Copy</button>
+          </div>
+
+          <div class="output-panels">
+            <div id="consolePanel" class="output-view selected" data-view="console" role="tabpanel" aria-labelledby="consoleTab">
+              <div id="consoleEmpty" class="empty-output">
+                <span class="console-mark">&gt;_</span>
+                <strong>Ready when you are</strong>
+                <span>Run a script and its output will appear here.</span>
+              </div>
+              <div id="consoleResult" class="console-result" hidden>
+                <div id="networkConsent" class="network-consent" hidden>
+                  <div class="network-consent-copy">
+                    <span>External request blocked</span>
+                    <strong id="networkConsentHost"></strong>
+                    <code id="networkConsentUrl"></code>
+                  </div>
+                  <button id="allowNetworkRetry" class="button consent-button" type="button">Allow host and retry</button>
+                </div>
+                <pre id="stdout" class="console-stream"></pre>
+                <pre id="stderr" class="console-stream error-stream"></pre>
+              </div>
+            </div>
+            <div id="runtimePanel" class="output-view" data-view="runtime" role="tabpanel" aria-labelledby="runtimeTab" hidden>
+              <div class="report-block">
+                <div class="report-label">Fidelity report</div>
+                <pre id="runtimeReport" class="result-box"></pre>
+              </div>
+              <div class="report-block">
+                <div class="report-label">Run metadata</div>
+                <pre id="meta" class="result-box"></pre>
+              </div>
+            </div>
+            <div id="livePanel" class="output-view live-trace-view" data-view="live" role="tabpanel" aria-labelledby="liveTraceTab" hidden>
+              <div class="trace-toolbar">
+                <div class="trace-state"><span class="trace-live-dot"></span><strong id="traceState">Waiting</strong><span id="traceProgress">0 / 0</span></div>
+                <div class="trace-actions">
+                  <label for="traceSpeed">Speed</label>
+                  <select id="traceSpeed" class="compact-select"><option value="900">Slow</option><option value="550" selected>Normal</option><option value="220">Fast</option><option value="70">Extra Fast</option><option value="custom">Custom</option></select>
+                  <label id="customTraceRateLabel" class="custom-trace-rate" for="customTraceRate" hidden><input id="customTraceRate" type="number" min="0.2" max="100" step="0.2" value="10"><span>events/s</span></label>
+                  <button id="tracePause" class="button quiet" type="button">Pause</button>
+                  <button id="traceReplay" class="button quiet" type="button">Replay</button>
+                </div>
+              </div>
+              <div id="traceTimeline" class="trace-timeline"></div>
+              <div class="trace-explanation">
+                <span id="traceCategory" class="trace-category">READY</span>
+                <div><strong id="traceHeadline">Execution visualizer ready</strong><p id="traceDescription">Run the script to replay compiler, scheduler, capture, network, and decoding evidence.</p></div>
+                <span id="traceConfidence" class="trace-confidence">Direct</span>
+              </div>
+            </div>
+            <div id="hooksPanel" class="output-view" data-view="hooks" role="tabpanel" aria-labelledby="hooksTab" hidden>
+              <div class="report-block">
+                <div class="report-label">Capture index</div>
+                <pre id="captureIndex" class="result-box"></pre>
+              </div>
+              <div class="report-block">
+                <div class="report-label">Compatibility trace</div>
+                <pre id="compatTrace" class="result-box"></pre>
+              </div>
+            </div>
+            <div id="filesPanel" class="output-view" data-view="files" role="tabpanel" aria-labelledby="filesTab" hidden>
+              <div id="files" class="file-list"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="runtime-strip" aria-live="polite">
+        <div id="status" class="run-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+        <div id="runSummary" class="run-summary">virtual time · 60 fps · network offline</div>
+      </section>
+    </main>
+  </div>
+
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+  <aside id="advancedDrawer" class="settings-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Advanced runtime settings" inert>
+    <div class="drawer-header">
+      <div>
+        <span class="drawer-kicker">Runtime controls</span>
+          <h2>Runtime settings</h2>
+      </div>
+      <button id="closeAdvanced" class="close-button" type="button" aria-label="Close advanced settings">×</button>
+    </div>
+
+    <div class="drawer-body">
+      <section class="settings-section">
+        <div class="section-heading"><h3>Hooks</h3><span>07</span></div>
+        <div class="field-grid two-column">
+          <label>Analysis hooks
+            <select id="analysisHooks">
+              <option value="on">On</option>
+              <option value="auto">Auto</option>
+              <option value="off" selected>Off</option>
+            </select>
+          </label>
+          <label>Capture minimum
+            <input id="captureMin" type="number" min="1" value="100">
+          </label>
+        </div>
+        <div class="toggle-list">
+          <label class="toggle-row"><span>String captures</span><input id="captureStringHooks" type="checkbox"><i></i></label>
+          <label class="toggle-row"><span>API call trace</span><input id="traceCalls" type="checkbox"><i></i></label>
+          <label class="toggle-row"><span>Pcall diagnostics</span><input id="tracePcallErrors" type="checkbox"><i></i></label>
+          <label class="toggle-row"><span>Autorun loaded chunks</span><input id="autorunLoadstring" type="checkbox"><i></i></label>
+          <label class="toggle-row"><span>Source argument</span><input id="passSourceAsArg" type="checkbox"><i></i></label>
+          <label class="toggle-row"><span>Stop after capture</span><input id="stopAfterCapture" type="checkbox"><i></i></label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><h3>Execution</h3><span>08</span></div>
+        <div class="field-grid two-column">
+          <label>Execution mode
+            <select id="executionMode">
+              <option value="faithful" selected>Faithful</option>
+              <option value="diagnostic">Diagnostic</option>
+            </select>
+          </label>
+          <label>Unsupported APIs
+            <select id="unsupported">
+              <option value="trace-nil" selected>Trace + nil</option>
+              <option value="error">Strict error</option>
+            </select>
+          </label>
+          <label>Register overflow
+            <select id="registerOverflow">
+              <option value="error" selected>Compiler error</option>
+              <option value="spill">Spill excess locals</option>
+            </select>
+          </label>
+          <label>Owner protection
+            <select id="ownerProtection">
+              <option value="respect" selected>Respect</option>
+              <option value="audit">Audit</option>
+              <option value="ignore">Ignore</option>
+            </select>
+          </label>
+          <label>Frame rate
+            <input id="frameRate" type="number" min="1" max="240" value="60">
+          </label>
+          <label>Virtual limit
+            <input id="maxVirtualSeconds" type="number" min="0" max="300" value="30">
+          </label>
+          <label>Wall timeout
+            <input id="timeout" type="number" min="1" max="3600" value="10">
+          </label>
+          <label>Memory limit (MiB)
+            <input id="memoryLimitMb" type="number" min="32" max="4096" value="512">
+          </label>
+          <label>Deterministic seed
+            <input id="deterministicSeed" type="number" min="0" max="4294967295" placeholder="Source-derived">
+          </label>
+          <label>Executor preset
+            <select id="executorPreset">
+              <option value="generic" selected>Generic</option>
+              <option value="opiumware">Opiumware</option>
+            </select>
+          </label>
+          <label>Filesystem
+            <select id="filesystem">
+              <option value="memory" selected>In-memory</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <label>Chunk name
+            <input id="chunkName" value="Web Runner Script">
+          </label>
+          <label>Luraph mode
+            <select id="luraphMode">
+              <option value="auto" selected>Auto</option>
+              <option value="off">Off</option>
+              <option value="force">Force</option>
+            </select>
+          </label>
+          <label>Luraph steps
+            <input id="luraphMaxSteps" type="number" min="1000" value="2000000000">
+          </label>
+          <label>Progress interval
+            <input id="progressInterval" type="number" min="0" max="10" value="0">
+          </label>
+        </div>
+        <label class="toggle-row standalone-toggle"><span>Native codegen</span><input id="nativeCodegen" type="checkbox" checked><i></i></label>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><h3>Network</h3><span id="networkState">OFFLINE</span></div>
+        <label>Allowed hosts
+          <textarea id="allowHosts" class="compact-textarea" spellcheck="false">raw.githubusercontent.com</textarea>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><h3>Identity</h3><span>CLIENT</span></div>
+        <div class="field-grid two-column">
+          <label>Player name
+            <input id="playerName" value="Player">
+          </label>
+          <label>User ID
+            <input id="userId" type="number" value="123456">
+          </label>
+          <label>Place ID
+            <input id="placeId" type="number" value="0">
+          </label>
+          <label>Game ID
+            <input id="gameId" type="number" value="0">
+          </label>
+          <label class="full-field">Job ID
+            <input id="jobId" value="web-runner-job">
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><h3>Scenario</h3><span>JSON V2</span></div>
+        <textarea id="scenario" class="scenario-editor" spellcheck="false" placeholder='{"version":2,"instances":[],"module_sources":{}}'></textarea>
+      </section>
+    </div>
+  </aside>
+
+  <dialog id="fetchDialog" class="fetch-dialog" aria-labelledby="fetchTitle">
+    <form id="fetchForm" method="dialog">
+      <div class="dialog-header">
+        <div>
+          <span class="drawer-kicker">Load from the web</span>
+          <h2 id="fetchTitle">Fetch a Luau file</h2>
+        </div>
+        <button id="closeFetch" class="close-button" type="button" aria-label="Close fetch dialog">×</button>
+      </div>
+      <label for="fetchUrl">File URL</label>
+      <input id="fetchUrl" type="url" inputmode="url" autocomplete="url" required placeholder="https://example.com/script.luau">
+      <div class="dialog-actions">
+        <button id="cancelFetch" class="button quiet" type="button">Cancel</button>
+        <button class="button run-button" type="submit"><span class="download-glyph" aria-hidden="true">↓</span><span>Fetch file</span></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="networkDialog" class="confirm-dialog" aria-labelledby="networkDialogTitle">
+    <form id="networkDialogForm" method="dialog">
+      <div class="confirm-icon" aria-hidden="true">!</div>
+      <div class="confirm-copy">
+        <span class="drawer-kicker">Network safeguard</span>
+        <h2 id="networkDialogTitle">Allow unrestricted network access?</h2>
+        <p>Live mode lets the script contact any HTTP(S) host. Only enable it when you trust the script and every URL it may load.</p>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancelLiveNetwork" class="button quiet" type="button">Keep network offline</button>
+        <button id="confirmLiveNetwork" class="button danger-button" type="submit">Enable live network</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/trace-model.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

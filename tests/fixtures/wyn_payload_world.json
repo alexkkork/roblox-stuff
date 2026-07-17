@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "instances": [
+    { "id": "shared", "class": "Folder", "name": "Shared", "parent": "ReplicatedStorage" },
+    { "id": "packages", "class": "Folder", "name": "Packages", "parent": "shared" },
+    {
+      "id": "networker",
+      "class": "ModuleScript",
+      "name": "Networker",
+      "parent": "packages",
+      "source": "local proxy; proxy = setmetatable({}, { __index = function() return proxy end, __call = function() return nil end, __tostring = function() return 'Networker' end }); return proxy"
+    },
+    { "id": "core_objects", "class": "Folder", "name": "CoreObjects", "parent": "Workspace" },
+    { "id": "plots", "class": "Folder", "name": "Plots", "parent": "Workspace" },
+    { "id": "eggs", "class": "Folder", "name": "Eggs", "parent": "Workspace" }
+  ]
+}

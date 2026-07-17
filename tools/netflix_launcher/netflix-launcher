@@ -1,0 +1,14 @@
+#!/bin/zsh
+set -u
+
+url="https://www.netflix.com/browse"
+
+if [[ -d "/Applications/Google Chrome.app" ]]; then
+  /usr/bin/open -na "/Applications/Google Chrome.app" --args --app="$url"
+elif [[ -d "/Applications/Microsoft Edge.app" ]]; then
+  /usr/bin/open -na "/Applications/Microsoft Edge.app" --args --app="$url"
+elif [[ -d "/Applications/Safari.app" ]]; then
+  /usr/bin/open -a "/Applications/Safari.app" "$url"
+else
+  /usr/bin/open "$url"
+fi

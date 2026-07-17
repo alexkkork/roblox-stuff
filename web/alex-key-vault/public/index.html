@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Alexfuscator</title>
+    <meta name="alexfuscator-build" content="register-vm-v5">
+    <link rel="stylesheet" href="/obfuscator.css?v=register-vm-v5">
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Alexfuscator</h1>
+        <span id="health">checking...</span>
+      </header>
+
+      <section class="toolbar" aria-label="Compile controls">
+        <fieldset class="segments" id="profileGroup">
+          <legend>Profile</legend>
+          <label><input type="radio" name="profile" value="compatibility"><span>Compatibility</span></label>
+          <label><input type="radio" name="profile" value="hardened"><span>Hardened</span></label>
+          <label><input type="radio" name="profile" value="maximum" checked><span>Maximum</span></label>
+        </fieldset>
+
+        <label>Runtime
+          <select id="runtime">
+            <option value="universal" selected>Universal</option>
+            <option value="roblox">Roblox</option>
+            <option value="executor">Executor</option>
+          </select>
+        </label>
+        <label class="toggle"><input id="onlineKeys" type="checkbox"><span>Online keys</span></label>
+        <label>Format
+          <select id="format">
+            <option value="one-line" selected>One line</option>
+            <option value="pretty">Pretty</option>
+          </select>
+        </label>
+        <button id="run">Obfuscate</button>
+      </section>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="advancedGrid">
+          <label>Control flow<select id="controlFlow"></select></label>
+          <label>Constants<select id="constantProtection"></select></label>
+          <label>VM diversity<select id="vmDiversity"></select></label>
+          <label>Tamper density<select id="tamperDensity"></select></label>
+          <label>Environment<select id="environmentBinding">
+            <option value="portable" selected>Portable</option>
+            <option value="roblox">Roblox</option>
+            <option value="executor">Executor</option>
+          </select></label>
+          <label>Seed<input id="seed" value="auto" autocomplete="off"></label>
+          <label>Game ID<input id="gameId" inputmode="numeric" pattern="[0-9]*" maxlength="16" placeholder="Unlocked" autocomplete="off"></label>
+          <label class="noticeField">Analysis notice<input id="analysisNotice" maxlength="512" autocomplete="off"></label>
+        </div>
+      </details>
+
+      <section class="editors">
+        <div class="pane">
+          <div class="paneBar"><span>Input</span><div><small id="inputMeta">0 B</small><button id="open" class="ghost">Open</button><button id="clear" class="ghost">Clear</button><input id="filePicker" type="file" accept=".lua,.luau,.txt" hidden></div></div>
+          <textarea id="input" spellcheck="false" aria-label="Luau input"></textarea>
+        </div>
+        <div class="pane">
+          <div class="paneBar"><span>Output</span><div><small id="outputMeta">0 B</small><button id="copy" class="ghost">Copy</button><button id="download" class="ghost">Download</button></div></div>
+          <textarea id="output" readonly spellcheck="false" aria-label="Obfuscated Luau output"></textarea>
+        </div>
+      </section>
+
+      <footer><span id="status">Ready.</span><span id="buildMeta"></span></footer>
+    </main>
+    <script src="/obfuscator.js?v=register-vm-v5"></script>
+  </body>
+</html>

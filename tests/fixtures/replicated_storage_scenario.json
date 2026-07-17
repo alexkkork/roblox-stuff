@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "instances": [
+    {
+      "id": "shared",
+      "class": "Folder",
+      "name": "Shared",
+      "parent": "ReplicatedStorage"
+    },
+    {
+      "id": "packages",
+      "class": "Folder",
+      "name": "Packages",
+      "parent": "shared"
+    },
+    {
+      "id": "networker",
+      "class": "ModuleScript",
+      "name": "Networker",
+      "parent": "packages",
+      "source": "return { FireServer = function() return nil end, InvokeServer = function() return nil end, Get = function() return nil end }"
+    }
+  ],
+  "http_fixtures": {},
+  "remote_fixtures": {},
+  "scheduled_events": []
+}

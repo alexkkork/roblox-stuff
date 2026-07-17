@@ -1,0 +1,33 @@
+{
+  "errors": {
+    "bad_class_mentions_class": true,
+    "bad_class_ok": false
+  },
+  "instance": {
+    "attribute": 7,
+    "child_count": 1,
+    "child_lookup": true,
+    "class": "Part",
+    "is_base_part": true,
+    "tag": true,
+    "type": "userdata",
+    "typeof": "Instance"
+  },
+  "oracle_release": "729",
+  "property_changed": 1,
+  "scheduler": [
+    "start",
+    "spawn",
+    "after",
+    "defer",
+    "spawn-resume",
+    "delay"
+  ],
+  "types": {
+    "cframe_type": "CFrame",
+    "enum": "Enum.UserInputState.Begin",
+    "range_type": "NumberRange",
+    "vector": "1, 2, 3",
+    "vector_type": "Vector3"
+  }
+}

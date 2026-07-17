@@ -1,0 +1,9 @@
+{
+  "schema": "rbx-luau-runtime.subject.v1",
+  "family": "luraph",
+  "filename": "subject_ea93959c47e6.luau",
+  "bytes": 368779,
+  "sha256": "ea93959c47e6ada393fdf3d5ad884b6fd713aa5d76ac7259e84bd18464153e15",
+  "source": "user-supplied attachment",
+  "acceptance": "execution only; source recovery is not required"
+}

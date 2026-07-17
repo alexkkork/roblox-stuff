@@ -1,0 +1,469 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace alex::deobfuscator::luraph
+{
+
+struct SourceRange
+{
+    size_t begin = 0;
+    size_t end = 0;
+
+    [[nodiscard]] size_t size() const
+    {
+        return end >= begin ? end - begin : 0;
+    }
+};
+
+struct ByteSpan
+{
+    size_t begin = 0;
+    size_t end = 0;
+
+    [[nodiscard]] size_t size() const
+    {
+        return end >= begin ? end - begin : 0;
+    }
+};
+
+enum class DiagnosticSeverity
+{
+    Info,
+    Warning,
+    Error,
+};
+
+enum class WrapperKind
+{
+    None,
+    ReturnedTable,
+    ReturnedTableMethodDispatch,
+};
+
+enum class BlobKind
+{
+    OpaquePrintable,
+    LphMarker,
+    LphAmpersand,
+    LphDollar,
+};
+
+enum class CarrierLiteralKind
+{
+    QuotedString,
+    LongBracketString,
+};
+
+enum class CarrierDecodeStatus
+{
+    NotAttempted,
+    DecodedLiteral,
+    InvalidLiteral,
+    UnsupportedLiteral,
+    ByteLimitExceeded,
+};
+
+enum class ReaderValueKind
+{
+    UnsignedInteger,
+    SignedInteger,
+    FloatingPoint,
+};
+
+enum class ByteOrder
+{
+    Unknown,
+    LittleEndian,
+    BigEndian,
+};
+
+enum class ContainerDecodeStatus
+{
+    NotAttempted,
+    Decoded,
+    InvalidPrefix,
+    MisalignedBody,
+    InvalidCharacter,
+    Radix85Overflow,
+    OutputLimitExceeded,
+};
+
+enum class ContainerParseStatus
+{
+    NotAttempted,
+    Parsed,
+    UnsupportedSchema,
+    Truncated,
+    UlebOverflow,
+    NonCanonicalUleb,
+    CountUnderflow,
+    CountLimitExceeded,
+    SignedFoldOverflow,
+    TrailerLimitExceeded,
+};
+
+enum class ConstantKind
+{
+    String,
+    Integer,
+    Boolean,
+    Float,
+    Nil,
+};
+
+enum class StageKind
+{
+    ProtectionBanner,
+    WrapperConstruction,
+    EncodedPayload,
+    ReaderSetup,
+    InterpreterScaffolding,
+    EntrypointDispatch,
+};
+
+enum class ConfidenceLevel
+{
+    None,
+    Low,
+    Medium,
+    High,
+};
+
+struct AnalysisLimits
+{
+    size_t max_source_bytes = 2 * 1024 * 1024;
+    size_t max_tokens = 500000;
+    size_t max_nesting = 512;
+    size_t max_tracked_blob_candidates = 16;
+    size_t max_decoded_carrier_bytes = 2 * 1024 * 1024;
+    size_t max_decoded_container_bytes = 2 * 1024 * 1024;
+    size_t max_container_constants = 100000;
+    size_t max_container_prototypes = 10000;
+    size_t max_container_instructions = 1000000;
+    size_t max_container_descriptors = 200000;
+    size_t max_preserved_trailer_bytes = 2 * 1024 * 1024;
+    size_t max_tracked_reader_metadata = 32;
+    size_t max_diagnostics = 32;
+};
+
+struct BannerInfo
+{
+    bool present = false;
+    bool exact_product_marker = false;
+    bool official_url_marker = false;
+    std::string product;
+    std::string version;
+    std::optional<unsigned int> major;
+    std::optional<unsigned int> minor;
+    std::optional<unsigned int> patch;
+    std::optional<SourceRange> range;
+};
+
+struct LuaAuthLauncherInfo
+{
+    bool present = false;
+    bool exact_assignment_shape = false;
+    bool official_url_marker = false;
+    bool metadata_removed_from_body = false;
+    size_t code_digit_count = 0;
+    size_t script_id_byte_count = 0;
+    std::optional<SourceRange> range;
+    std::optional<SourceRange> protected_body_range;
+};
+
+struct WrapperShape
+{
+    WrapperKind kind = WrapperKind::None;
+    bool top_level_return = false;
+    bool parenthesized_table = false;
+    bool balanced_table = false;
+    bool zero_argument_method_call = false;
+    bool forwards_varargs = false;
+    bool consumes_entire_chunk = false;
+    std::string method_name;
+    size_t table_field_count = 0;
+    size_t function_member_count = 0;
+    std::optional<SourceRange> table_range;
+    std::optional<SourceRange> invocation_range;
+};
+
+struct EnvelopeCounts
+{
+    size_t source_bytes = 0;
+    size_t token_count = 0;
+    size_t comment_count = 0;
+    size_t identifier_count = 0;
+    size_t numeric_literal_count = 0;
+    size_t string_literal_count = 0;
+    size_t string_literal_source_bytes = 0;
+    size_t encoded_string_candidate_count = 0;
+    size_t encoded_blob_candidate_count = 0;
+    size_t encoded_blob_source_bytes = 0;
+    size_t table_constructor_count = 0;
+    size_t function_literal_count = 0;
+    size_t loop_construct_count = 0;
+    size_t indexed_access_count = 0;
+    size_t reader_primitive_reference_count = 0;
+};
+
+struct BlobCandidate
+{
+    BlobKind kind = BlobKind::OpaquePrintable;
+    SourceRange range;
+    size_t source_bytes = 0;
+    size_t distinct_byte_count = 0;
+    double printable_ratio = 0.0;
+    double whitespace_ratio = 0.0;
+    bool long_bracket_literal = false;
+    bool has_lph_marker = false;
+};
+
+struct CarrierExtraction
+{
+    BlobKind kind = BlobKind::OpaquePrintable;
+    CarrierLiteralKind literal_kind = CarrierLiteralKind::QuotedString;
+    CarrierDecodeStatus status = CarrierDecodeStatus::NotAttempted;
+    SourceRange literal_range;
+    SourceRange content_range;
+    std::optional<SourceRange> error_range;
+    size_t literal_source_bytes = 0;
+    size_t decoded_byte_count = 0;
+    std::optional<size_t> lph_marker_offset;
+    std::optional<size_t> container_index;
+    std::vector<unsigned char> bytes;
+};
+
+struct ConstantMetadata
+{
+    size_t index = 0;
+    unsigned char tag = 0;
+    ConstantKind kind = ConstantKind::Nil;
+    ByteSpan span;
+    ByteSpan tag_span;
+    std::optional<ByteSpan> length_span;
+    ByteSpan data_span;
+    size_t data_bytes = 0;
+    std::optional<int64_t> signed_integer_value;
+    std::optional<uint64_t> unsigned_integer_value;
+    std::optional<bool> boolean_value;
+    std::optional<float> float32_value;
+    std::optional<double> float64_value;
+    std::optional<uint32_t> float32_bits;
+    std::optional<uint64_t> float64_bits;
+    std::vector<unsigned char> string_bytes;
+};
+
+struct DescriptorMetadata
+{
+    size_t index = 0;
+    uint64_t raw_value = 0;
+    unsigned int kind = 0;
+    uint64_t referenced_index = 0;
+    ByteSpan span;
+};
+
+struct InstructionWordMetadata
+{
+    int64_t value = 0;
+    ByteSpan span;
+};
+
+struct InstructionMetadata
+{
+    size_t index = 0;
+    ByteSpan span;
+    std::array<InstructionWordMetadata, 4> words{};
+};
+
+struct PrototypeMetadata
+{
+    size_t index = 0;
+    ByteSpan span;
+    uint64_t meta = 0;
+    ByteSpan meta_span;
+    size_t instruction_count = 0;
+    ByteSpan instruction_count_span;
+    ByteSpan instruction_words_span;
+    size_t descriptor_count = 0;
+    ByteSpan descriptor_count_span;
+    ByteSpan descriptors_span;
+    uint64_t final_value = 0;
+    ByteSpan final_span;
+    std::vector<InstructionMetadata> instructions;
+    std::vector<DescriptorMetadata> descriptors;
+};
+
+struct ContainerAnalysis
+{
+    size_t carrier_index = 0;
+    ContainerDecodeStatus decode_status = ContainerDecodeStatus::NotAttempted;
+    ContainerParseStatus parse_status = ContainerParseStatus::NotAttempted;
+    size_t encoded_carrier_bytes = 0;
+    size_t encoded_body_bytes = 0;
+    size_t radix85_group_count = 0;
+    size_t radix85_zero_group_count = 0;
+    size_t decoded_bytes = 0;
+    std::string decoded_sha256;
+    unsigned char marker = 0;
+    std::optional<size_t> encoded_error_offset;
+    std::optional<size_t> parse_error_offset;
+    size_t constant_count = 0;
+    ByteSpan constant_count_span;
+    unsigned char constant_pool_mode = 0;
+    ByteSpan constant_pool_mode_span;
+    ByteSpan constants_span;
+    size_t prototype_count = 0;
+    ByteSpan prototype_count_span;
+    ByteSpan prototypes_span;
+    size_t instruction_count = 0;
+    size_t descriptor_count = 0;
+    uint64_t root_selector = 0;
+    ByteSpan root_selector_span;
+    ByteSpan trailer_span;
+    std::vector<ConstantMetadata> constants;
+    std::vector<PrototypeMetadata> prototypes;
+    std::vector<unsigned char> trailer_bytes;
+    std::vector<unsigned char> decoded_data;
+};
+
+struct ContainerMetrics
+{
+    size_t candidate_count = 0;
+    size_t attempt_count = 0;
+    size_t decoded_count = 0;
+    size_t parsed_count = 0;
+    size_t failure_count = 0;
+    size_t encoded_body_bytes = 0;
+    size_t radix85_group_count = 0;
+    size_t radix85_zero_group_count = 0;
+    size_t decoded_bytes = 0;
+    size_t constant_count = 0;
+    size_t prototype_count = 0;
+    size_t instruction_count = 0;
+    size_t descriptor_count = 0;
+    size_t trailer_bytes = 0;
+};
+
+struct ReaderMetadata
+{
+    std::string name;
+    // Type and width are name-derived hints; the function body is never evaluated.
+    ReaderValueKind value_kind = ReaderValueKind::UnsignedInteger;
+    ByteOrder byte_order = ByteOrder::Unknown;
+    size_t bit_width = 0;
+    size_t byte_width = 0;
+    size_t reference_count = 0;
+    bool definition_present = false;
+    bool inferred_from_identifier = true;
+    bool implementation_verified = false;
+    SourceRange name_range;
+    std::optional<SourceRange> definition_range;
+};
+
+struct StaticDecodeMetrics
+{
+    bool eligible = false;
+    bool attempted = false;
+    bool complete = false;
+    // These fields refer to protected-program/VM decoding, not container framing.
+    bool payload_decode_attempted = false;
+    bool payload_decoded = false;
+    size_t carrier_candidate_count = 0;
+    size_t carrier_attempt_count = 0;
+    size_t carrier_decoded_count = 0;
+    size_t carrier_failure_count = 0;
+    size_t carrier_skipped_count = 0;
+    size_t carrier_literal_source_bytes = 0;
+    size_t decoded_carrier_bytes = 0;
+    size_t byte_limit_hit_count = 0;
+    size_t reader_metadata_count = 0;
+    size_t reader_definition_count = 0;
+    size_t reader_reference_count = 0;
+};
+
+struct Stage
+{
+    StageKind kind = StageKind::ProtectionBanner;
+    double confidence = 0.0;
+    std::string summary;
+    std::optional<SourceRange> range;
+};
+
+struct ConfidenceEvidence
+{
+    std::string code;
+    double weight = 0.0;
+    std::string description;
+};
+
+struct Confidence
+{
+    double score = 0.0;
+    ConfidenceLevel level = ConfidenceLevel::None;
+    std::vector<ConfidenceEvidence> evidence;
+};
+
+struct Diagnostic
+{
+    DiagnosticSeverity severity = DiagnosticSeverity::Info;
+    std::string code;
+    std::string message;
+    std::optional<SourceRange> range;
+};
+
+struct EnvelopeAnalysis
+{
+    bool complete = false;
+    bool bounded = true;
+    bool family_detected = false;
+    bool version_supported = false;
+    bool generated_interpreter = false;
+    bool source_recovery_attempted = false;
+    BannerInfo banner;
+    LuaAuthLauncherInfo luaauth_launcher;
+    WrapperShape wrapper;
+    EnvelopeCounts counts;
+    std::vector<BlobCandidate> blobs;
+    StaticDecodeMetrics static_decode;
+    std::vector<CarrierExtraction> carriers;
+    ContainerMetrics container_metrics;
+    std::vector<ContainerAnalysis> containers;
+    std::vector<ReaderMetadata> readers;
+    std::vector<Stage> stages;
+    Confidence confidence;
+    std::vector<Diagnostic> diagnostics;
+};
+
+// Performs source-only structural analysis plus bounded decoding of exact Luau literals
+// and proven LPH& container framing. It never evaluates input or recovers source.
+EnvelopeAnalysis analyzeEnvelope(std::string_view source, const AnalysisLimits& limits = {});
+
+// Builds a side-effect-free, call-focused trace probe for the supported v14.7
+// interpreter shape. The returned source remains protected and is intended only
+// for bounded execution by the offline runtime.
+std::optional<std::string> buildCallTraceProbe(
+    std::string_view source,
+    uint64_t fullTraceStart = 0,
+    uint64_t fullTraceEnd = 0);
+
+std::string_view toString(DiagnosticSeverity severity);
+std::string_view toString(WrapperKind kind);
+std::string_view toString(BlobKind kind);
+std::string_view toString(CarrierLiteralKind kind);
+std::string_view toString(CarrierDecodeStatus status);
+std::string_view toString(ReaderValueKind kind);
+std::string_view toString(ByteOrder byteOrder);
+std::string_view toString(ContainerDecodeStatus status);
+std::string_view toString(ContainerParseStatus status);
+std::string_view toString(ConstantKind kind);
+std::string_view toString(StageKind kind);
+std::string_view toString(ConfidenceLevel level);
+
+} // namespace alex::deobfuscator::luraph

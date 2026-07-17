@@ -1,0 +1,9 @@
+{
+  "benchmark": "Balenci WeAreDevs reconstruction",
+  "score": 60,
+  "level": "lifted",
+  "compiled": true,
+  "runtime_equivalent": false,
+  "runtime_prefix_matched": true,
+  "verified_at": "2026-07-12"
+}

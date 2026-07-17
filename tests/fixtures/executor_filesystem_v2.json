@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "filesystem": {
+    "fixtures": {
+      "directory": true
+    },
+    "fixtures/hello.txt": {
+      "contents": "hello from scenario v2"
+    }
+  }
+}

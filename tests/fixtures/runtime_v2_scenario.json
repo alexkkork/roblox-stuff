@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "identity": {
+    "place_id": 12345,
+    "game_id": 67890,
+    "job_id": "runtime-v2-test",
+    "user_id": 4242,
+    "player_name": "RuntimeTester"
+  },
+  "clock": {
+    "mode": "virtual",
+    "frame_rate": 60,
+    "max_seconds": 5
+  },
+  "instances": [
+    {
+      "id": "modules",
+      "class": "Folder",
+      "name": "Modules",
+      "parent": "workspace"
+    },
+    {
+      "id": "answer",
+      "class": "ModuleScript",
+      "name": "Answer",
+      "parent": "modules",
+      "source": "local environment = getfenv(1); return { value = 42, environment = environment, shared = _G, module = script, leaked = runtimeOnlyGlobal }",
+      "attributes": {
+        "Fixture": true
+      },
+      "tags": [
+        "Scenario"
+      ]
+    }
+  ],
+  "http_fixtures": {
+    "GET https://fixture.test/value": {
+      "status_code": 200,
+      "headers": {
+        "Content-Type": "text/plain"
+      },
+      "body": "fixture-ok"
+    }
+  },
+  "scheduled_events": []
+}

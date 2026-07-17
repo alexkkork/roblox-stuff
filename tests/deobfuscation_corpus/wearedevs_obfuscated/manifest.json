@@ -1,0 +1,699 @@
+{
+  "version": 1,
+  "endpoint": "https://wearedevs.net/api/obfuscate",
+  "fetched_at": "2026-07-11T01:14:10.068Z",
+  "request_count": 74,
+  "file_count": 100,
+  "files": [
+    {
+      "filename": "001_arithmetic.luau",
+      "status": "cached",
+      "source_sha256": "ea2f20ba9ab898245aa8715703802b9d5eff6318915baf76034b41142090bbc3",
+      "output_sha256": "18a9303ea0693eb44fe6ae1cadb4e00fa4c769e464bc33e1c2efee79367e0340",
+      "output_bytes": 17415
+    },
+    {
+      "filename": "002_string_transform.luau",
+      "status": "cached",
+      "source_sha256": "02d834ca9760499bc5b82bb5d87b6185e72b59d12a50210fa7bb260179e14c4a",
+      "output_sha256": "4bb2fb740be7583c56e71c4436ec8d044e12d90c7cdb8417e8aa77b59be14e16",
+      "output_bytes": 17626
+    },
+    {
+      "filename": "003_array_reduce.luau",
+      "status": "cached",
+      "source_sha256": "cc26018499a1e0d5e861dcbb4a06a4cfcd5d99db773f1e494c24440f288aa20e",
+      "output_sha256": "f8c60f1a8da9ba932058df7b0a29c7371ac92b40b6d6d3acc020df1378c107c9",
+      "output_bytes": 17578
+    },
+    {
+      "filename": "004_dictionary.luau",
+      "status": "cached",
+      "source_sha256": "ab47e3fe94e9e4b795b0c7ed13140ad571e1103f61628c4956347cb765318ef9",
+      "output_sha256": "06cf51b5d02e596e7f84c0537c662eda52f9ab7bccbcb2ba24d15222cf69e000",
+      "output_bytes": 18028
+    },
+    {
+      "filename": "005_numeric_loop.luau",
+      "status": "cached",
+      "source_sha256": "ff70f86ff0394f7a166f769a4c3cd1bee909c37de3f075223076a4ddff81754f",
+      "output_sha256": "22fbe7763a8ecc6a6cf2b5309742d432b759de0a06b2b11eb67cbbc942425316",
+      "output_bytes": 17551
+    },
+    {
+      "filename": "006_while_loop.luau",
+      "status": "cached",
+      "source_sha256": "197900b94a65df61da598499722c6d163d495387b670be8e618e3a49625f8fab",
+      "output_sha256": "3a4b43b5a1d724ee1484ebc3fafe56e2e37e082d5ccee38ca5ebb0966ef144e1",
+      "output_bytes": 17408
+    },
+    {
+      "filename": "007_repeat_loop.luau",
+      "status": "cached",
+      "source_sha256": "3fb3960e72969668a1016fb8a6f0e40496f9e37c0212a1b05fa13acbc63ae09d",
+      "output_sha256": "23fbce12a70e7501dd779fc072182a3f6972e2ce3d45346283ea63ade853c2de",
+      "output_bytes": 17534
+    },
+    {
+      "filename": "008_closure.luau",
+      "status": "cached",
+      "source_sha256": "a9805fe6cee64f84daa1fff2758b43fc558842b3daef9f67bc786ec74738a8fd",
+      "output_sha256": "0c8b5766ebbc2d24c8601e08e59767b028e464d6c9b6a68c8d4c6ebf44c0e9a5",
+      "output_bytes": 17828
+    },
+    {
+      "filename": "009_recursion.luau",
+      "status": "cached",
+      "source_sha256": "e33c3d9077b70c2921241e4ca6e990a03125110a57c4b23bea2d2760c9e2f115",
+      "output_sha256": "15bf465037a224119f7bc36b482fecd9354a01edcf3521b0cb6d6c5d4992b9e8",
+      "output_bytes": 17791
+    },
+    {
+      "filename": "010_varargs.luau",
+      "status": "cached",
+      "source_sha256": "42ea2017f902cb448088b1369978e6f8f627b7c834de207ea5fd713fff7204c7",
+      "output_sha256": "5381ed5f4e610d9d38da395871158aeb8301edb216d04f98361398ff76227b0b",
+      "output_bytes": 17724
+    },
+    {
+      "filename": "011_multi_return.luau",
+      "status": "cached",
+      "source_sha256": "14e68625250d80057c3da0674b658fd05e84dc1242a665337a95afcf931d60f6",
+      "output_sha256": "70a8038dc2b53f65f6963f23a7d5e1bb2e9034d8880d77f30316bc7addd329b5",
+      "output_bytes": 17464
+    },
+    {
+      "filename": "012_table_sort.luau",
+      "status": "cached",
+      "source_sha256": "7326992b5c5ca628f19511e578547e680c7c4c6b8a7f69c88cf2204af2a49fbf",
+      "output_sha256": "64fd9de26b6f228bb004e7825b39ea3924e1edfe7bd3a7bcbe58daed0a85ccbc",
+      "output_bytes": 17530
+    },
+    {
+      "filename": "013_metatable.luau",
+      "status": "cached",
+      "source_sha256": "ec071d4c3b5353f0266389d8230934cf757cb79645b73f96efd1b97ff7ac898a",
+      "output_sha256": "dae64c2127bb9fcf42f0072ee92d8d525a61c5801e186bdc1f1a34266f341625",
+      "output_bytes": 18449
+    },
+    {
+      "filename": "014_protected_call.luau",
+      "status": "cached",
+      "source_sha256": "21e0152a40f262e3a731509a8a6bc7b84fe61e286469a26028e49dee7590badf",
+      "output_sha256": "65dff60f28c9113ff83b667d224d7ac02084310d4b768c8fb9bce764495b6b1a",
+      "output_bytes": 18006
+    },
+    {
+      "filename": "015_coroutine.luau",
+      "status": "cached",
+      "source_sha256": "1e61fe0d34b3162732e18a4568c3ef42f0b2e81405c091e5c9a1c8161caec9bf",
+      "output_sha256": "590165770332f2d79e20478cee85aa9d44afa3d4ef9df7d1cdcb2edcf6b5ccd4",
+      "output_bytes": 18050
+    },
+    {
+      "filename": "016_iterator.luau",
+      "status": "cached",
+      "source_sha256": "c8e1f374b29c0a8378f5270fa9bb2d5f27595513fd02f31a596e0e61ea38b2f5",
+      "output_sha256": "4580eaea403c67fc1ee08e5b098232c0dadd6ed70364ca5db17888855930c675",
+      "output_bytes": 17792
+    },
+    {
+      "filename": "017_if_expression.luau",
+      "status": "rejected",
+      "source_sha256": "31638f3ae7387847e26b7c615ba2760da9fdda919e19d87917db91de2c3444c8",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "018_interpolation.luau",
+      "status": "rejected",
+      "source_sha256": "31244516886376a4b09a60977994b3c870d52022afb6d57165355fd3fa0ed63f",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "019_bit32.luau",
+      "status": "fetched",
+      "source_sha256": "9ee897284c430a101c0d6a20889940a8aa7c6d3ffc427f9b78af3b7c13902f1a",
+      "output_sha256": "dcef41d5a575e933f0dc55b0dd1803a1f9ea520e5cc1b949005bcb9162187944",
+      "output_bytes": 17610
+    },
+    {
+      "filename": "020_state_machine.luau",
+      "status": "fetched",
+      "source_sha256": "9199167ccc50c74f7f4b142edb11f24509b25bca9f4b94b6aa745553e0ee531d",
+      "output_sha256": "106aee190bb0fa8e3e40ba5fe79a23ac971da6aa6fbf1e3353d2072f150f00cc",
+      "output_bytes": 18141
+    },
+    {
+      "filename": "021_arithmetic.luau",
+      "status": "fetched",
+      "source_sha256": "deecd96559e013039477c211a9e0e5a8f0a6cbde3c99637418fa9c5904f2832e",
+      "output_sha256": "ed967b45301c3719b0ceef9fc4a5a0a54458721cdefd0d69fd369153595b4643",
+      "output_bytes": 17201
+    },
+    {
+      "filename": "022_string_transform.luau",
+      "status": "fetched",
+      "source_sha256": "f481fce2594ca852cea0405fadbef15fcdbab46334f9d12d7cb6f1ad558f2740",
+      "output_sha256": "5628c4a0647b986b820b99ed4814a20bd8b694edfb0eb7fd6e86d3fe790ef3cf",
+      "output_bytes": 17546
+    },
+    {
+      "filename": "023_array_reduce.luau",
+      "status": "fetched",
+      "source_sha256": "aa925092bd0abe88be6627a355d7e9469a770a28a0b0a06d058b332032e6cb5f",
+      "output_sha256": "1551869b8780ce660dddeb57ee1b281593c4c779ff5482dd76502b18f26892fe",
+      "output_bytes": 17663
+    },
+    {
+      "filename": "024_dictionary.luau",
+      "status": "fetched",
+      "source_sha256": "1d14a4108af3274bdd39483d793abdc7baee9d369e546508bb24233b6d77900d",
+      "output_sha256": "857a7f840a5d8f68af1e43241881ff1b9eced2c5fa1bbcbfb1e25e2e5ec8fb1f",
+      "output_bytes": 17953
+    },
+    {
+      "filename": "025_numeric_loop.luau",
+      "status": "fetched",
+      "source_sha256": "57c86a0fe3ca85bf0155a316ec242fede7dc5b4bef99e177afc9d211c84d62be",
+      "output_sha256": "1d616ad003e9e11eede72870129352e835e4804484c2106812bb15ff0ef6e66c",
+      "output_bytes": 17372
+    },
+    {
+      "filename": "026_while_loop.luau",
+      "status": "fetched",
+      "source_sha256": "fe3253fdabf2eee0cfaf46fd21c61ca77e91ff3e3a90d5370c2f5f271d218e46",
+      "output_sha256": "d50760552e3534bcace073b2af32d830e16d0d58ef6b01119e20791c342c9e8f",
+      "output_bytes": 17412
+    },
+    {
+      "filename": "027_repeat_loop.luau",
+      "status": "fetched",
+      "source_sha256": "87d0e03a93a2574d6509c2c3af472873b72079d9177ac71ce9e1b732b7eb4053",
+      "output_sha256": "0d934dc227b7fb6158c7b3b62ff9a86289ed2310a83fe8e4edb11ef457e4ac24",
+      "output_bytes": 17368
+    },
+    {
+      "filename": "028_closure.luau",
+      "status": "fetched",
+      "source_sha256": "2b2dc6c4a264266908d7890f19dad11192b85cb0b07ddca6ff6f1a9f07a7b350",
+      "output_sha256": "5ec7d7cb92575ab5e3344f93bfba5036ddf721714c50400a204d5753e54b6032",
+      "output_bytes": 17785
+    },
+    {
+      "filename": "029_recursion.luau",
+      "status": "fetched",
+      "source_sha256": "8e5b2586af7e85fc48d7285f454454cf5355fe60b45affba4c0d7855e455fbb6",
+      "output_sha256": "cb8ee3d1843a35ef9f8336a5dfe2f9bbb5245dbc343247649703b060a13d7313",
+      "output_bytes": 17782
+    },
+    {
+      "filename": "030_varargs.luau",
+      "status": "fetched",
+      "source_sha256": "e3fce5d172f8a02a6178b295495c7a3c1ea1961e8f3c53b7266ebbc009d9fd79",
+      "output_sha256": "44639e92f38f290b5b9aa0cd4609fb7955c15d4ba23536e58a937dfeb9818370",
+      "output_bytes": 17797
+    },
+    {
+      "filename": "031_multi_return.luau",
+      "status": "fetched",
+      "source_sha256": "9b3ce9103dcbf874a175c24bb41ab96ebf6db8dfe6ec1030386608694c0432c1",
+      "output_sha256": "b7e94c382a3de1afabd6b49480b4c37c082a7ccb92e4ddaa6ea7d7222d703c69",
+      "output_bytes": 17462
+    },
+    {
+      "filename": "032_table_sort.luau",
+      "status": "fetched",
+      "source_sha256": "19f9b1b2e59e5bc4e01451e896d1a5c059254119480735915ded6638affe1da5",
+      "output_sha256": "4cbf97d1d0cdb6ca1b6889839f65b607b0f77d002c78db044b529f966e03644a",
+      "output_bytes": 17540
+    },
+    {
+      "filename": "033_metatable.luau",
+      "status": "fetched",
+      "source_sha256": "da352bde26e7408e8fc1db30a8ef43719e35f99bbb9a8095c2ea40151a9294d9",
+      "output_sha256": "90611bd7d7c3fd1539a7cd53ca3fd8357c6fae47a347278db12deb07cb50f79c",
+      "output_bytes": 18265
+    },
+    {
+      "filename": "034_protected_call.luau",
+      "status": "fetched",
+      "source_sha256": "fb357f5c6c206ddc1845a64f92a62fead9825f37029ea31cd566d77ab67b9311",
+      "output_sha256": "e903b6d458bcc46911f91d3ff02ce358c10127cdde0e7bb17a0bbab134005e9f",
+      "output_bytes": 17748
+    },
+    {
+      "filename": "035_coroutine.luau",
+      "status": "fetched",
+      "source_sha256": "1a6871e3d3d98174097c13bf675a8adac21f1cf89c3d9f1484e8905e864d4057",
+      "output_sha256": "f2ef246062ac4e68c293826fe1c7016726a47ed549fe6ae635cad2ef7c5e325d",
+      "output_bytes": 18226
+    },
+    {
+      "filename": "036_iterator.luau",
+      "status": "fetched",
+      "source_sha256": "aa0ea5c17748bd75dbfe43d21e6acde93583760591a4637193921785c591e8c0",
+      "output_sha256": "46c9dd8f73423d755cad90601a9a5c06c2a1c5abf267557043e4e1d761268c12",
+      "output_bytes": 17844
+    },
+    {
+      "filename": "037_if_expression.luau",
+      "status": "rejected",
+      "source_sha256": "a422090af4ab32a164cef88ee89968ba2a252c6aaccc1830e74ae0e026790ee6",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "038_interpolation.luau",
+      "status": "rejected",
+      "source_sha256": "0bb25a9a17484ba6d8368f7bb15d7744e61d9d6de63eec8a41cd6d75213b94dc",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "039_bit32.luau",
+      "status": "fetched",
+      "source_sha256": "20bc400326e97a4203db5812bbf922fb38213a775be98dff4fbe7545d4233b81",
+      "output_sha256": "c06307c8f218ee741bffb86fcd2f7b5a43cafc6cd44d28b2fca37d514819a150",
+      "output_bytes": 17525
+    },
+    {
+      "filename": "040_state_machine.luau",
+      "status": "fetched",
+      "source_sha256": "56a83ce6b987741dc1e9378dfb5f942f4f9197c6b8389d85f9936852f143735a",
+      "output_sha256": "65efbd15ead7ac1ce5343a0880935708172815abad439412a78ee12a91213dc7",
+      "output_bytes": 18133
+    },
+    {
+      "filename": "041_arithmetic.luau",
+      "status": "fetched",
+      "source_sha256": "98130e622ee602160a4216e79f208f5608067eb71dec9f516cbca74143453431",
+      "output_sha256": "e6bbc9ba6cb5ccf6c39d899a44e93bbb13bd729d6649d2530618ab9545ee836e",
+      "output_bytes": 17484
+    },
+    {
+      "filename": "042_string_transform.luau",
+      "status": "fetched",
+      "source_sha256": "ae4da9acc4761fa3027be0f2a10ce2d2ae58af3415db06d1c2d31f9ba1c76139",
+      "output_sha256": "b793a58af3efdbe2a96787d665aa740abd6538edabf6f00956db2dcfc13b22fd",
+      "output_bytes": 17448
+    },
+    {
+      "filename": "043_array_reduce.luau",
+      "status": "fetched",
+      "source_sha256": "e5a1b2c810905016f6c5436d89218509f692a04adb9434a13cb3c265ae42b9ec",
+      "output_sha256": "461d151bbbf4d8234375e2299b74748ad3009afb5bef8cf26d0ec73c126281ce",
+      "output_bytes": 17629
+    },
+    {
+      "filename": "044_dictionary.luau",
+      "status": "fetched",
+      "source_sha256": "2f04b3455098c4a2799e9d14bc7815a875b40a5cda9271766e697624b9393a02",
+      "output_sha256": "24fbbc41e1541f4a2f162368d84916de6852305500f69623d9647edb6304bdf6",
+      "output_bytes": 18038
+    },
+    {
+      "filename": "045_numeric_loop.luau",
+      "status": "fetched",
+      "source_sha256": "80724ce25ef059ee951c35be2f61b15350f6ac8930c78d3ff7d965ba866f939e",
+      "output_sha256": "a2d6754998c5382cefb008693cb91b5267b43fe22d4b1ccd746f5ec98619f177",
+      "output_bytes": 17553
+    },
+    {
+      "filename": "046_while_loop.luau",
+      "status": "fetched",
+      "source_sha256": "bed28eda3887185f91040152b4bbc7fe8a9b0fa26f4f604131d48c4c213774fc",
+      "output_sha256": "3b464bd36610e3cc726d444b8409c7b92e9c48594451355dc6c5a0f7c1f5d910",
+      "output_bytes": 17454
+    },
+    {
+      "filename": "047_repeat_loop.luau",
+      "status": "fetched",
+      "source_sha256": "a56f1cca2c204937982a982f432cb35bd87eba5735e0cf706b72bfdc41005a4e",
+      "output_sha256": "c89e8a3787116dfaeafa6e8da5c6149980383dea748fb8814fe9df26737314ce",
+      "output_bytes": 17326
+    },
+    {
+      "filename": "048_closure.luau",
+      "status": "fetched",
+      "source_sha256": "eda2d61bd7841cdd96f0e27eda6b53a3c778dd360be37c870bc04c756356d45e",
+      "output_sha256": "a39ce5d866ffa1247d284b22ef0e708a5771893fb45b57153cbfb2142d574013",
+      "output_bytes": 17767
+    },
+    {
+      "filename": "049_recursion.luau",
+      "status": "fetched",
+      "source_sha256": "b2f1974e19f3f5cb2847d1c2a3e4f2c4be6c7e03bc3dd258e13e9109291eaf2e",
+      "output_sha256": "9c5d0d4c440629a02d46b2868ae761353ca09f435e14dad08cf1e1fe4ccc92f0",
+      "output_bytes": 17858
+    },
+    {
+      "filename": "050_varargs.luau",
+      "status": "fetched",
+      "source_sha256": "ff627ebfd9dedc33b23c4a353d1e57c0ffe9f2d39449dde5bef8c47266424dc0",
+      "output_sha256": "e94fb4864c7bdd553b28687375bd5fcca267b8e121ca043f1c4095e5391c26a1",
+      "output_bytes": 17779
+    },
+    {
+      "filename": "051_multi_return.luau",
+      "status": "fetched",
+      "source_sha256": "6adf9c9cca4464debeed47da5db29711ed03ff79e76be48d017d3174b87be6c5",
+      "output_sha256": "fdcac82e9e60de9ab0e1061dc1e5f36c4ad1c752f45ca75f2237b6815ee614e0",
+      "output_bytes": 17676
+    },
+    {
+      "filename": "052_table_sort.luau",
+      "status": "fetched",
+      "source_sha256": "7ae932fa3c9b8cae8c56d2e73f933750c96bc07bda91673ce051af3bf0e79010",
+      "output_sha256": "9d9b69752021003e4cc284b07591d9d9bb66f985431fcc046965059576a55520",
+      "output_bytes": 17754
+    },
+    {
+      "filename": "053_metatable.luau",
+      "status": "fetched",
+      "source_sha256": "6b64b5eb9fd13c1b2c393f5018bb70bb7fdefa4eba16b040ca3540018a2da91e",
+      "output_sha256": "3a6fb08aa340c7741c01abaf6f2b5aec53226bebeca8d725b26060a4b9503719",
+      "output_bytes": 18564
+    },
+    {
+      "filename": "054_protected_call.luau",
+      "status": "fetched",
+      "source_sha256": "a8eddb168cadea9656867ff287c5a33cacf5a93b8e430b76cfccc76be68c8504",
+      "output_sha256": "9b46d06544d91a3236f2bbf2932f8d3c52b675975e7a75352d08e9588171abc6",
+      "output_bytes": 17977
+    },
+    {
+      "filename": "055_coroutine.luau",
+      "status": "fetched",
+      "source_sha256": "712adfdb5f49fa32d44ac92fda6c25c64f978131c253ade3b5c152aba1b80cd4",
+      "output_sha256": "d203455f820b131b342fcf3ea3cf981d312439f2fe96e440d1ccc2f938706d81",
+      "output_bytes": 18086
+    },
+    {
+      "filename": "056_iterator.luau",
+      "status": "fetched",
+      "source_sha256": "ec2b3854da11abf876103bdd4289c3ae11107c891e03788c0f1a294d6afe4d58",
+      "output_sha256": "44759e19d7b9a2263753c06fb0d94e3c73518a3edb1940c203acd0f12f9e2610",
+      "output_bytes": 17819
+    },
+    {
+      "filename": "057_if_expression.luau",
+      "status": "rejected",
+      "source_sha256": "5a49406d5dca0934246484cf3830dee9992966595a0768fff72b8fd89f12e652",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "058_interpolation.luau",
+      "status": "rejected",
+      "source_sha256": "7d8e6f64ec5d674bcc1e5564c18eee7d004435c83fe754645180d1022282b4f4",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "059_bit32.luau",
+      "status": "fetched",
+      "source_sha256": "d0231f3e4f8b79867c71f53d469904d5750da9c4657ca4171b3591dcf4c0eb5e",
+      "output_sha256": "9ab9081b6a8dcd010eddd6a2b9579a5c0839bee7355f191f9fb8eb5ccd36c56d",
+      "output_bytes": 17496
+    },
+    {
+      "filename": "060_state_machine.luau",
+      "status": "fetched",
+      "source_sha256": "ba1c52a3dcc82fc42889a0eeb47eb4ba30b51c7fdc47c8853bef715a096b4520",
+      "output_sha256": "2851eaf63632463bb166940f9cabd618ee5d4839356c81c8a23c617eb4815ba2",
+      "output_bytes": 18212
+    },
+    {
+      "filename": "061_arithmetic.luau",
+      "status": "fetched",
+      "source_sha256": "afc7d8590bccebfc11e3942946c8cfc401d5d9c1a4abcd65e553e7e65c8d5ece",
+      "output_sha256": "e87056587f985f148298b84b7b1031d1daa42b9f1ab4540305a7a7955a568888",
+      "output_bytes": 17448
+    },
+    {
+      "filename": "062_string_transform.luau",
+      "status": "fetched",
+      "source_sha256": "3b9b9521affe5494eb2aa94e095a2016eb7aa26fc665ffb2da05f7f4eaf7a4bb",
+      "output_sha256": "7763b7fabb92e20e3f0e7e7f87d4ae040df909f12f1c3b296de63b04b70b90ab",
+      "output_bytes": 17438
+    },
+    {
+      "filename": "063_array_reduce.luau",
+      "status": "fetched",
+      "source_sha256": "ceb77e5047147e46d6a21fdbdb15b0f86330e8a8d502efc905d9f4b9de866c8b",
+      "output_sha256": "aa2ab4da81e77c5540cac659e50e7ecf8ab37d18509b45028a33608c63aa8c99",
+      "output_bytes": 17625
+    },
+    {
+      "filename": "064_dictionary.luau",
+      "status": "fetched",
+      "source_sha256": "af042dbe559508292113285028974157b33ac2cea1596d4371cb44ba482fba32",
+      "output_sha256": "6ec722702722e804f2633fae9ed6607e60a75650bfaf2266582bf7df66b58b0d",
+      "output_bytes": 17841
+    },
+    {
+      "filename": "065_numeric_loop.luau",
+      "status": "fetched",
+      "source_sha256": "46abe228ac9601105d0e4828df85b7637cf903f2220a4a0f6b573212341096cf",
+      "output_sha256": "3018a14b74c712cf17fca7e257725b30c0d76cfa8fd82e6503a8315057197946",
+      "output_bytes": 17479
+    },
+    {
+      "filename": "066_while_loop.luau",
+      "status": "fetched",
+      "source_sha256": "573bd6045c8f0e6fa15a8de5e90f508ee2f3b60d90cb4b04af1224ddd2a917ad",
+      "output_sha256": "851e67b747c777ba1e32af3c18110f4ec2b9cb2c33e663175c7b31e5831566da",
+      "output_bytes": 17613
+    },
+    {
+      "filename": "067_repeat_loop.luau",
+      "status": "fetched",
+      "source_sha256": "05d05802c6ad2bad245403e4e953866eeb1a81923d210769e4acc03da8a4aff5",
+      "output_sha256": "9dc425c50f6fbefb5f4622872fb52593cdc1e2e4380b8445340d31952629ae12",
+      "output_bytes": 17308
+    },
+    {
+      "filename": "068_closure.luau",
+      "status": "fetched",
+      "source_sha256": "f2d582a0e2a7b9e4e21658bd9000ce241630be336b3f56f9c822c4164c692b1b",
+      "output_sha256": "593084e9ff98e91a9041c01f58685b1bafa85f0e5491a036782208c6e97c2108",
+      "output_bytes": 17854
+    },
+    {
+      "filename": "069_recursion.luau",
+      "status": "fetched",
+      "source_sha256": "f4ef0cf4d40df414928de55dd5755093873f4f0b6f9102506a232e829802dad2",
+      "output_sha256": "0dbeeddbb0f8decf732018fc6c43c1922bdf51018eb8e19b4482081b6ad67b5b",
+      "output_bytes": 17882
+    },
+    {
+      "filename": "070_varargs.luau",
+      "status": "fetched",
+      "source_sha256": "c64dea6be6ab2df27eff4c5432e13982efb37f87beb09db2192fa0ec4bd4bd21",
+      "output_sha256": "34a7b8df410e7792981c0e7f7628ee18b765ad493ca4439d22f417d5435a16a3",
+      "output_bytes": 17912
+    },
+    {
+      "filename": "071_multi_return.luau",
+      "status": "fetched",
+      "source_sha256": "95543e67ef243133e6eb9a5a3543346efbcc13816f2a7418e5b9a2b9f5b91a1c",
+      "output_sha256": "ed5627d4a13c868c02012cb40579e337f51334f0b80d623e861a3b147842525f",
+      "output_bytes": 17524
+    },
+    {
+      "filename": "072_table_sort.luau",
+      "status": "fetched",
+      "source_sha256": "305cc36762aa0863a569f36c1aabc301a4369e803902a570224de31793f9da1d",
+      "output_sha256": "c48f00e3416c6d7ff084e13872bf2072b800a935dedcf6f7bb411f0b7ccef27e",
+      "output_bytes": 17626
+    },
+    {
+      "filename": "073_metatable.luau",
+      "status": "fetched",
+      "source_sha256": "d6500f8953af630ebb84066a444148eed80be1819e4da353543e137b66a57919",
+      "output_sha256": "52e5a0e7bdabee9c82a0a99ba3a72ae247b3bc0ed9e530b1f724d15fee37af34",
+      "output_bytes": 18434
+    },
+    {
+      "filename": "074_protected_call.luau",
+      "status": "fetched",
+      "source_sha256": "050e9101a38d405210ffb8cb076850d3cc1ab83a8527c10e16e42a8dff623d63",
+      "output_sha256": "e3c4982770ac3373e9f70a51363df4cdb687c98b2af61cee1c826bdd4820e154",
+      "output_bytes": 17962
+    },
+    {
+      "filename": "075_coroutine.luau",
+      "status": "fetched",
+      "source_sha256": "db8f927148cec8371edbf3654c3c04c7a67668c26e3f953459baaed3959a382d",
+      "output_sha256": "ad5147ffede7ecd14daac01d5f17afb46ffa8096f9154cec7c6b1c12b7ba01cc",
+      "output_bytes": 18141
+    },
+    {
+      "filename": "076_iterator.luau",
+      "status": "fetched",
+      "source_sha256": "d5f6db9e2e6a3a74b7816299004b33b9daab25c1677a269bd7076620d53030fc",
+      "output_sha256": "1833337db630c9f48229ab59ec6cd74ef3112eb779a648a72bf10cc775b4feb2",
+      "output_bytes": 17934
+    },
+    {
+      "filename": "077_if_expression.luau",
+      "status": "rejected",
+      "source_sha256": "3397ec69f3c64605e2d5730c15a47802996e7394e5f1c1e772ed1ee87ea4c3ed",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "078_interpolation.luau",
+      "status": "rejected",
+      "source_sha256": "139ac7697b1d87a62076026b76c36f412b69f6e762c0d0fdefe58a984ca8bb0e",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "079_bit32.luau",
+      "status": "fetched",
+      "source_sha256": "851319a9e50d03c265372ad6ab966a7821fdd4fbb7a9a73f41dbada347e05d2b",
+      "output_sha256": "a421b5ae0d164f1e9d9eac4ffa5fca5d293ab47a28ff34532e9a74f0532bcdb1",
+      "output_bytes": 17520
+    },
+    {
+      "filename": "080_state_machine.luau",
+      "status": "fetched",
+      "source_sha256": "c096e2d7333f66be8399e59e3702972dbb8d17bdd03c1ed911799b2d64bb42cf",
+      "output_sha256": "f2850f6d961b67d137699f38529914ac053464661609681f5d70ae5a7c139230",
+      "output_bytes": 18203
+    },
+    {
+      "filename": "081_arithmetic.luau",
+      "status": "fetched",
+      "source_sha256": "541b608df9f2e10308a41a27d38bfa2096295a8a948cfc7271a60a494166e35f",
+      "output_sha256": "8b5af019bd8b738fefb8daff4034ba40dbd9b44aabf3f686574ad5156fa3b676",
+      "output_bytes": 17397
+    },
+    {
+      "filename": "082_string_transform.luau",
+      "status": "fetched",
+      "source_sha256": "7a3007c3709f720447ad2d1eeb60672bf2d1fadf1186feb9f3e843d54573ae4b",
+      "output_sha256": "fe96f0225952f56120b3d6a5a47892abc5e76c4caeab96d65737c4b88e9e5648",
+      "output_bytes": 17518
+    },
+    {
+      "filename": "083_array_reduce.luau",
+      "status": "fetched",
+      "source_sha256": "6a1e9b2a508dd12862768987bb3522337d0f4d14ca772e4a7ea0c6433d6145cb",
+      "output_sha256": "66727da0cfbe51332394258fd07fc0a6d5106957af5ece0fd79dd127617fc25f",
+      "output_bytes": 17712
+    },
+    {
+      "filename": "084_dictionary.luau",
+      "status": "fetched",
+      "source_sha256": "47dd9830da5b92f117a33d3a39cdcf95c722358a4b42a9383ee6d03ea622d7e9",
+      "output_sha256": "696bae1f3327374d19c8015cabbae4a71c44952e4cebeff6f99cb32b5cc28726",
+      "output_bytes": 17761
+    },
+    {
+      "filename": "085_numeric_loop.luau",
+      "status": "fetched",
+      "source_sha256": "63f51a4ba7cefb72e3e2ca102c3796cb926a04f59ed82bf7ee35b72c757d2bf7",
+      "output_sha256": "0f3b4ffffffd0c7eee628f3da72730434e649d71dd5f9325335d3eb8d8d91729",
+      "output_bytes": 17628
+    },
+    {
+      "filename": "086_while_loop.luau",
+      "status": "fetched",
+      "source_sha256": "91a2077c256d18308c13e639f49148c065d31dd50b332e06d5dfd73c89d96c80",
+      "output_sha256": "44b25897e4df1204f38dcbde44cb4bf31f9f591d1f7a94e677c58ea8e1ab08e1",
+      "output_bytes": 17437
+    },
+    {
+      "filename": "087_repeat_loop.luau",
+      "status": "fetched",
+      "source_sha256": "18c77ce78f176248b5b69f1693a1abba7edede0d35302ea86a500635d28fdd77",
+      "output_sha256": "7fbaa9c63071aee49bfada35ba07cf226f18cd695b2fde0db855e094ec4e8986",
+      "output_bytes": 17382
+    },
+    {
+      "filename": "088_closure.luau",
+      "status": "fetched",
+      "source_sha256": "5eaa165a54606dab55a00f2d3d14a0315b8eec1eb29cd381e34bffbbc7a6fdff",
+      "output_sha256": "aa132f7f192c2e57ed59260a1bb6f4d9d2b33c53b2db8296bd3c73422499b8e9",
+      "output_bytes": 17657
+    },
+    {
+      "filename": "089_recursion.luau",
+      "status": "fetched",
+      "source_sha256": "0fd9890d2b74497f934e0a7c5aa133e261cf675e357b0ef533054524a4c50610",
+      "output_sha256": "16887b1d90d33d844275f4580db317e4c2082dc0016ece86005797b98df5682f",
+      "output_bytes": 17456
+    },
+    {
+      "filename": "090_varargs.luau",
+      "status": "fetched",
+      "source_sha256": "06364a184358e05334cc4ad21e72f36d29ad53500d600d8bfbabe1958a30ce8c",
+      "output_sha256": "42522eb97f7ea84f6e44c3e6934c51b27215f984a70b58c3a9914d7854f6bc84",
+      "output_bytes": 17689
+    },
+    {
+      "filename": "091_multi_return.luau",
+      "status": "fetched",
+      "source_sha256": "3f9dc38ca6bd75a324d4d5041e3aa3c1f646ec0dd3c795b2ddbadbc16cd96e68",
+      "output_sha256": "1556373754565c18d2287789e69b36f3ebb8453b8a17fdefc853094fe48f6d9b",
+      "output_bytes": 17625
+    },
+    {
+      "filename": "092_table_sort.luau",
+      "status": "fetched",
+      "source_sha256": "467d2a233e18d8b7877d6abbe09ff5cc08b3eab182fcd07c5cc8d688de350f41",
+      "output_sha256": "e8e2bbed14b6423608647facd053fdb4a4ca42ebcaa6c3e0976c35e7a85b24eb",
+      "output_bytes": 17611
+    },
+    {
+      "filename": "093_metatable.luau",
+      "status": "fetched",
+      "source_sha256": "f8c4c7aa80758773de9990e170c96a0c681eb5a2a1bf0f142e2624421be2128d",
+      "output_sha256": "2ab01e4856045ab9e24016bde6d80051f5ff2a4ae4fca29cae904418fdd9eb53",
+      "output_bytes": 18177
+    },
+    {
+      "filename": "094_protected_call.luau",
+      "status": "fetched",
+      "source_sha256": "8dd0207b860f475905dac095ce3c3a324ffba5696e544b06208899b4e0782e07",
+      "output_sha256": "2923b580f57ae05cb2352e6dc4811dd37982d3061eab0a16819c66052300168c",
+      "output_bytes": 17908
+    },
+    {
+      "filename": "095_coroutine.luau",
+      "status": "fetched",
+      "source_sha256": "25f8f3506504acab106a0ab9a684987522285f7f8af4e8234314c9e0b511ed9d",
+      "output_sha256": "4c73551bb00e724dbf65489c4fa4381ff5c63b8644ab60ad11b20df8c7917c81",
+      "output_bytes": 18110
+    },
+    {
+      "filename": "096_iterator.luau",
+      "status": "fetched",
+      "source_sha256": "66169e2904acd2c1378a91739be52299aecf25495ba3efe7e2135018cd37a564",
+      "output_sha256": "7aea9ae1294c5a4d128f1cfc35acb0837e3009ad0d81e2c478be29a0aa8881d6",
+      "output_bytes": 17691
+    },
+    {
+      "filename": "097_if_expression.luau",
+      "status": "rejected",
+      "source_sha256": "0dc7d5a6129c7038a5b357d12ff95ffb205a331151921e283d066318e1965f53",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "098_interpolation.luau",
+      "status": "rejected",
+      "source_sha256": "a82813e88f89e2cf406d1b1507655c1f1012cbb00c24ee177f23919f2b3b4a9c",
+      "reason": "Please check the script for syntax errors"
+    },
+    {
+      "filename": "099_bit32.luau",
+      "status": "fetched",
+      "source_sha256": "fff07edd17515905d64b9102290f443c37c5775382ad5bdacb5e46183c3cde90",
+      "output_sha256": "458502a5785b121ba8800431ed6b52f41cd6291840007445bfbfe1c81f458dd9",
+      "output_bytes": 17428
+    },
+    {
+      "filename": "100_state_machine.luau",
+      "status": "fetched",
+      "source_sha256": "58de4bbf4a5952f646d0683f9675b010c45aaeb357af29983e6f8560b58c211a",
+      "output_sha256": "21ca4c9f41661db3b298a62ac10c82a98bdef421b0d35cd2284a91c9d0b43bb1",
+      "output_bytes": 18247
+    }
+  ]
+}

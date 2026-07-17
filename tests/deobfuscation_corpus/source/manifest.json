@@ -1,0 +1,706 @@
+{
+  "version": 1,
+  "count": 100,
+  "files": [
+    {
+      "id": 1,
+      "family": "arithmetic",
+      "variant": 1,
+      "filename": "001_arithmetic.luau",
+      "bytes": 91
+    },
+    {
+      "id": 2,
+      "family": "string_transform",
+      "variant": 1,
+      "filename": "002_string_transform.luau",
+      "bytes": 102
+    },
+    {
+      "id": 3,
+      "family": "array_reduce",
+      "variant": 1,
+      "filename": "003_array_reduce.luau",
+      "bytes": 146
+    },
+    {
+      "id": 4,
+      "family": "dictionary",
+      "variant": 1,
+      "filename": "004_dictionary.luau",
+      "bytes": 135
+    },
+    {
+      "id": 5,
+      "family": "numeric_loop",
+      "variant": 1,
+      "filename": "005_numeric_loop.luau",
+      "bytes": 99
+    },
+    {
+      "id": 6,
+      "family": "while_loop",
+      "variant": 1,
+      "filename": "006_while_loop.luau",
+      "bytes": 108
+    },
+    {
+      "id": 7,
+      "family": "repeat_loop",
+      "variant": 1,
+      "filename": "007_repeat_loop.luau",
+      "bytes": 100
+    },
+    {
+      "id": 8,
+      "family": "closure",
+      "variant": 1,
+      "filename": "008_closure.luau",
+      "bytes": 206
+    },
+    {
+      "id": 9,
+      "family": "recursion",
+      "variant": 1,
+      "filename": "009_recursion.luau",
+      "bytes": 135
+    },
+    {
+      "id": 10,
+      "family": "varargs",
+      "variant": 1,
+      "filename": "010_varargs.luau",
+      "bytes": 167
+    },
+    {
+      "id": 11,
+      "family": "multi_return",
+      "variant": 1,
+      "filename": "011_multi_return.luau",
+      "bytes": 122
+    },
+    {
+      "id": 12,
+      "family": "table_sort",
+      "variant": 1,
+      "filename": "012_table_sort.luau",
+      "bytes": 118
+    },
+    {
+      "id": 13,
+      "family": "metatable",
+      "variant": 1,
+      "filename": "013_metatable.luau",
+      "bytes": 188
+    },
+    {
+      "id": 14,
+      "family": "protected_call",
+      "variant": 1,
+      "filename": "014_protected_call.luau",
+      "bytes": 160
+    },
+    {
+      "id": 15,
+      "family": "coroutine",
+      "variant": 1,
+      "filename": "015_coroutine.luau",
+      "bytes": 221
+    },
+    {
+      "id": 16,
+      "family": "iterator",
+      "variant": 1,
+      "filename": "016_iterator.luau",
+      "bytes": 151
+    },
+    {
+      "id": 17,
+      "family": "if_expression",
+      "variant": 1,
+      "filename": "017_if_expression.luau",
+      "bytes": 158
+    },
+    {
+      "id": 18,
+      "family": "interpolation",
+      "variant": 1,
+      "filename": "018_interpolation.luau",
+      "bytes": 102
+    },
+    {
+      "id": 19,
+      "family": "bit32",
+      "variant": 1,
+      "filename": "019_bit32.luau",
+      "bytes": 105
+    },
+    {
+      "id": 20,
+      "family": "state_machine",
+      "variant": 1,
+      "filename": "020_state_machine.luau",
+      "bytes": 215
+    },
+    {
+      "id": 21,
+      "family": "arithmetic",
+      "variant": 2,
+      "filename": "021_arithmetic.luau",
+      "bytes": 93
+    },
+    {
+      "id": 22,
+      "family": "string_transform",
+      "variant": 2,
+      "filename": "022_string_transform.luau",
+      "bytes": 103
+    },
+    {
+      "id": 23,
+      "family": "array_reduce",
+      "variant": 2,
+      "filename": "023_array_reduce.luau",
+      "bytes": 150
+    },
+    {
+      "id": 24,
+      "family": "dictionary",
+      "variant": 2,
+      "filename": "024_dictionary.luau",
+      "bytes": 137
+    },
+    {
+      "id": 25,
+      "family": "numeric_loop",
+      "variant": 2,
+      "filename": "025_numeric_loop.luau",
+      "bytes": 99
+    },
+    {
+      "id": 26,
+      "family": "while_loop",
+      "variant": 2,
+      "filename": "026_while_loop.luau",
+      "bytes": 107
+    },
+    {
+      "id": 27,
+      "family": "repeat_loop",
+      "variant": 2,
+      "filename": "027_repeat_loop.luau",
+      "bytes": 100
+    },
+    {
+      "id": 28,
+      "family": "closure",
+      "variant": 2,
+      "filename": "028_closure.luau",
+      "bytes": 207
+    },
+    {
+      "id": 29,
+      "family": "recursion",
+      "variant": 2,
+      "filename": "029_recursion.luau",
+      "bytes": 135
+    },
+    {
+      "id": 30,
+      "family": "varargs",
+      "variant": 2,
+      "filename": "030_varargs.luau",
+      "bytes": 167
+    },
+    {
+      "id": 31,
+      "family": "multi_return",
+      "variant": 2,
+      "filename": "031_multi_return.luau",
+      "bytes": 122
+    },
+    {
+      "id": 32,
+      "family": "table_sort",
+      "variant": 2,
+      "filename": "032_table_sort.luau",
+      "bytes": 118
+    },
+    {
+      "id": 33,
+      "family": "metatable",
+      "variant": 2,
+      "filename": "033_metatable.luau",
+      "bytes": 188
+    },
+    {
+      "id": 34,
+      "family": "protected_call",
+      "variant": 2,
+      "filename": "034_protected_call.luau",
+      "bytes": 160
+    },
+    {
+      "id": 35,
+      "family": "coroutine",
+      "variant": 2,
+      "filename": "035_coroutine.luau",
+      "bytes": 221
+    },
+    {
+      "id": 36,
+      "family": "iterator",
+      "variant": 2,
+      "filename": "036_iterator.luau",
+      "bytes": 151
+    },
+    {
+      "id": 37,
+      "family": "if_expression",
+      "variant": 2,
+      "filename": "037_if_expression.luau",
+      "bytes": 158
+    },
+    {
+      "id": 38,
+      "family": "interpolation",
+      "variant": 2,
+      "filename": "038_interpolation.luau",
+      "bytes": 102
+    },
+    {
+      "id": 39,
+      "family": "bit32",
+      "variant": 2,
+      "filename": "039_bit32.luau",
+      "bytes": 105
+    },
+    {
+      "id": 40,
+      "family": "state_machine",
+      "variant": 2,
+      "filename": "040_state_machine.luau",
+      "bytes": 215
+    },
+    {
+      "id": 41,
+      "family": "arithmetic",
+      "variant": 3,
+      "filename": "041_arithmetic.luau",
+      "bytes": 93
+    },
+    {
+      "id": 42,
+      "family": "string_transform",
+      "variant": 3,
+      "filename": "042_string_transform.luau",
+      "bytes": 103
+    },
+    {
+      "id": 43,
+      "family": "array_reduce",
+      "variant": 3,
+      "filename": "043_array_reduce.luau",
+      "bytes": 150
+    },
+    {
+      "id": 44,
+      "family": "dictionary",
+      "variant": 3,
+      "filename": "044_dictionary.luau",
+      "bytes": 137
+    },
+    {
+      "id": 45,
+      "family": "numeric_loop",
+      "variant": 3,
+      "filename": "045_numeric_loop.luau",
+      "bytes": 99
+    },
+    {
+      "id": 46,
+      "family": "while_loop",
+      "variant": 3,
+      "filename": "046_while_loop.luau",
+      "bytes": 107
+    },
+    {
+      "id": 47,
+      "family": "repeat_loop",
+      "variant": 3,
+      "filename": "047_repeat_loop.luau",
+      "bytes": 100
+    },
+    {
+      "id": 48,
+      "family": "closure",
+      "variant": 3,
+      "filename": "048_closure.luau",
+      "bytes": 207
+    },
+    {
+      "id": 49,
+      "family": "recursion",
+      "variant": 3,
+      "filename": "049_recursion.luau",
+      "bytes": 135
+    },
+    {
+      "id": 50,
+      "family": "varargs",
+      "variant": 3,
+      "filename": "050_varargs.luau",
+      "bytes": 167
+    },
+    {
+      "id": 51,
+      "family": "multi_return",
+      "variant": 3,
+      "filename": "051_multi_return.luau",
+      "bytes": 122
+    },
+    {
+      "id": 52,
+      "family": "table_sort",
+      "variant": 3,
+      "filename": "052_table_sort.luau",
+      "bytes": 118
+    },
+    {
+      "id": 53,
+      "family": "metatable",
+      "variant": 3,
+      "filename": "053_metatable.luau",
+      "bytes": 189
+    },
+    {
+      "id": 54,
+      "family": "protected_call",
+      "variant": 3,
+      "filename": "054_protected_call.luau",
+      "bytes": 160
+    },
+    {
+      "id": 55,
+      "family": "coroutine",
+      "variant": 3,
+      "filename": "055_coroutine.luau",
+      "bytes": 221
+    },
+    {
+      "id": 56,
+      "family": "iterator",
+      "variant": 3,
+      "filename": "056_iterator.luau",
+      "bytes": 151
+    },
+    {
+      "id": 57,
+      "family": "if_expression",
+      "variant": 3,
+      "filename": "057_if_expression.luau",
+      "bytes": 158
+    },
+    {
+      "id": 58,
+      "family": "interpolation",
+      "variant": 3,
+      "filename": "058_interpolation.luau",
+      "bytes": 102
+    },
+    {
+      "id": 59,
+      "family": "bit32",
+      "variant": 3,
+      "filename": "059_bit32.luau",
+      "bytes": 105
+    },
+    {
+      "id": 60,
+      "family": "state_machine",
+      "variant": 3,
+      "filename": "060_state_machine.luau",
+      "bytes": 215
+    },
+    {
+      "id": 61,
+      "family": "arithmetic",
+      "variant": 4,
+      "filename": "061_arithmetic.luau",
+      "bytes": 94
+    },
+    {
+      "id": 62,
+      "family": "string_transform",
+      "variant": 4,
+      "filename": "062_string_transform.luau",
+      "bytes": 103
+    },
+    {
+      "id": 63,
+      "family": "array_reduce",
+      "variant": 4,
+      "filename": "063_array_reduce.luau",
+      "bytes": 150
+    },
+    {
+      "id": 64,
+      "family": "dictionary",
+      "variant": 4,
+      "filename": "064_dictionary.luau",
+      "bytes": 137
+    },
+    {
+      "id": 65,
+      "family": "numeric_loop",
+      "variant": 4,
+      "filename": "065_numeric_loop.luau",
+      "bytes": 99
+    },
+    {
+      "id": 66,
+      "family": "while_loop",
+      "variant": 4,
+      "filename": "066_while_loop.luau",
+      "bytes": 107
+    },
+    {
+      "id": 67,
+      "family": "repeat_loop",
+      "variant": 4,
+      "filename": "067_repeat_loop.luau",
+      "bytes": 100
+    },
+    {
+      "id": 68,
+      "family": "closure",
+      "variant": 4,
+      "filename": "068_closure.luau",
+      "bytes": 207
+    },
+    {
+      "id": 69,
+      "family": "recursion",
+      "variant": 4,
+      "filename": "069_recursion.luau",
+      "bytes": 135
+    },
+    {
+      "id": 70,
+      "family": "varargs",
+      "variant": 4,
+      "filename": "070_varargs.luau",
+      "bytes": 167
+    },
+    {
+      "id": 71,
+      "family": "multi_return",
+      "variant": 4,
+      "filename": "071_multi_return.luau",
+      "bytes": 122
+    },
+    {
+      "id": 72,
+      "family": "table_sort",
+      "variant": 4,
+      "filename": "072_table_sort.luau",
+      "bytes": 118
+    },
+    {
+      "id": 73,
+      "family": "metatable",
+      "variant": 4,
+      "filename": "073_metatable.luau",
+      "bytes": 189
+    },
+    {
+      "id": 74,
+      "family": "protected_call",
+      "variant": 4,
+      "filename": "074_protected_call.luau",
+      "bytes": 160
+    },
+    {
+      "id": 75,
+      "family": "coroutine",
+      "variant": 4,
+      "filename": "075_coroutine.luau",
+      "bytes": 221
+    },
+    {
+      "id": 76,
+      "family": "iterator",
+      "variant": 4,
+      "filename": "076_iterator.luau",
+      "bytes": 151
+    },
+    {
+      "id": 77,
+      "family": "if_expression",
+      "variant": 4,
+      "filename": "077_if_expression.luau",
+      "bytes": 158
+    },
+    {
+      "id": 78,
+      "family": "interpolation",
+      "variant": 4,
+      "filename": "078_interpolation.luau",
+      "bytes": 102
+    },
+    {
+      "id": 79,
+      "family": "bit32",
+      "variant": 4,
+      "filename": "079_bit32.luau",
+      "bytes": 105
+    },
+    {
+      "id": 80,
+      "family": "state_machine",
+      "variant": 4,
+      "filename": "080_state_machine.luau",
+      "bytes": 215
+    },
+    {
+      "id": 81,
+      "family": "arithmetic",
+      "variant": 5,
+      "filename": "081_arithmetic.luau",
+      "bytes": 94
+    },
+    {
+      "id": 82,
+      "family": "string_transform",
+      "variant": 5,
+      "filename": "082_string_transform.luau",
+      "bytes": 103
+    },
+    {
+      "id": 83,
+      "family": "array_reduce",
+      "variant": 5,
+      "filename": "083_array_reduce.luau",
+      "bytes": 150
+    },
+    {
+      "id": 84,
+      "family": "dictionary",
+      "variant": 5,
+      "filename": "084_dictionary.luau",
+      "bytes": 137
+    },
+    {
+      "id": 85,
+      "family": "numeric_loop",
+      "variant": 5,
+      "filename": "085_numeric_loop.luau",
+      "bytes": 99
+    },
+    {
+      "id": 86,
+      "family": "while_loop",
+      "variant": 5,
+      "filename": "086_while_loop.luau",
+      "bytes": 107
+    },
+    {
+      "id": 87,
+      "family": "repeat_loop",
+      "variant": 5,
+      "filename": "087_repeat_loop.luau",
+      "bytes": 100
+    },
+    {
+      "id": 88,
+      "family": "closure",
+      "variant": 5,
+      "filename": "088_closure.luau",
+      "bytes": 207
+    },
+    {
+      "id": 89,
+      "family": "recursion",
+      "variant": 5,
+      "filename": "089_recursion.luau",
+      "bytes": 135
+    },
+    {
+      "id": 90,
+      "family": "varargs",
+      "variant": 5,
+      "filename": "090_varargs.luau",
+      "bytes": 167
+    },
+    {
+      "id": 91,
+      "family": "multi_return",
+      "variant": 5,
+      "filename": "091_multi_return.luau",
+      "bytes": 122
+    },
+    {
+      "id": 92,
+      "family": "table_sort",
+      "variant": 5,
+      "filename": "092_table_sort.luau",
+      "bytes": 118
+    },
+    {
+      "id": 93,
+      "family": "metatable",
+      "variant": 5,
+      "filename": "093_metatable.luau",
+      "bytes": 189
+    },
+    {
+      "id": 94,
+      "family": "protected_call",
+      "variant": 5,
+      "filename": "094_protected_call.luau",
+      "bytes": 160
+    },
+    {
+      "id": 95,
+      "family": "coroutine",
+      "variant": 5,
+      "filename": "095_coroutine.luau",
+      "bytes": 221
+    },
+    {
+      "id": 96,
+      "family": "iterator",
+      "variant": 5,
+      "filename": "096_iterator.luau",
+      "bytes": 151
+    },
+    {
+      "id": 97,
+      "family": "if_expression",
+      "variant": 5,
+      "filename": "097_if_expression.luau",
+      "bytes": 158
+    },
+    {
+      "id": 98,
+      "family": "interpolation",
+      "variant": 5,
+      "filename": "098_interpolation.luau",
+      "bytes": 102
+    },
+    {
+      "id": 99,
+      "family": "bit32",
+      "variant": 5,
+      "filename": "099_bit32.luau",
+      "bytes": 105
+    },
+    {
+      "id": 100,
+      "family": "state_machine",
+      "variant": 5,
+      "filename": "100_state_machine.luau",
+      "bytes": 215
+    }
+  ]
+}
