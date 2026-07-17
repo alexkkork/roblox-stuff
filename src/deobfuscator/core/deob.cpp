@@ -10722,10 +10722,21 @@ std::optional<json> validateLuraphObservedCandidate(
             return std::nullopt;
 
         size_t matchedWrites = 0;
+        size_t unchangedWrites = 0;
         for (const json& observation : observations)
         {
             const json writes = observation.value("register_writes", json::array());
-            if (!writes.is_array() || writes.size() != 1 || !writes[0].is_object() ||
+            if (!writes.is_array())
+                return std::nullopt;
+            if (expectedRegisterOrigin && writes.empty())
+            {
+                if (observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                    static_cast<int64_t>(pc + 1))
+                    return std::nullopt;
+                ++unchangedWrites;
+                continue;
+            }
+            if (writes.size() != 1 || !writes[0].is_object() ||
                 writes[0].value("register", std::numeric_limits<int64_t>::min()) != *destination ||
                 !writes[0].contains("value") || !writes[0]["value"].is_object())
                 return std::nullopt;
@@ -10765,13 +10776,17 @@ std::optional<json> validateLuraphObservedCandidate(
             }
             ++matchedWrites;
         }
+        if (matchedWrites == 0)
+            return std::nullopt;
 
         return json{
             {"proof", expectedValue ? "observed_destination_and_value" : "observed_destination_and_register_origin"},
             {"validated_fields", expectedValue
                 ? json::array({"destination_register", "written_value"})
                 : json::array({"destination_register", "source_register"})},
-            {"observation_count", matchedWrites},
+            {"observation_count", matchedWrites + unchangedWrites},
+            {"changed_write_observations", matchedWrites},
+            {"unchanged_write_observations", unchangedWrites},
         };
     }
 
@@ -11531,6 +11546,94 @@ std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
             {"argument_count", 2},
             {"destination_register", *base},
             {"top_after", *base},
+        }},
+    };
+}
+
+std::optional<json> recognizeLuraphOpcode212ZeroArgumentCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>& observations,
+    const std::vector<json>& childActivations)
+{
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    constexpr std::string_view exactCallBranch = "else q=S[_];L[q]=L[q]();end;";
+    const auto laneInteger = [](const json& lanes, std::string_view name) -> std::optional<int64_t> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        return luraphObservedInteger(lanes[std::string(name)]);
+    };
+    const std::optional<int64_t> base = laneInteger(effectiveLanes, "S");
+    if (!range.is_object() || range.value("begin", size_t(0)) != 307936 ||
+        range.value("end", size_t(0)) != 323136 ||
+        source.find(exactCallBranch) == std::string::npos || !base || *base < 0 ||
+        observations.empty() || childActivations.size() != observations.size())
+        return std::nullopt;
+
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json lanes = observation.value("runtime_lanes", json::object());
+        if (observation.value("opcode", int64_t(-1)) != 212 ||
+            laneInteger(lanes, "S") != base ||
+            !guardPath.is_object() || !guardPath.value("complete", false) ||
+            guardPath.value("overflow", true) ||
+            observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                static_cast<int64_t>(pc + 1) ||
+            !writes.is_array() || writes.size() != 1 || !writes.front().is_object() ||
+            writes.front().value("register", std::numeric_limits<int64_t>::min()) != *base)
+            return std::nullopt;
+    }
+
+    std::set<uint64_t> callees;
+    for (const json& child : childActivations)
+    {
+        if (!child.is_object() || child.value("argument_count", size_t(1)) != 0)
+            return std::nullopt;
+        const uint64_t callee = child.value("prototype", uint64_t(0));
+        if (callee == 0)
+            return std::nullopt;
+        callees.insert(callee);
+    }
+    if (callees.size() != 1)
+        return std::nullopt;
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    return json{
+        {"kind", "register_write"},
+        {"semantic_family", "call"},
+        {"opcode", 212},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"path_specific", true},
+        {"static_semantic", false},
+        {"source_claim", false},
+        {"proof", "locked_handler_branch_and_child_call_frame_runtime_validated"},
+        {"observation_count", observations.size()},
+        {"callee_prototype", *callees.begin()},
+        {"register", constant(*base)},
+        {"value", {
+            {"kind", "call"},
+            {"method", false},
+            {"function", registerRead(*base)},
+            {"arguments", json::array()},
+        }},
+        {"runtime_validation", {
+            {"validated_fields", json::array({
+                "handler_branch", "callee_prototype", "argument_count",
+                "destination_register", "guard_path", "next_pc",
+            })},
+            {"argument_count", 0},
+            {"destination_register", *base},
         }},
     };
 }
