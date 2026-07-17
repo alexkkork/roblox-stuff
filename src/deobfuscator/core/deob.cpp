@@ -6807,6 +6807,8 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     }
     json handlers = json::array();
     std::set<std::pair<size_t, size_t>> uniqueRanges;
+    size_t ambiguousHandlers = 0;
+    size_t missingHandlers = 0;
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
     {
         bool selectionAmbiguous = false;
@@ -6859,9 +6861,12 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
                 uniqueRanges.emplace(begin, end);
                 ++catalog.resolved;
             }
+            else
+                ++ambiguousHandlers;
         }
         else
         {
+            ++missingHandlers;
             row["range"] = nullptr;
             row["handler_source"] = nullptr;
             row["handler_source_truncated"] = false;
@@ -6904,6 +6909,9 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
         } : json(nullptr)},
         {"guard_binding_candidates", std::move(guardBindingCandidates)},
         {"resolved_opcodes", catalog.resolved},
+        {"exact_handlers", catalog.resolved},
+        {"ambiguous_handlers", ambiguousHandlers},
+        {"missing_handlers", missingHandlers},
         {"leaf_selection_complete", catalog.resolved == 256},
         {"unique_handlers", catalog.unique_handlers},
         {"handlers", std::move(handlers)},
@@ -8827,6 +8835,105 @@ bool luraphObservedValuesEqual(const json& left, const json& right)
     return false;
 }
 
+std::optional<json> validateLuraphObservedCandidate(
+    const json& operation,
+    const std::vector<json>& observations,
+    size_t pc)
+{
+    if (!operation.is_object() || observations.empty() ||
+        operation.value("protector_state", false) ||
+        !operation.value("source_semantic", true) ||
+        luraphSemanticContainsUnknownState(operation))
+        return std::nullopt;
+
+    const std::string kind = operation.value("kind", "");
+    if (kind == "register_write")
+    {
+        const std::optional<int64_t> destination = luraphMaterializedRegisterIndex(operation);
+        if (!destination || !operation.contains("value") || !operation["value"].is_object())
+            return std::nullopt;
+
+        const json& value = operation["value"];
+        std::optional<json> expectedValue;
+        std::optional<int64_t> expectedRegisterOrigin;
+        if (value.value("kind", "") == "immediate" && value.contains("value") &&
+            value["value"].is_object() && value["value"].value("primitive", false))
+            expectedValue = value["value"];
+        else if (value.value("kind", "") == "register_read")
+            expectedRegisterOrigin = luraphMaterializedImmediateInteger(value.value("index", json(nullptr)));
+        else
+            return std::nullopt;
+
+        size_t matchedWrites = 0;
+        for (const json& observation : observations)
+        {
+            const json writes = observation.value("register_writes", json::array());
+            if (!writes.is_array() || writes.size() != 1 || !writes[0].is_object() ||
+                writes[0].value("register", std::numeric_limits<int64_t>::min()) != *destination ||
+                !writes[0].contains("value") || !writes[0]["value"].is_object())
+                return std::nullopt;
+
+            if (expectedValue)
+            {
+                if (!luraphObservedValuesEqual(*expectedValue, writes[0]["value"]))
+                    return std::nullopt;
+            }
+            else
+            {
+                const json origins = observation.value("write_origins", json::object());
+                const auto origin = origins.is_object()
+                    ? origins.find(std::to_string(*destination)) : origins.end();
+                if (origin == origins.end() || !origin->is_array() || origin->size() != 1 ||
+                    !(*origin)[0].is_object() || (*origin)[0].value("kind", "") != "register" ||
+                    (*origin)[0].value("index", std::numeric_limits<int64_t>::min()) != *expectedRegisterOrigin)
+                    return std::nullopt;
+            }
+            ++matchedWrites;
+        }
+
+        return json{
+            {"proof", expectedValue ? "observed_destination_and_value" : "observed_destination_and_register_origin"},
+            {"validated_fields", expectedValue
+                ? json::array({"destination_register", "written_value"})
+                : json::array({"destination_register", "source_register"})},
+            {"observation_count", matchedWrites},
+        };
+    }
+
+    if (kind == "jump")
+    {
+        const std::optional<int64_t> target = luraphMaterializedImmediateInteger(
+            operation.value("target", json(nullptr)));
+        if (!target)
+            return std::nullopt;
+        std::optional<int64_t> adjustment;
+        for (const json& observation : observations)
+        {
+            const int64_t nextPc = observation.value("next_pc", int64_t(-1));
+            std::optional<int64_t> currentAdjustment;
+            for (int64_t candidate : {int64_t(0), int64_t(1)})
+                if (*target + candidate == nextPc)
+                {
+                    currentAdjustment = candidate;
+                    break;
+                }
+            if (!currentAdjustment || (adjustment && *adjustment != *currentAdjustment))
+                return std::nullopt;
+            adjustment = currentAdjustment;
+        }
+        if (!adjustment || *target + *adjustment == static_cast<int64_t>(pc + 1))
+            return std::nullopt;
+        return json{
+            {"proof", "observed_control_transfer_target"},
+            {"validated_fields", json::array({"target"})},
+            {"target_adjustment", *adjustment},
+            {"observation_count", observations.size()},
+        };
+    }
+
+    return std::nullopt;
+}
+
 std::optional<int64_t> luraphObservedInteger(const json& value)
 {
     if (!value.is_object() || value.value("type", "") != "number" ||
@@ -9461,6 +9568,8 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t runtimeOpcodeOverrides = 0;
     size_t runtimeOperandOverrides = 0;
     size_t observationalSemanticLifted = 0;
+    size_t guardedCandidatesValidated = 0;
+    size_t guardedCandidatesRejected = 0;
     json observationalOperationCounts = json::object();
 
     json prototypes = json::array();
@@ -9545,6 +9654,7 @@ json luraphRuntimeSemanticDispatchArtifact(
             row["semantic_operation"] = nullptr;
             row["observational_semantic_operation"] = nullptr;
             row["trace_specialized_operation"] = nullptr;
+            row["guarded_candidate_validation"] = nullptr;
             bool semanticAccepted = false;
             if (handler != handlers.end() && handler->second.contains("semantic_operation") &&
                 !handler->second["semantic_operation"].is_null())
@@ -9586,9 +9696,42 @@ json luraphRuntimeSemanticDispatchArtifact(
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
             const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
+            if (!semanticAccepted && observedSite != observationsBySite.end() &&
+                handler != handlers.end() &&
+                handler->second.value("selection_status", "") == "ambiguous" &&
+                handler->second.value("vm_state_independent", false) &&
+                handler->second.contains("candidate_semantic_operation") &&
+                handler->second["candidate_semantic_operation"].is_object())
+            {
+                json candidate = materializeLuraphSemanticOperation(
+                    handler->second["candidate_semantic_operation"], effectiveLanes);
+                if (std::optional<json> validation = validateLuraphObservedCandidate(
+                        candidate, observedSite->second, pc))
+                {
+                    candidate["static_semantic"] = false;
+                    candidate["path_specific"] = true;
+                    candidate["candidate_proof"] = candidate.value("proof", "");
+                    candidate["proof"] = "runtime_validated_ambiguous_handler_candidate";
+                    candidate["runtime_validation"] = *validation;
+                    row["observational_semantic_operation"] = std::move(candidate);
+                    row["guarded_candidate_validation"] = *validation;
+                    ++guardedCandidatesValidated;
+                    ++observationalSemanticLifted;
+                    const std::string family = row["observational_semantic_operation"].value(
+                        "semantic_family", row["observational_semantic_operation"].value("kind", "unknown"));
+                    observationalOperationCounts[family] =
+                        observationalOperationCounts.value(family, size_t(0)) + 1;
+                }
+                else
+                {
+                    row["rejected_candidate_semantic_operation"] = std::move(candidate);
+                    ++guardedCandidatesRejected;
+                }
+            }
             if (!semanticAccepted && (observedSite != observationsBySite.end() ||
                 observedReturnsForSite != returnsBySite.end() ||
-                childActivationsForSite != childActivationsBySite.end()))
+                childActivationsForSite != childActivationsBySite.end()) &&
+                row["observational_semantic_operation"].is_null())
             {
                 static const std::vector<json> noObservations;
                 const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
@@ -9703,6 +9846,8 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"observational_sites", observationalSites.size()},
         {"observational_semantic_lifted", observationalSemanticLifted},
         {"observational_semantic_unresolved", observationalSites.size() - observationalSemanticLifted},
+        {"guarded_candidates_validated", guardedCandidatesValidated},
+        {"guarded_candidates_rejected", guardedCandidatesRejected},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
         {"structurally_missing_instructions", declaredInstructionCount > effectClassified + unresolved
