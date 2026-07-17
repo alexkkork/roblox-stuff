@@ -9518,6 +9518,21 @@ std::optional<int64_t> luraphRuntimeNumericLane(const json& instruction, std::st
     return parseTraceInteger<int64_t>(value["value"].get<std::string>());
 }
 
+std::optional<int64_t> luraphRuntimeStructuralLaneWord(
+    const json& instruction, std::string_view lane)
+{
+    if (const std::optional<int64_t> numeric = luraphRuntimeNumericLane(instruction, lane))
+        return numeric;
+    if (!instruction.contains("lanes") || !instruction["lanes"].is_object() ||
+        !instruction["lanes"].contains(std::string(lane)))
+        return std::nullopt;
+    const json& value = instruction["lanes"][std::string(lane)];
+    if (value.is_object() && value.value("primitive", false) &&
+        value.value("type", "") == "nil" && value.value("read_provenance", "") == "raw_table")
+        return int64_t(0);
+    return std::nullopt;
+}
+
 std::vector<luraph::vm::RuntimeOperandLaneAnchor> luraphRuntimeOperandLaneAnchors(
     const LuraphRuntimeStructureTrace& trace)
 {
@@ -9543,7 +9558,7 @@ std::vector<luraph::vm::RuntimeOperandLaneAnchor> luraphRuntimeOperandLaneAnchor
             {
                 const auto instruction = prototype.instructions.find(pc);
                 const std::optional<int64_t> value = instruction != prototype.instructions.end()
-                    ? luraphRuntimeNumericLane(instruction->second, laneName) : std::nullopt;
+                    ? luraphRuntimeStructuralLaneWord(instruction->second, laneName) : std::nullopt;
                 if (!value)
                 {
                     complete = false;
@@ -9621,9 +9636,9 @@ std::vector<luraph::vm::RuntimePrototypeRecord> luraphRuntimePrototypeRecords(
         complete = complete && dLane && gLane && pLane;
         for (const auto& [pc, instruction] : prototype.instructions)
         {
-            const std::optional<int64_t> D = dLane ? luraphRuntimeNumericLane(instruction, *dLane) : std::nullopt;
-            const std::optional<int64_t> G = gLane ? luraphRuntimeNumericLane(instruction, *gLane) : std::nullopt;
-            const std::optional<int64_t> p = pLane ? luraphRuntimeNumericLane(instruction, *pLane) : std::nullopt;
+            const std::optional<int64_t> D = dLane ? luraphRuntimeStructuralLaneWord(instruction, *dLane) : std::nullopt;
+            const std::optional<int64_t> G = gLane ? luraphRuntimeStructuralLaneWord(instruction, *gLane) : std::nullopt;
+            const std::optional<int64_t> p = pLane ? luraphRuntimeStructuralLaneWord(instruction, *pLane) : std::nullopt;
             if (!instruction.is_object() || instruction.value("pc", size_t(0)) != pc ||
                 pc != record.opcode_lanes.size() + 1 || !instruction.contains("opcode") ||
                 !instruction["opcode"].is_number_integer() || !D || !G || !p)

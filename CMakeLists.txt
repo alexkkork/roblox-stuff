@@ -138,6 +138,7 @@ add_executable(alexfuscator
 add_executable(alex_deobfuscator
     src/deobfuscator/main.cpp
     src/deobfuscator/luraph/call_semantics.cpp
+    src/deobfuscator/luraph/range_clear_semantics.cpp
     src/deobfuscator/luraph/scan.cpp
     src/deobfuscator/luraph/emit.cpp
     src/deobfuscator/luraph/vm.cpp
