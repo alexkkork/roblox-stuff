@@ -414,6 +414,7 @@ public:
         append("local environment = (getfenv and getfenv(0)) or _ENV\n");
         append("local unpack_values = unpack or table.unpack\n");
         append("local select_value = select\n");
+        append("local pack_values = table.pack or function(...) return { n = select_value(\"#\", ...), ... } end\n");
         append("local function unresolved_helper(...) return nil end\n");
         append("local function unsupported_semantic_operation(prototype, pc, kind, reason)\n");
         append("  error(\"unsupported recovered semantic operation at prototype \" .. tostring(prototype) .. \" pc \" .. tostring(pc) .. \" (\" .. tostring(kind) .. \"): \" .. tostring(reason), 0)\n");
@@ -3267,6 +3268,111 @@ private:
         return RegisterClearRangeShape{*first, *last};
     }
 
+    bool lowerExactOpcode8Call(const json& value, size_t depth, Context& context)
+    {
+        if (value.value("semantic_family", "") != "call" || value.value("opcode", int64_t(-1)) != 8 ||
+            !value.value("runtime_validated", false))
+            return false;
+        const std::string prefix = indentation(depth);
+        const auto fail = [&](std::string_view reason) {
+            unsupportedOperation("call", reason, depth, context);
+            return true;
+        };
+        if (!value.contains("callee") || !value["callee"].is_object() ||
+            !value.contains("argument_pack") || !value["argument_pack"].is_object() ||
+            !value.contains("result_placement") || !value["result_placement"].is_object())
+            return fail("opcode-8 call shape is incomplete");
+
+        const json& argumentPack = value["argument_pack"];
+        const json& argumentRegisters = argumentPack.value("registers", json(nullptr));
+        const std::optional<uint64_t> argumentBegin = argumentRegisters.is_object()
+            ? nonnegativeInteger(argumentRegisters.value("begin", json(nullptr))) : std::nullopt;
+        const std::optional<uint64_t> argumentEnd = argumentRegisters.is_object()
+            ? nonnegativeInteger(argumentRegisters.value("end_exclusive", json(nullptr))) : std::nullopt;
+        const std::optional<uint64_t> argumentCount = nonnegativeInteger(
+            argumentPack.value("count", json(nullptr)));
+        if (argumentPack.value("mode", "") != "fixed" || !argumentRegisters.is_object() ||
+            argumentRegisters.value("dynamic_end", true) || !argumentBegin || !argumentEnd || !argumentCount ||
+            *argumentEnd < *argumentBegin || *argumentEnd - *argumentBegin != *argumentCount ||
+            *argumentCount > 4096)
+            return fail("opcode-8 argument register range is not a proven bounded fixed pack");
+
+        json arguments = json::array();
+        for (uint64_t index = *argumentBegin; index < *argumentEnd; ++index)
+            arguments.push_back({
+                {"kind", "register_read"},
+                {"index", {{"kind", "constant"}, {"value", index}}},
+            });
+        json call = {
+            {"kind", "call"},
+            {"method", false},
+            {"function", value["callee"]},
+            {"arguments", std::move(arguments)},
+        };
+        const std::string invocation = expression(call, context);
+
+        const json& placement = value["result_placement"];
+        const std::string mode = placement.value("mode", "");
+        const std::optional<uint64_t> resultBase = nonnegativeInteger(
+            value.value("result_base_register", json(nullptr)));
+        if (!resultBase)
+            return fail("opcode-8 result base register is missing");
+        if (mode == "fixed")
+        {
+            const std::optional<uint64_t> assignmentCount = nonnegativeInteger(
+                placement.value("assignment_count", json(nullptr)));
+            const json& assignmentRegisters = placement.value("assignment_registers", json(nullptr));
+            const std::optional<uint64_t> assignmentBegin = assignmentRegisters.is_object()
+                ? nonnegativeInteger(assignmentRegisters.value("begin", json(nullptr))) : std::nullopt;
+            const std::optional<uint64_t> assignmentEnd = assignmentRegisters.is_object()
+                ? nonnegativeInteger(assignmentRegisters.value("end_exclusive", json(nullptr))) : std::nullopt;
+            const std::optional<uint64_t> topAfter = nonnegativeInteger(
+                placement.value("top_after", json(nullptr)));
+            if (!assignmentRegisters.is_object() || !assignmentCount || !assignmentBegin || !assignmentEnd || !topAfter ||
+                assignmentRegisters.value("dynamic_end", true) || *assignmentBegin != *resultBase ||
+                *assignmentEnd < *assignmentBegin || *assignmentEnd - *assignmentBegin != *assignmentCount ||
+                *topAfter != *assignmentEnd || *assignmentCount > 4096)
+                return fail("opcode-8 fixed result placement is inconsistent");
+            if (*assignmentCount == 0)
+                append(prefix + invocation + "\n");
+            else
+            {
+                append(prefix);
+                for (uint64_t offset = 0; offset < *assignmentCount; ++offset)
+                {
+                    if (offset > 0)
+                        append(", ");
+                    append("registers[" + std::to_string(*resultBase + offset) + "]");
+                }
+                append(" = " + invocation + "\n");
+            }
+            append(prefix + "top = " + std::to_string(*topAfter) + "\n");
+            ++result.fixed_register_calls;
+            return true;
+        }
+        if (mode == "open")
+        {
+            const json& assignmentRegisters = placement.value("assignment_registers", json(nullptr));
+            const std::optional<uint64_t> assignmentBegin = assignmentRegisters.is_object()
+                ? nonnegativeInteger(assignmentRegisters.value("begin", json(nullptr))) : std::nullopt;
+            if (!assignmentRegisters.is_object() || !assignmentBegin || *assignmentBegin != *resultBase ||
+                !assignmentRegisters.value("dynamic_end", false))
+                return fail("opcode-8 open result placement is inconsistent");
+            const std::string resultPack = recoveredOperationName("call_results", context, result.operations);
+            append(prefix + "do\n");
+            append(prefix + "  local " + resultPack + " = pack_values(" + invocation + ")\n");
+            append(prefix + "  for result_index = 1, " + resultPack + ".n do\n");
+            append(prefix + "    registers[" + std::to_string(*resultBase) +
+                " + result_index - 1] = " + resultPack + "[result_index]\n");
+            append(prefix + "  end\n");
+            append(prefix + "  top = " + std::to_string(*resultBase) + " + " + resultPack + ".n\n");
+            append(prefix + "end\n");
+            ++result.open_register_calls;
+            return true;
+        }
+        return fail("opcode-8 result placement mode is unsupported");
+    }
+
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
     {
         ++result.operations;
@@ -3349,6 +3455,8 @@ private:
         }
         if (kind == "call")
         {
+            if (lowerExactOpcode8Call(value, depth, context))
+                return;
             if (!value.contains("function") || !value["function"].is_object() ||
                 !value.contains("arguments") || !value["arguments"].is_array())
             {
@@ -3947,8 +4055,11 @@ private:
             Context context;
             context.prototype = id;
             std::optional<json> lastInstruction;
+            bool terminatedByReturn = false;
             for (const auto& [pc, instructionRows] : rows->second)
             {
+                if (terminatedByReturn)
+                    break;
                 if (pc < block.start || pc > block.end)
                     continue;
                 context.runtime_lanes_variable.clear();
@@ -3977,6 +4088,11 @@ private:
                         const bool controlHandled = pc == block.end;
                         if (!closureConstruction(instruction, *semantic, 4, context))
                             operation(*semantic, 4, context, controlHandled);
+                        if (directSequenceTerminal(*semantic).value("kind", "") == "return")
+                        {
+                            terminatedByReturn = true;
+                            break;
+                        }
                     }
                     else if (instruction.contains("observational_semantic_operation") &&
                         instruction["observational_semantic_operation"].is_object())
@@ -3990,7 +4106,8 @@ private:
                     }
                 }
             }
-            transition(block, lastInstruction, 4, context);
+            if (!terminatedByReturn)
+                transition(block, lastInstruction, 4, context);
             json blockOperationProvenance = json::array();
             for (size_t index = firstProvenanceRecord;
                  index < result.path_specific_operation_provenance.size(); ++index)

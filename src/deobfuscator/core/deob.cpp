@@ -15610,6 +15610,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"verified_return_sites", semanticCandidate->verified_return_sites},
             {"return_arity_mismatches", semanticCandidate->return_arity_mismatches},
             {"direct_prototype_calls", semanticCandidate->direct_prototype_calls},
+            {"fixed_register_calls", semanticCandidate->fixed_register_calls},
+            {"open_register_calls", semanticCandidate->open_register_calls},
             {"blocks_map", semanticCandidate->mapping},
         });
         report["passes"].push_back({
@@ -15732,6 +15734,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"unobserved_branch_arms", semanticCandidate->unobserved_branch_arms},
             {"runtime_specializations", semanticCandidate->runtime_specializations},
             {"direct_prototype_calls", semanticCandidate->direct_prototype_calls},
+            {"fixed_register_calls", semanticCandidate->fixed_register_calls},
+            {"open_register_calls", semanticCandidate->open_register_calls},
             {"inferred_root_slots", semanticCandidate->inferred_root_slots},
             {"root_argument_shared_prototypes", semanticCandidate->root_argument_shared_prototypes},
             {"root_argument_references_specialized", semanticCandidate->root_argument_references_specialized},
