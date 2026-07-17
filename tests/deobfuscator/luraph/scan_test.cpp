@@ -346,8 +346,10 @@ StructuralDollarContainer structuralDollarContainer()
     appendLittle(fixture.decoded, 20, 4);
     appendUleb(fixture.decoded, instructionBias + 2);
     for (const std::array<int64_t, 4>& words : std::array{
-             std::array<int64_t, 4>{5, 1, -2, 3},
-             std::array<int64_t, 4>{6, 4, 5, -6}})
+             // Operand word 3 encodes one-based prototype 2 (2 * 8 + 3).
+             std::array<int64_t, 4>{5, 1, -2, 19},
+             // Operand word 1 encodes out-of-range prototype 3.
+             std::array<int64_t, 4>{6, 27, 5, -6}})
         for (int64_t word : words)
             appendUleb(fixture.decoded, signedFold(word));
 
@@ -619,6 +621,11 @@ int main()
             "LPH$ structural lane spans are not contiguous");
         ok &= require(parsed.root_selector == 2 && parsed.prototypes.size() == 2,
             "LPH$ one-based root or prototype metadata is incorrect");
+        ok &= require(parsed.root_selector_in_bounds && parsed.root_metadata_index == std::optional<size_t>(1),
+            "LPH$ root selector was not resolved to its zero-based prototype metadata index");
+        ok &= require(parsed.closure_target_count == 2 && parsed.valid_closure_target_count == 1 &&
+                          parsed.invalid_closure_target_count == 1,
+            "LPH$ closure-target bounds metadata is incorrect");
         if (parsed.prototypes.size() == 2)
         {
             ok &= require(parsed.prototypes[0].descriptor_count == 1 &&
@@ -628,6 +635,23 @@ int main()
                               parsed.prototypes[1].range_map_count == 0 &&
                               parsed.prototypes[1].instruction_count == 1,
                 "LPH$ prototype subrecords are incorrect");
+            ok &= require(parsed.prototypes[0].descriptors[0].kind == 2 &&
+                              parsed.prototypes[0].descriptors[0].referenced_index == 1,
+                "LPH$ packed capture descriptor was not split into kind and source index");
+            ok &= require(parsed.prototypes[0].closure_targets.size() == 2 &&
+                              parsed.prototypes[0].closure_targets[0].instruction_index == 0 &&
+                              parsed.prototypes[0].closure_targets[0].operand_word_index == 3 &&
+                              parsed.prototypes[0].closure_targets[0].wrapper_index == 2 &&
+                              parsed.prototypes[0].closure_targets[0].metadata_index == std::optional<size_t>(1) &&
+                              parsed.prototypes[0].closure_targets[0].capture_descriptor_count == 0,
+                "LPH$ valid closure target did not retain its prototype and capture metadata");
+            ok &= require(!parsed.prototypes[0].closure_targets[1].in_bounds &&
+                              parsed.prototypes[0].closure_targets[1].instruction_index == 1 &&
+                              parsed.prototypes[0].closure_targets[1].operand_word_index == 1 &&
+                              !parsed.prototypes[0].closure_targets[1].metadata_index.has_value() &&
+                              parsed.prototypes[0].closure_targets[1].wrapper_index == 3 &&
+                              parsed.prototypes[1].closure_targets.empty(),
+                "LPH$ out-of-range closure target was not retained as invalid evidence");
         }
     }
     ok &= require(structuralDollar.lph_dollar_schema.tags.randomized &&
@@ -641,8 +665,14 @@ int main()
     ok &= require(structuralDollar.lph_dollar_schema.root.selector_value_known,
         "LPH$ validated root selector was not reflected in schema metadata");
     ok &= require(hasDiagnostic(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED") &&
-                      hasDiagnostic(structuralDollar, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE"),
+                      hasDiagnostic(structuralDollar, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE") &&
+                      hasDiagnostic(structuralDollar, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED"),
         "LPH$ structural boundary diagnostics are missing");
+    ok &= require(diagnosticContains(structuralDollar, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
+                      "root selector 2 to prototype metadata index 1") &&
+                      diagnosticContains(structuralDollar, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
+                          "1 in-bounds and 1 out-of-bounds"),
+        "LPH$ static root and closure-reference diagnostic is inaccurate");
     ok &= require(diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "all-container") &&
                       diagnosticContains(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED", "not runtime-observed or runtime-reachable"),
         "LPH$ static totals were not distinguished from runtime reachability in diagnostics");
@@ -753,6 +783,8 @@ int main()
             }
         }
         ok &= require(parsed.root_selector == 20, "root selector metadata is incorrect");
+        ok &= require(!parsed.root_selector_in_bounds && !parsed.root_metadata_index.has_value(),
+            "out-of-range LPH& root selector was presented as a valid prototype reference");
         ok &= require(parsed.trailer_span.size() == containerFixture.trailer.size() && parsed.trailer_bytes == containerFixture.trailer,
             "unread trailer was not preserved exactly");
         ok &= require(parsed.trailer_span.end == containerFixture.decoded.size(), "trailer byte span is incorrect");

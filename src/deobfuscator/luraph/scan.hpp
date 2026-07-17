@@ -309,8 +309,24 @@ struct DescriptorMetadata
 {
     size_t index = 0;
     uint64_t raw_value = 0;
+    // LPH capture descriptors pack a two-bit source-kind code in the low
+    // bits and a source index in the remaining bits.  The randomized wrapper
+    // does not expose stable names for the four kind codes, so the scanner
+    // intentionally preserves the numeric code instead of guessing labels.
     unsigned int kind = 0;
     uint64_t referenced_index = 0;
+    ByteSpan span;
+};
+
+struct ClosureTargetMetadata
+{
+    size_t instruction_index = 0;
+    size_t operand_word_index = 0;
+    int64_t raw_operand = 0;
+    int64_t wrapper_index = 0;
+    std::optional<size_t> metadata_index;
+    bool in_bounds = false;
+    size_t capture_descriptor_count = 0;
     ByteSpan span;
 };
 
@@ -348,6 +364,7 @@ struct PrototypeMetadata
     ByteSpan final_span;
     std::vector<InstructionMetadata> instructions;
     std::vector<DescriptorMetadata> descriptors;
+    std::vector<ClosureTargetMetadata> closure_targets;
 };
 
 struct ContainerAnalysis
@@ -378,7 +395,12 @@ struct ContainerAnalysis
     size_t instruction_count = 0;
     size_t descriptor_count = 0;
     uint64_t root_selector = 0;
+    std::optional<size_t> root_metadata_index;
+    bool root_selector_in_bounds = false;
     ByteSpan root_selector_span;
+    size_t closure_target_count = 0;
+    size_t valid_closure_target_count = 0;
+    size_t invalid_closure_target_count = 0;
     ByteSpan trailer_span;
     std::vector<ConstantMetadata> constants;
     std::vector<PrototypeMetadata> prototypes;
@@ -455,7 +477,11 @@ struct RootCandidateMetadata
     bool present = false;
     bool prototype_table_index = false;
     bool selector_value_known = false;
+    bool selector_in_bounds = false;
     std::optional<size_t> reader_slot;
+    std::optional<uint64_t> wrapper_index;
+    std::optional<size_t> metadata_index;
+    ByteSpan selector_span;
     SourceRange evidence_range;
 };
 

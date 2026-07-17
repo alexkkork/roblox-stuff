@@ -1643,6 +1643,21 @@ std::optional<bool> evaluateStateCondition(
     }
     if (auto constant = expression ? expression->as<Luau::AstExprConstantBool>() : nullptr)
         return constant->value;
+    if (expression && expression->is<Luau::AstExprConstantNil>())
+        return false;
+    if (expression && expression->is<Luau::AstExprConstantString>())
+        return true;
+    if (auto local = expression ? expression->as<Luau::AstExprLocal>() : nullptr)
+    {
+        if (local->local == state)
+            return true;
+        if (bindings && bindings->contains(local->local))
+            return true;
+    }
+    // Every numeric value is truthy in Luau, including zero and NaN. Constant
+    // arithmetic can therefore be resolved without guessing any VM state.
+    if (expression && evaluateAstNumber(expression).has_value())
+        return true;
     if (auto unary = expression ? expression->as<Luau::AstExprUnary>() : nullptr)
     {
         if (unary->op != Luau::AstExprUnary::Op::Not)
@@ -4504,6 +4519,206 @@ struct LuraphGuardBindingCollector : Luau::AstVisitor
     }
 };
 
+struct LuraphLocalReferenceCollector : Luau::AstVisitor
+{
+    std::set<Luau::AstLocal*> locals;
+
+    bool visit(Luau::AstExprLocal* node) override
+    {
+        locals.insert(node->local);
+        return true;
+    }
+};
+
+struct LuraphLocalConstantProofCollector : Luau::AstVisitor
+{
+    explicit LuraphLocalConstantProofCollector(Luau::AstLocal* target)
+        : target(target)
+    {
+    }
+
+    Luau::AstLocal* target = nullptr;
+    Luau::AstStatLocal* declaration = nullptr;
+    std::optional<double> initializer;
+    size_t declarations = 0;
+    size_t writes = 0;
+
+    bool visit(Luau::AstStatLocal* node) override
+    {
+        for (size_t index = 0; index < node->vars.size; ++index)
+        {
+            if (node->vars.data[index] != target)
+                continue;
+            ++declarations;
+            declaration = node;
+            initializer = index < node->values.size
+                ? evaluateAstNumber(node->values.data[index]) : std::nullopt;
+        }
+        return true;
+    }
+
+    bool visit(Luau::AstStatAssign* node) override
+    {
+        for (Luau::AstExpr* variable : node->vars)
+        {
+            Luau::AstExpr* expression = unwrapLuraphExpression(variable);
+            auto local = expression ? expression->as<Luau::AstExprLocal>() : nullptr;
+            if (local && local->local == target)
+                ++writes;
+        }
+        return true;
+    }
+
+    bool visit(Luau::AstStatCompoundAssign* node) override
+    {
+        Luau::AstExpr* expression = unwrapLuraphExpression(node->var);
+        auto local = expression ? expression->as<Luau::AstExprLocal>() : nullptr;
+        if (local && local->local == target)
+            ++writes;
+        return true;
+    }
+
+    bool proven() const
+    {
+        return declarations == 1 && declaration && initializer.has_value() && writes == 0;
+    }
+};
+
+std::map<Luau::AstLocal*, double> proveLuraphGuardBindings(
+    Luau::AstStatBlock* root,
+    Luau::AstStat* dispatcher,
+    Luau::AstLocal* opcode,
+    const SourceView& view,
+    json* evidence = nullptr)
+{
+    std::map<Luau::AstLocal*, double> bindings;
+    LuraphLocalReferenceCollector references;
+    dispatcher->visit(&references);
+    for (Luau::AstLocal* local : references.locals)
+    {
+        if (!local || local == opcode)
+            continue;
+        LuraphLocalConstantProofCollector proof(local);
+        root->visit(&proof);
+        if (!proof.proven())
+            continue;
+        bindings[local] = *proof.initializer;
+        if (evidence)
+        {
+            evidence->push_back({
+                {"local", local->name.value ? json(std::string(local->name.value)) : json(nullptr)},
+                {"value", *proof.initializer},
+                {"declaration_range", {
+                    {"begin", view.offset(proof.declaration->location.begin)},
+                    {"end", view.offset(proof.declaration->location.end)},
+                }},
+                {"writes_after_initialization", proof.writes},
+                {"proof", "single_numeric_initializer_no_bound_local_writes"},
+            });
+        }
+    }
+    return bindings;
+}
+
+struct LuraphGuardCondition
+{
+    Luau::AstExpr* expression = nullptr;
+    std::string kind;
+    std::vector<std::string> locals;
+};
+
+struct LuraphGuardConditionCollector : Luau::AstVisitor
+{
+    LuraphGuardConditionCollector(
+        Luau::AstLocal* opcode,
+        const std::map<Luau::AstLocal*, double>& bindings)
+        : opcode(opcode)
+        , bindings(bindings)
+    {
+    }
+
+    Luau::AstLocal* opcode = nullptr;
+    const std::map<Luau::AstLocal*, double>& bindings;
+    std::vector<LuraphGuardCondition> conditions;
+
+    void collect(Luau::AstExpr* expression, std::string_view kind)
+    {
+        bool staticallyDecidable = true;
+        for (int64_t value = 0; value <= 255; ++value)
+        {
+            if (!evaluateStateCondition(expression, opcode, value, &bindings).has_value())
+            {
+                staticallyDecidable = false;
+                break;
+            }
+        }
+        if (staticallyDecidable)
+            return;
+
+        LuraphLocalReferenceCollector references;
+        expression->visit(&references);
+        std::vector<std::string> locals;
+        for (Luau::AstLocal* local : references.locals)
+            if (local && local->name.value)
+                locals.emplace_back(local->name.value);
+        std::sort(locals.begin(), locals.end());
+        locals.erase(std::unique(locals.begin(), locals.end()), locals.end());
+        conditions.push_back({expression, std::string(kind), std::move(locals)});
+    }
+
+    bool visit(Luau::AstStatIf* node) override
+    {
+        collect(node->condition, "if");
+        return true;
+    }
+
+    bool visit(Luau::AstStatWhile* node) override
+    {
+        collect(node->condition, "while");
+        return true;
+    }
+
+    bool visit(Luau::AstStatRepeat* node) override
+    {
+        collect(node->condition, "repeat");
+        return true;
+    }
+
+    bool visit(Luau::AstExprFunction*) override
+    {
+        return false;
+    }
+};
+
+json luraphGuardConditionManifest(
+    Luau::AstStat* dispatcher,
+    Luau::AstLocal* opcode,
+    const std::map<Luau::AstLocal*, double>& bindings,
+    const SourceView& view)
+{
+    LuraphGuardConditionCollector collector(opcode, bindings);
+    dispatcher->visit(&collector);
+    std::sort(collector.conditions.begin(), collector.conditions.end(), [&](const auto& left, const auto& right) {
+        const size_t leftBegin = view.offset(left.expression->location.begin);
+        const size_t rightBegin = view.offset(right.expression->location.begin);
+        if (leftBegin != rightBegin)
+            return leftBegin < rightBegin;
+        return view.offset(left.expression->location.end) < view.offset(right.expression->location.end);
+    });
+    json rows = json::array();
+    for (const LuraphGuardCondition& condition : collector.conditions)
+    {
+        rows.push_back({
+            {"begin", view.offset(condition.expression->location.begin)},
+            {"end", view.offset(condition.expression->location.end)},
+            {"kind", condition.kind},
+            {"locals", condition.locals},
+            {"capture", "decision_at_evaluation"},
+        });
+    }
+    return rows;
+}
+
 struct LuraphRegisterRoleCollector : Luau::AstVisitor
 {
     explicit LuraphRegisterRoleCollector(Luau::AstLocal* pc)
@@ -6699,6 +6914,10 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     if (dispatcherCandidate == dispatcherCollector.candidates.end() || dispatcherCandidate->conditionals < 40)
         return catalog;
     Luau::AstStat* dispatcher = dispatcherCandidate->node;
+    SourceView view(source);
+    json provenGuardBindingEvidence = json::array();
+    const std::map<Luau::AstLocal*, double> provenGuardBindings = proveLuraphGuardBindings(
+        parsed->result.root, dispatcher, shape->opcode, view, &provenGuardBindingEvidence);
 
     LuraphGuardBindingCollector guardCollector(shape->opcode);
     dispatcher->visit(&guardCollector);
@@ -6731,7 +6950,8 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
 
     LuraphDirectRegisterSourceCollector environmentRoles(registers);
     for (int64_t opcode = 0; opcode <= 255; ++opcode)
-        if (Luau::AstStatBlock* leaf = selectLeaf(dispatcher, shape->opcode, opcode))
+        if (Luau::AstStatBlock* leaf = selectLeaf(
+                dispatcher, shape->opcode, opcode, &provenGuardBindings))
             leaf->visit(&environmentRoles);
     for (Luau::AstLocal* lane : lanes)
         environmentRoles.scores.erase(lane);
@@ -6772,7 +6992,6 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
         }
     std::sort(laneNames.begin(), laneNames.end());
 
-    SourceView view(source);
     json guardBindingCandidates = json::array();
     std::vector<std::pair<std::pair<Luau::AstLocal*, int64_t>, size_t>> rankedGuardBindings(
         guardCollector.scores.begin(), guardCollector.scores.end());
@@ -6798,7 +7017,7 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
         for (int64_t sample : {int64_t(0), int64_t(80), int64_t(255)})
         {
             const std::optional<bool> decision = evaluateStateCondition(
-                rootConditional->condition, shape->opcode, sample);
+                rootConditional->condition, shape->opcode, sample, &provenGuardBindings);
             dispatcherDecisions.push_back({
                 {"opcode", sample},
                 {"decision", decision ? json(*decision) : json(nullptr)},
@@ -6813,7 +7032,7 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
     {
         bool selectionAmbiguous = false;
         Luau::AstStatBlock* leaf = selectLeaf(
-            dispatcher, shape->opcode, opcode, nullptr, &selectionAmbiguous);
+            dispatcher, shape->opcode, opcode, &provenGuardBindings, &selectionAmbiguous);
         bool opcodeLocalReused = false;
         if (leaf)
         {
@@ -6908,6 +7127,9 @@ LuraphOpcodeCatalog buildLuraphOpcodeCatalog(std::string_view source)
             {"inference_only", true},
         } : json(nullptr)},
         {"guard_binding_candidates", std::move(guardBindingCandidates)},
+        {"proven_guard_bindings", std::move(provenGuardBindingEvidence)},
+        {"dynamic_guard_conditions", luraphGuardConditionManifest(
+            dispatcher, shape->opcode, provenGuardBindings, view)},
         {"resolved_opcodes", catalog.resolved},
         {"exact_handlers", catalog.resolved},
         {"ambiguous_handlers", ambiguousHandlers},
@@ -6963,6 +7185,54 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         return fail("interpreter_loop_not_found");
 
     SourceView view(source);
+    LuraphOpcodeDispatcherCollector dispatcherCollector(shape->opcode);
+    shape->body->visit(&dispatcherCollector);
+    auto dispatcherCandidate = std::max_element(
+        dispatcherCollector.candidates.begin(), dispatcherCollector.candidates.end(),
+        [](const auto& left, const auto& right) { return left.conditionals < right.conditionals; });
+    Luau::AstStatIf* opcodeDispatcher = dispatcherCandidate != dispatcherCollector.candidates.end() &&
+        dispatcherCandidate->conditionals >= 40 ? dispatcherCandidate->node : nullptr;
+    std::map<Luau::AstLocal*, double> provenGuardBindings;
+    std::vector<LuraphGuardCondition> dynamicGuardConditions;
+    std::vector<std::string> guardNames;
+    if (opcodeDispatcher)
+    {
+        provenGuardBindings = proveLuraphGuardBindings(
+            parsed->result.root, opcodeDispatcher, shape->opcode, view);
+        LuraphGuardConditionCollector conditionCollector(shape->opcode, provenGuardBindings);
+        opcodeDispatcher->visit(&conditionCollector);
+        dynamicGuardConditions = std::move(conditionCollector.conditions);
+
+        LuraphGuardBindingCollector guardCollector(shape->opcode);
+        opcodeDispatcher->visit(&guardCollector);
+        std::map<Luau::AstLocal*, size_t> guardScores;
+        for (const auto& [binding, score] : guardCollector.scores)
+            guardScores[binding.first] += score;
+        std::vector<std::pair<Luau::AstLocal*, size_t>> rankedGuards(
+            guardScores.begin(), guardScores.end());
+        std::sort(rankedGuards.begin(), rankedGuards.end(), [](const auto& left, const auto& right) {
+            if (left.second != right.second)
+                return left.second > right.second;
+            const std::string_view leftName = left.first && left.first->name.value
+                ? std::string_view(left.first->name.value) : std::string_view{};
+            const std::string_view rightName = right.first && right.first->name.value
+                ? std::string_view(right.first->name.value) : std::string_view{};
+            return leftName < rightName;
+        });
+        const size_t dispatcherBegin = view.offset(opcodeDispatcher->location.begin);
+        for (const auto& [local, score] : rankedGuards)
+        {
+            (void)score;
+            if (!local || !local->name.value || view.offset(local->location.begin) >= dispatcherBegin)
+                continue;
+            const std::string name(local->name.value);
+            if (name.empty() || std::find(guardNames.begin(), guardNames.end(), name) != guardNames.end())
+                continue;
+            guardNames.push_back(name);
+            if (guardNames.size() >= 8)
+                break;
+        }
+    }
     FunctionCollector functions;
     parsed->result.root->visit(&functions);
     Luau::AstExprFunction* function = nullptr;
@@ -7063,7 +7333,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             }
             instrumentation += "local __alex_lph_arg_table_seen=_G.__alex_lph_arg_table_seen;if type(__alex_lph_arg_table_seen)~=\"table\" then __alex_lph_arg_table_seen={};_G.__alex_lph_arg_table_seen=__alex_lph_arg_table_seen;end;if not __alex_lph_arg_table_seen[__alex_lph_pid] then __alex_lph_arg_table_seen[__alex_lph_pid]=true;for __alex_lph_arg_index=1,math.min(__argCount,4) do local __alex_lph_arg_value=rawget(__alex_lph_args,__alex_lph_arg_index);if type(__alex_lph_arg_value)==\"table\" then local __alex_lph_entry_count=0;local __alex_lph_arg_table_complete=true;for __alex_lph_key,__alex_lph_value in next,__alex_lph_arg_value do if __alex_lph_entry_count>=256 then __alex_lph_arg_table_complete=false;break end;__alex_lph_entry_count+=1;print(\"@@LPH_ACT_ARG_TABLE_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_encode_activation_arg(__alex_lph_key),__alex_lph_encode_activation_arg(__alex_lph_value));end;print(\"@@LPH_ACT_ARG_TABLE_END_V1@@\",__aid,__alex_lph_pid,__alex_lph_arg_index,__alex_lph_arg_table_complete and 1 or 0,__alex_lph_entry_count);end;end;end;__alex_lph_structure_announced=true;end;end;";
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
-            instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};";
+            instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
             for (const std::string& lane : laneNames)
             {
@@ -7087,7 +7357,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += R"LURAPH_ARGS(local function __alex_lph_hex(__alex_lph_text)local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_text do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_text,__alex_lph_byte));end;return table.concat(__alex_lph_bytes);end;local function __alex_lph_encode_activation_arg(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then return "s:"..__alex_lph_hex(__alex_lph_value);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";return "f:"..__alex_lph_hex(__alex_lph_name);else return "x:"..__alex_lph_kind;end;end;for __alex_lph_arg_index=1,math.min(__argCount,16) do __alex_lph_activation_args[__alex_lph_arg_index]=__alex_lph_encode_activation_arg(rawget(__alex_lph_args,__alex_lph_arg_index));end;)LURAPH_ARGS";
         instrumentation += "_G.__alex_lph_activation_rows=(_G.__alex_lph_activation_rows or 0)+1;if _G.__alex_lph_activation_rows<=" + std::to_string(kLuraphActivationTraceRowLimit) + " then print(\"@@LPH_ACT_PROTO_V1@@\",__aid,__alex_lph_pid,__callerAid,__callerPc,__callerOp,__argCount," + pcName + ",table.concat(__alex_lph_activation_args,\"|\"),_G.__vmc);elseif _G.__alex_lph_activation_rows==" + std::to_string(kLuraphActivationTraceRowLimit + 1) + " then print(\"@@LPH_ACT_PROTO_LIMIT_V1@@\"," + std::to_string(kLuraphActivationTraceRowLimit) + ",_G.__vmc);end;__alex_lph_structure_announced=true;end;end;";
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
-        instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};";
+        instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
         for (const std::string& lane : laneNames)
         {
@@ -7155,8 +7425,20 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         postInstrumentation += "if type(__alex_lph_key)==\"number\" and __alex_lph_key%1==0 and __alex_lph_key>=-200000 and __alex_lph_key<=200000 then __alex_lph_seen_keys[__alex_lph_key]=true;";
         postInstrumentation += "if not rawequal(rawget(__alex_lph_pre_regs,__alex_lph_key),__alex_lph_value) then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=\"..__alex_lph_encode_value(__alex_lph_value);local __alex_lph_matches={};if __alex_lph_value~=nil then for __alex_lph_source,__alex_lph_source_value in __alex_lph_pre_regs do if __alex_lph_source~=__alex_lph_key and rawequal(__alex_lph_source_value,__alex_lph_value) then __alex_lph_matches[#__alex_lph_matches+1]=\"r:\"..tostring(__alex_lph_source);if #__alex_lph_matches>=2 then break;end;end;end;if #__alex_lph_matches<2 then for __alex_lph_argument=1,__argCount do if rawequal(rawget(__alex_lph_args,__alex_lph_argument),__alex_lph_value) then __alex_lph_matches[#__alex_lph_matches+1]=\"a:\"..tostring(__alex_lph_argument);if #__alex_lph_matches>=2 then break;end;end;end;end;end;if #__alex_lph_matches>0 then table.sort(__alex_lph_matches);__alex_lph_origins[#__alex_lph_origins+1]=tostring(__alex_lph_key)..\"=\"..table.concat(__alex_lph_matches,\",\");end;end;end;end;";
         postInstrumentation += "for __alex_lph_key,__alex_lph_value in __alex_lph_pre_regs do if not __alex_lph_seen_keys[__alex_lph_key] and rawget(" + registersName + ",__alex_lph_key)==nil then __alex_lph_writes[#__alex_lph_writes+1]=tostring(__alex_lph_key)..\"=z:\";end;end;end;";
-        postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
+        postInstrumentation += "table.sort(__alex_lph_writes);table.sort(__alex_lph_origins);";
+        if (!guardNames.empty())
+            postInstrumentation += "print(\"@@LPH_GUARD_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,table.concat(__alex_lph_pre_guards,\"|\"));";
+        postInstrumentation += "print(\"@@LPH_STEP_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op," + pcName + ",#__alex_lph_writes,table.concat(__alex_lph_writes,\"|\"),table.concat(__alex_lph_pre_lanes,\"|\"),table.concat(__alex_lph_origins,\"|\"));end;";
         insertions.push_back({dispatcherBodyEnd, 0, std::move(postInstrumentation)});
+        if (opcodeDispatcher && !guardNames.empty())
+        {
+            std::string guardInstrumentation = "do if __alex_lph_step_enabled then ";
+            for (const std::string& guard : guardNames)
+                guardInstrumentation += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
+                    quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
+            guardInstrumentation += "end end;";
+            insertions.push_back({view.offset(opcodeDispatcher->location.begin), 0, std::move(guardInstrumentation)});
+        }
     }
     insertions.push_back({fetchEnd, 0, std::move(instrumentation)});
     std::string activation = std::string(
@@ -7741,8 +8023,10 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     try
     {
     using LaneSite = std::tuple<uint64_t, size_t, std::string>;
+    using GuardSite = std::tuple<uint64_t, uint64_t, int64_t, int64_t>;
     std::map<LaneSite, std::map<std::string, std::string>> laneTopValues;
     std::map<LaneSite, std::vector<json>> laneTableRows;
+    std::map<GuardSite, json> guardStates;
     std::istringstream input(readFile(path));
     std::string line;
     std::string rowKind = "unknown";
@@ -8171,6 +8455,68 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             trace.vm_events.push_back({*vmCount, *activation, *pc, *opcode});
             continue;
         }
+        if (line.starts_with("@@LPH_GUARD_V1@@\t"))
+        {
+            const std::vector<std::string> fields = splitTraceFields(line);
+            const std::optional<uint64_t> vmCount = fields.size() >= 6
+                ? parseTraceInteger<uint64_t>(fields[1]) : std::nullopt;
+            const std::optional<uint64_t> activation = fields.size() >= 6
+                ? parseTraceInteger<uint64_t>(fields[2]) : std::nullopt;
+            const std::optional<int64_t> pc = fields.size() >= 6
+                ? parseTraceInteger<int64_t>(fields[3]) : std::nullopt;
+            const std::optional<int64_t> opcode = fields.size() >= 6
+                ? parseTraceInteger<int64_t>(fields[4]) : std::nullopt;
+            json guards = json::object();
+            bool valid = vmCount && activation && pc && opcode && *vmCount > 0 && *activation > 0 && *pc > 0;
+            size_t begin = 0;
+            while (valid && begin <= fields[5].size())
+            {
+                const size_t end = fields[5].find('|', begin);
+                const std::string_view item(fields[5].data() + begin,
+                    (end == std::string::npos ? fields[5].size() : end) - begin);
+                const size_t equal = item.find('=');
+                if (equal == std::string_view::npos || equal == 0 || equal > 64 || equal + 1 >= item.size())
+                {
+                    valid = false;
+                    break;
+                }
+                const std::string name(item.substr(0, equal));
+                if (!isIdentifierStart(name.front()) ||
+                    !std::all_of(name.begin() + 1, name.end(), isIdentifier) || guards.contains(name))
+                {
+                    valid = false;
+                    break;
+                }
+                const json value = luraphRuntimeLaneValue(item.substr(equal + 1));
+                if (!value.is_object() || value.value("type", "invalid") == "invalid")
+                {
+                    valid = false;
+                    break;
+                }
+                guards[name] = value;
+                if (guards.size() > 32)
+                {
+                    valid = false;
+                    break;
+                }
+                if (end == std::string::npos)
+                    break;
+                begin = end + 1;
+            }
+            if (!valid || guards.empty())
+            {
+                markMalformed();
+                continue;
+            }
+            const GuardSite site{*vmCount, *activation, *pc, *opcode};
+            if (auto existing = guardStates.find(site); existing != guardStates.end() && existing->second != guards)
+            {
+                markMalformed();
+                continue;
+            }
+            guardStates[site] = std::move(guards);
+            continue;
+        }
         if (line.starts_with("@@LPH_STEP_V1@@\t"))
         {
             const std::vector<std::string> fields = splitTraceFields(line);
@@ -8320,6 +8666,8 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 markMalformed();
                 continue;
             }
+            const GuardSite guardSite{*vmCount, *activation, *pc, *opcode};
+            const auto guardState = guardStates.find(guardSite);
             trace.steps.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -8329,6 +8677,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"register_writes", std::move(writes)},
                 {"runtime_lanes", std::move(runtimeLanes)},
                 {"write_origins", std::move(writeOrigins)},
+                {"guard_state", guardState != guardStates.end() ? guardState->second : json::object()},
             });
             continue;
         }
@@ -8535,10 +8884,15 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             step.value("activation", uint64_t(0)),
             step.value("pc", int64_t(-1)));
         auto existing = uniqueSteps.find(key);
-        const bool hasRuntimeLanes = !step.value("runtime_lanes", json::object()).empty();
-        const bool existingHasRuntimeLanes = existing != uniqueSteps.end() && existing->second.is_object() &&
-            !existing->second.value("runtime_lanes", json::object()).empty();
-        if (existing == uniqueSteps.end() || (hasRuntimeLanes && !existingHasRuntimeLanes))
+        const size_t evidenceFields = size_t(!step.value("runtime_lanes", json::object()).empty()) +
+            size_t(!step.value("guard_state", json::object()).empty()) +
+            size_t(!step.value("write_origins", json::object()).empty());
+        const size_t existingEvidenceFields = existing != uniqueSteps.end() && existing->second.is_object()
+            ? size_t(!existing->second.value("runtime_lanes", json::object()).empty()) +
+                size_t(!existing->second.value("guard_state", json::object()).empty()) +
+                size_t(!existing->second.value("write_origins", json::object()).empty())
+            : 0;
+        if (existing == uniqueSteps.end() || evidenceFields > existingEvidenceFields)
             uniqueSteps[key] = std::move(step);
     }
     trace.steps.clear();

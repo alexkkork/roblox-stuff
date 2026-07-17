@@ -31,9 +31,14 @@ VM_COUNT_FIELDS = {
     "@@LPH_RETURN_V1@@": 0,
     "@@LPH_ACT_PROTO_V1@@": 8,
     "@@LPH_ACT_PROTO_LIMIT_V1@@": 1,
+    "@@LPH_GUARD_V1@@": 0,
 }
 EXECUTION_MARKERS = {"@@LPH_VM@@", "@@LPH_STEP_V1@@"}
 STRUCTURE_HASH_SCHEMA = "lph-prototype-instruction-shape-v1"
+GUARD_MARKER = "@@LPH_GUARD_V1@@"
+GUARD_SCHEMA = "lph-guard-v1"
+GUARD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+GUARD_CONFLICT_EXAMPLE_LIMIT = 100
 
 
 class CampaignError(RuntimeError):
@@ -54,6 +59,23 @@ class Record:
             separators=(",", ":"),
             sort_keys=True,
         )
+
+
+@dataclass(frozen=True)
+class GuardObservation:
+    vm_count: int
+    activation: int
+    pc: int
+    opcode: int
+    pairs: tuple[tuple[str, str], ...]
+
+    @property
+    def execution_key(self) -> tuple[int, int, int, int]:
+        return (self.vm_count, self.activation, self.pc, self.opcode)
+
+    @property
+    def location_key(self) -> tuple[int, int, int]:
+        return (self.vm_count, self.activation, self.pc)
 
 
 @dataclass
@@ -102,7 +124,10 @@ def parse_record(line: str, *, location: str) -> Record | None:
             raise CampaignError(f"{location}: invalid Luraph marker")
         if not isinstance(fields, list):
             raise CampaignError(f"{location}: JSONL fields must be an array")
-        return Record(marker, tuple(_json_field(value) for value in fields))
+        record = Record(marker, tuple(_json_field(value) for value in fields))
+        if marker == GUARD_MARKER:
+            parse_guard_record(record, location=location)
+        return record
 
     marker_match = MARKER_RE.search(text)
     if marker_match is None:
@@ -112,7 +137,10 @@ def parse_record(line: str, *, location: str) -> Record | None:
     marker = parts[0]
     if not MARKER_RE.fullmatch(marker):
         raise CampaignError(f"{location}: malformed Luraph marker line")
-    return Record(marker, tuple(parts[1:]))
+    record = Record(marker, tuple(parts[1:]))
+    if marker == GUARD_MARKER:
+        parse_guard_record(record, location=location)
+    return record
 
 
 def _parse_int(value: str, *, location: str, label: str, minimum: int = 0) -> int:
@@ -123,6 +151,198 @@ def _parse_int(value: str, *, location: str, label: str, minimum: int = 0) -> in
     if parsed < minimum:
         raise CampaignError(f"{location}: {label} must be at least {minimum}")
     return parsed
+
+
+def parse_guard_record(record: Record, *, location: str) -> GuardObservation | None:
+    """Decode a guard snapshot without interpreting its encoded values."""
+
+    if record.marker != GUARD_MARKER:
+        return None
+    if len(record.fields) < 5:
+        raise CampaignError(
+            f"{location}: guard marker needs VM count, activation, PC, opcode, and at least one name=value pair"
+        )
+
+    vm_count_value = _parse_int(record.fields[0], location=location, label="guard VM count", minimum=0)
+    activation = _parse_int(record.fields[1], location=location, label="guard activation", minimum=1)
+    pc = _parse_int(record.fields[2], location=location, label="guard PC", minimum=1)
+    opcode = _parse_int(record.fields[3], location=location, label="guard opcode", minimum=0)
+    pairs: list[tuple[str, str]] = []
+    names: set[str] = set()
+    for index, field in enumerate(record.fields[4:], 1):
+        if "=" not in field:
+            raise CampaignError(f"{location}: guard pair {index} is missing '='")
+        name, value = field.split("=", 1)
+        if not name:
+            raise CampaignError(f"{location}: guard pair {index} has an empty name")
+        if not GUARD_NAME_RE.fullmatch(name):
+            raise CampaignError(f"{location}: guard pair {index} has an invalid name")
+        if name in names:
+            raise CampaignError(f"{location}: guard name {name!r} appears more than once")
+        names.add(name)
+        pairs.append((name, value))
+    return GuardObservation(vm_count_value, activation, pc, opcode, tuple(pairs))
+
+
+def _record_dedupe_key(record: Record) -> Any:
+    """Treat reordered guard pairs as one snapshot while retaining the first row verbatim."""
+
+    guard = parse_guard_record(record, location="merged guard record")
+    if guard is None:
+        return record
+    return (GUARD_MARKER, *guard.execution_key, tuple(sorted(guard.pairs)))
+
+
+def _guard_summary(
+    records: Sequence[Record],
+    *,
+    input_records: int | None = None,
+    duplicates_removed: int | None = None,
+) -> dict[str, Any]:
+    parsed = [
+        guard
+        for record in records
+        if (guard := parse_guard_record(record, location="guard summary")) is not None
+    ]
+    unique_observations: dict[Any, GuardObservation] = {}
+    for guard in parsed:
+        key = (*guard.execution_key, tuple(sorted(guard.pairs)))
+        unique_observations.setdefault(key, guard)
+    observations = list(unique_observations.values())
+    if input_records is None:
+        input_records = len(parsed)
+    if duplicates_removed is None:
+        duplicates_removed = len(parsed) - len(observations)
+
+    values_by_execution_name: dict[tuple[int, int, int, int, str], set[str]] = defaultdict(set)
+    opcodes_by_location: dict[tuple[int, int, int], set[int]] = defaultdict(set)
+    executions_by_name: dict[str, set[tuple[int, int, int, int]]] = defaultdict(set)
+    values_by_name: dict[str, set[str]] = defaultdict(set)
+    records_by_name: Counter[str] = Counter()
+    vm_counts_by_name: dict[str, set[int]] = defaultdict(set)
+    executions_by_opcode: dict[int, set[tuple[int, int, int, int]]] = defaultdict(set)
+    names_by_opcode: dict[int, set[str]] = defaultdict(set)
+    pair_observations = 0
+
+    for guard in observations:
+        opcodes_by_location[guard.location_key].add(guard.opcode)
+        executions_by_opcode[guard.opcode].add(guard.execution_key)
+        for name, value in guard.pairs:
+            pair_observations += 1
+            records_by_name[name] += 1
+            vm_counts_by_name[name].add(guard.vm_count)
+            values_by_execution_name[(*guard.execution_key, name)].add(value)
+            executions_by_name[name].add(guard.execution_key)
+            values_by_name[name].add(value)
+            names_by_opcode[guard.opcode].add(name)
+
+    binding_conflicts = [
+        {
+            "kind": "binding",
+            "vm_count": key[0],
+            "activation": key[1],
+            "pc": key[2],
+            "opcode": key[3],
+            "name": key[4],
+            "values": sorted(values),
+        }
+        for key, values in sorted(values_by_execution_name.items())
+        if len(values) > 1
+    ]
+    opcode_conflicts = [
+        {
+            "kind": "opcode",
+            "vm_count": key[0],
+            "activation": key[1],
+            "pc": key[2],
+            "opcodes": sorted(opcodes),
+        }
+        for key, opcodes in sorted(opcodes_by_location.items())
+        if len(opcodes) > 1
+    ]
+    execution_keys = {guard.execution_key for guard in observations}
+    event_keys = {guard.location_key for guard in observations}
+    activation_sites = {(guard.activation, guard.pc, guard.opcode) for guard in observations}
+    vm_counts = {guard.vm_count for guard in observations}
+    execution_vm_counts = {
+        count
+        for record in records
+        if record.marker in EXECUTION_MARKERS and (count := vm_count(record)) is not None and count > 0
+    }
+    guarded_execution_vm_counts = vm_counts & execution_vm_counts
+    conflict_examples = sorted(
+        (*binding_conflicts, *opcode_conflicts),
+        key=lambda item: (
+            item["vm_count"],
+            item["activation"],
+            item["pc"],
+            item["kind"],
+            item.get("opcode", -1),
+            item.get("name", ""),
+        ),
+    )
+    conflict_count = len(conflict_examples)
+
+    return {
+        "schema": GUARD_SCHEMA,
+        "available": bool(observations),
+        "input_records": input_records,
+        "unique_records": len(observations),
+        "duplicates_removed": duplicates_removed,
+        "records": len(observations),
+        "pair_observations": pair_observations,
+        "execution_points": len(execution_keys),
+        "unique_events": len(event_keys),
+        "activation_sites": len(activation_sites),
+        "unique_sites": len(activation_sites),
+        "unique_vm_counts": len(vm_counts),
+        "vm_count_min": min(vm_counts) if vm_counts else None,
+        "vm_count_max": max(vm_counts) if vm_counts else None,
+        "activations": len({guard.activation for guard in observations}),
+        "unique_activations": len({guard.activation for guard in observations}),
+        "pcs": len({guard.pc for guard in observations}),
+        "opcodes": len({guard.opcode for guard in observations}),
+        "unique_opcodes": len({guard.opcode for guard in observations}),
+        "guard_names": len(executions_by_name),
+        "unique_bindings": len(values_by_execution_name),
+        "execution_vm_counts": len(execution_vm_counts),
+        "execution_vm_counts_with_guards": len(guarded_execution_vm_counts),
+        "execution_vm_count_coverage_ratio": (
+            round(len(guarded_execution_vm_counts) / len(execution_vm_counts), 6)
+            if execution_vm_counts
+            else None
+        ),
+        "coverage_by_name": [
+            {
+                "name": name,
+                "records": records_by_name[name],
+                "execution_points": len(executions_by_name[name]),
+                "unique_events": len({key[:3] for key in executions_by_name[name]}),
+                "distinct_values": len(values_by_name[name]),
+                "unique_values": len(values_by_name[name]),
+                "vm_count_min": min(vm_counts_by_name[name]),
+                "vm_count_max": max(vm_counts_by_name[name]),
+            }
+            for name in sorted(executions_by_name)
+        ],
+        "coverage_by_opcode": [
+            {
+                "opcode": opcode,
+                "execution_points": len(executions_by_opcode[opcode]),
+                "guard_names": sorted(names_by_opcode[opcode]),
+            }
+            for opcode in sorted(executions_by_opcode)
+        ],
+        "conflicts": {
+            "present": bool(conflict_examples),
+            "has_conflicts": bool(conflict_examples),
+            "count": conflict_count,
+            "binding_conflicts": len(binding_conflicts),
+            "opcode_conflicts": len(opcode_conflicts),
+            "examples": conflict_examples[:GUARD_CONFLICT_EXAMPLE_LIMIT],
+            "examples_truncated": conflict_count > GUARD_CONFLICT_EXAMPLE_LIMIT,
+        },
+    }
 
 
 def structure_shape(records: Iterable[Record], *, label: str) -> StructureShape:
@@ -238,6 +458,7 @@ def _window_summary(records: Sequence[Record], size: int) -> list[dict[str, Any]
     result: list[dict[str, Any]] = []
     for index in sorted(windows):
         bucket = windows[index]
+        guards = _guard_summary(bucket)
         start = 1 + index * size
         end = start + size - 1
         all_counts = {count for record in bucket if (count := vm_count(record)) is not None}
@@ -254,6 +475,12 @@ def _window_summary(records: Sequence[Record], size: int) -> list[dict[str, Any]
                 "unique_vm_counts": len(all_counts),
                 "execution_vm_counts": len(execution_counts),
                 "execution_coverage_ratio": round(len(execution_counts) / size, 6),
+                "guards": {
+                    "records": guards["records"],
+                    "execution_points": guards["execution_points"],
+                    "guard_names": guards["guard_names"],
+                    "conflicts": guards["conflicts"]["count"],
+                },
                 "marker_types": _marker_summary(bucket),
             }
         )
@@ -296,6 +523,7 @@ def _read_input(path: pathlib.Path) -> tuple[list[Record], dict[str, Any], Struc
         },
         "vm_count_min": min(counts) if counts else None,
         "vm_count_max": max(counts) if counts else None,
+        "guards": _guard_summary(records),
     }
     return records, stats, shape
 
@@ -358,16 +586,20 @@ def run_campaign(
             )
         merge_shapes(merged_shape, shape, label=str(path))
 
-    seen: set[Record] = set()
+    seen: set[Any] = set()
     structure_records: list[Record] = []
     dynamic_records: list[Record] = []
+    duplicate_markers: Counter[str] = Counter()
     for record in all_records:
-        if record in seen:
+        dedupe_key = _record_dedupe_key(record)
+        if dedupe_key in seen:
+            duplicate_markers[record.marker] += 1
             continue
-        seen.add(record)
+        seen.add(dedupe_key)
         target = structure_records if record.marker in STRUCTURE_MARKERS else dynamic_records
         target.append(record)
     merged_records = structure_records + dynamic_records
+    guard_input_records = sum(record.marker == GUARD_MARKER for record in all_records)
 
     merged_hash = structure_hash(merged_shape)
     complete = shape_complete(merged_shape)
@@ -396,6 +628,8 @@ def run_campaign(
             "input_records": len(all_records),
             "unique_records": len(merged_records),
             "duplicates_removed": len(all_records) - len(merged_records),
+            "duplicates_removed_by_marker": dict(sorted(duplicate_markers.items())),
+            "guard_duplicates_removed": duplicate_markers[GUARD_MARKER],
             "bytes": len(merged_bytes),
             "sha256": hashlib.sha256(merged_bytes).hexdigest(),
         },
@@ -419,6 +653,11 @@ def run_campaign(
             ),
         },
         "marker_types": _marker_summary(merged_records),
+        "guards": _guard_summary(
+            merged_records,
+            input_records=guard_input_records,
+            duplicates_removed=duplicate_markers[GUARD_MARKER],
+        ),
         "vm_windows": {
             "size": window_size,
             "alignment": "one_based",

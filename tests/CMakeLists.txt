@@ -147,6 +147,18 @@ if(TARGET alex_deobfuscator)
         test_luraph_nested_activation_truthfulness.py
         --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
     )
+
+    foreach(truth_case IN ITEMS handlers runtime payload-root)
+        string(REPLACE "-" "_" truth_case_name "${truth_case}")
+        rbx_add_python_test(
+            deobfuscator_luraph_semantic_truthfulness_${truth_case_name}
+            "conformance;integration;security;subject;deobfuscator"
+            45
+            test_luraph_semantic_truthfulness.py
+            --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+            --case "${truth_case}"
+        )
+    endforeach()
 endif()
 
 rbx_add_python_test(

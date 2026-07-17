@@ -1190,6 +1190,130 @@ return reducible, irreducible
         self.assertIn('touch("start")', rewritten)
         self.assertEqual(rewritten.count("local dispatch_bucket ="), 1)
 
+    def test_flat_luraph_dispatcher_is_rebuilt_as_structured_control_flow(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function flat_dispatch(flag)
+  local output = "start"
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(12, pc)
+    if pc == 1 then
+      if flag then
+        pc = 2
+      else
+        pc = 3
+      end
+    elseif pc == 2 then
+      output ..= ":yes"
+      pc = 4
+    elseif pc == 3 then
+      output ..= ":no"
+      pc = 4
+    elseif pc == 4 then
+      return output
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return flat_dispatch(true), flat_dispatch(false)
+"""
+        )
+
+        rewritten = artifact["source"]
+        metrics = artifact["metrics"]
+        self.assertEqual(metrics["regions_found"], 1)
+        self.assertEqual(metrics["regions_structured"], 1)
+        self.assertEqual(metrics["blocks_structured"], 4)
+        self.assertEqual(metrics["residual_state_machines"], 0)
+        self.assertNotIn("local pc =", rewritten)
+        self.assertNotIn("while pc ~= nil do", rewritten)
+        self.assertNotIn("semantic_step(12, pc)", rewritten)
+        self.assertIn("if flag then", rewritten)
+        self.assertIn('output ..= ":yes"', rewritten)
+        self.assertIn('output ..= ":no"', rewritten)
+
+    def test_flat_trace_replay_transition_is_evaluated_once(self) -> None:
+        artifact = self.rewrite(
+            """local function semantic_step(_, _)
+end
+
+local function replay_transition(_, _, _)
+  return 2
+end
+
+local function flat_replay()
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(13, pc)
+    if pc == 1 then
+      pc = replay_transition(13, 1, {2, 3, 3})
+    elseif pc == 2 then
+      return "first"
+    elseif pc == 3 then
+      return "second"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return flat_replay()
+"""
+        )
+
+        rewritten = artifact["source"]
+        metrics = artifact["metrics"]
+        self.assertEqual(metrics["regions_structured"], 1)
+        self.assertEqual(metrics["blocks_structured"], 3)
+        self.assertEqual(metrics["residual_state_machines"], 0)
+        self.assertNotIn("while pc ~= nil do", rewritten)
+        self.assertEqual(rewritten.count("replay_transition(13, 1, {2, 3, 3})"), 1)
+        self.assertIn("if replay_transition(13, 1, {2, 3, 3}) == 2 then", rewritten)
+
+    def test_flat_replay_with_three_targets_remains_a_residual_state_machine(self) -> None:
+        source = """local function semantic_step(_, _)
+end
+
+local function replay_transition(_, _, _)
+  return 2
+end
+
+local function ambiguous_replay()
+  local pc = 1
+  while pc ~= nil do
+    semantic_step(14, pc)
+    if pc == 1 then
+      pc = replay_transition(14, 1, {2, 3, 4})
+    elseif pc == 2 then
+      return "first"
+    elseif pc == 3 then
+      return "second"
+    elseif pc == 4 then
+      return "third"
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+return ambiguous_replay()
+"""
+        artifact = self.rewrite(source)
+
+        self.assertEqual(artifact["metrics"]["regions_found"], 1)
+        self.assertEqual(artifact["metrics"]["regions_structured"], 0)
+        self.assertEqual(artifact["metrics"]["residual_state_machines"], 1)
+        self.assertEqual(artifact["metrics"]["residual_reasons"], {"parse_terminator_1": 1})
+        self.assertIn("pc = replay_transition(14, 1, {2, 3, 4})", artifact["source"])
+
 
 if __name__ == "__main__":
     unittest.main()

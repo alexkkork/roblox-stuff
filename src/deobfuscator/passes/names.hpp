@@ -43,6 +43,8 @@ struct ResidualBindingRenameResult
     bool committed = false;
 };
 
+// Names are deterministic descriptions inferred from use sites, never claims about erased original identifiers.
+// Generated function parameters are renamed only when their operations or a known callback signature prove a role.
 // All diagnostic locations are one-based. A failed transaction returns the input source and zero committed counts.
 ResidualBindingRenameResult renameResidualBindings(std::string_view final_source);
 

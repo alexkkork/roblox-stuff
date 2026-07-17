@@ -434,11 +434,29 @@ struct ReplayTransition
 std::optional<ReplayTransition> parseReplayTransition(std::string_view expression)
 {
     expression = trimView(expression);
-    constexpr std::string_view Prefix = "replay_activation_transition(";
-    if (!expression.starts_with(Prefix) || !expression.ends_with(')'))
+    constexpr std::string_view ActivationPrefix = "replay_activation_transition(";
+    constexpr std::string_view TracePrefix = "replay_transition(";
+    std::string_view prefix;
+    size_t expectedFields = 0;
+    size_t sequenceField = 0;
+    if (expression.starts_with(ActivationPrefix))
+    {
+        prefix = ActivationPrefix;
+        expectedFields = 5;
+        sequenceField = 3;
+    }
+    else if (expression.starts_with(TracePrefix))
+    {
+        prefix = TracePrefix;
+        expectedFields = 3;
+        sequenceField = 2;
+    }
+    else
+        return std::nullopt;
+    if (!expression.ends_with(')'))
         return std::nullopt;
 
-    std::string_view arguments = expression.substr(Prefix.size(), expression.size() - Prefix.size() - 1);
+    std::string_view arguments = expression.substr(prefix.size(), expression.size() - prefix.size() - 1);
     std::vector<std::string_view> fields;
     size_t begin = 0;
     int depth = 0;
@@ -460,12 +478,13 @@ std::optional<ReplayTransition> parseReplayTransition(std::string_view expressio
     if (depth != 0)
         return std::nullopt;
     fields.push_back(trimView(arguments.substr(begin)));
-    if (fields.size() != 5 || fields[3].size() < 2 || fields[3].front() != '{' || fields[3].back() != '}')
+    if (fields.size() != expectedFields || fields[sequenceField].size() < 2 ||
+        fields[sequenceField].front() != '{' || fields[sequenceField].back() != '}')
         return std::nullopt;
 
     ReplayTransition result;
     result.expression.assign(expression);
-    const std::string_view sequences = fields[3];
+    const std::string_view sequences = fields[sequenceField];
     for (size_t index = 0; index < sequences.size();)
     {
         const char ch = sequences[index];
@@ -587,6 +606,75 @@ std::optional<int64_t> semanticStepPrototype(std::string_view statement)
     return parseInteger(statement);
 }
 
+bool parseLuraphCases(const std::vector<SourceLine>& lines, size_t& cursor, Region& region,
+    size_t caseIndent, size_t bodyIndent, std::optional<int64_t> bucket, std::string& failure)
+{
+    bool firstCase = true;
+    while (cursor < lines.size() && indentation(lines[cursor].text) == caseIndent)
+    {
+        const auto state = parseEqualityBranchHeader(lines[cursor].text, "pc", firstCase);
+        if (!state)
+            break;
+        if (*state < 0)
+        {
+            failure = "state_value";
+            return false;
+        }
+        if (bucket && (*state == 0 ? 0 : (*state - 1) / 64) != *bucket)
+        {
+            failure = "bucket_case_mismatch";
+            return false;
+        }
+
+        Block block;
+        block.state = *state;
+        ++cursor;
+        while (cursor < lines.size())
+        {
+            if (indentation(lines[cursor].text) == caseIndent)
+            {
+                const std::string_view current = trimView(lines[cursor].text);
+                if (parseEqualityBranchHeader(current, "pc", false) || current == "else")
+                    break;
+            }
+            SourceLine line = lines[cursor++];
+            if (trimView(line.text).empty())
+                line.text.clear();
+            else
+            {
+                if (indentation(line.text) < bodyIndent)
+                {
+                    failure = "case_indentation";
+                    return false;
+                }
+                line.text.erase(0, bodyIndent);
+            }
+            block.body.push_back(std::move(line));
+        }
+        if (!parseLuraphTerminator(block))
+        {
+            failure = "terminator_" + std::to_string(block.state);
+            return false;
+        }
+        if (!region.blocks.emplace(block.state, std::move(block)).second)
+        {
+            failure = "duplicate_state";
+            return false;
+        }
+        firstCase = false;
+    }
+    if (firstCase || cursor + 2 >= lines.size() || indentation(lines[cursor].text) != caseIndent ||
+        trimView(lines[cursor].text) != "else" || indentation(lines[cursor + 1].text) != bodyIndent ||
+        trimView(lines[cursor + 1].text) != "return nil" || indentation(lines[cursor + 2].text) != caseIndent ||
+        trimView(lines[cursor + 2].text) != "end")
+    {
+        failure = "case_fallback";
+        return false;
+    }
+    cursor += 3;
+    return true;
+}
+
 std::optional<Region> parseLuraphRegion(
     const std::vector<SourceLine>& lines, size_t begin, std::string* failure)
 {
@@ -616,83 +704,57 @@ std::optional<Region> parseLuraphRegion(
     region.implicitExitReturnsNil = true;
 
     const size_t wrapperIndent = region.indent.size() + 2;
-    const size_t caseIndent = wrapperIndent + 2;
-    const size_t bodyIndent = caseIndent + 2;
     size_t cursor = begin + 2;
     const auto semanticPrototype = semanticStepPrototype(lines[cursor].text);
     if (indentation(lines[cursor].text) != wrapperIndent || !semanticPrototype || *semanticPrototype < 0)
         return reject("semantic_step");
     region.semanticPrototype = *semanticPrototype;
     ++cursor;
-    if (cursor >= lines.size() || indentation(lines[cursor].text) != wrapperIndent ||
-        trimView(lines[cursor].text) != "local dispatch_bucket = math.floor((pc - 1) / 64)")
-        return reject("dispatch_bucket");
-    ++cursor;
+    if (cursor >= lines.size() || indentation(lines[cursor].text) != wrapperIndent)
+        return reject("dispatcher");
 
-    bool firstBucket = true;
-    while (cursor < lines.size() && indentation(lines[cursor].text) == wrapperIndent)
+    const bool bucketed = trimView(lines[cursor].text) == "local dispatch_bucket = math.floor((pc - 1) / 64)";
+    if (!bucketed)
     {
-        const auto bucket = parseEqualityBranchHeader(lines[cursor].text, "dispatch_bucket", firstBucket);
-        if (!bucket)
-            break;
-        if (*bucket < 0)
-            return reject("bucket_value");
-        ++cursor;
-
-        bool firstCase = true;
-        while (cursor < lines.size() && indentation(lines[cursor].text) == caseIndent)
-        {
-            const auto state = parseEqualityBranchHeader(lines[cursor].text, "pc", firstCase);
-            if (!state)
-                break;
-            if (*state < 0 || (*state == 0 ? 0 : (*state - 1) / 64) != *bucket)
-                return reject("bucket_case_mismatch");
-
-            Block block;
-            block.state = *state;
-            ++cursor;
-            while (cursor < lines.size())
-            {
-                if (indentation(lines[cursor].text) == caseIndent)
-                {
-                    const std::string_view current = trimView(lines[cursor].text);
-                    if (parseEqualityBranchHeader(current, "pc", false) || current == "else")
-                        break;
-                }
-                SourceLine line = lines[cursor++];
-                if (trimView(line.text).empty())
-                    line.text.clear();
-                else
-                {
-                    if (indentation(line.text) < bodyIndent)
-                        return reject("case_indentation");
-                    line.text.erase(0, bodyIndent);
-                }
-                block.body.push_back(std::move(line));
-            }
-            if (!parseLuraphTerminator(block))
-                return reject("terminator_" + std::to_string(block.state));
-            if (!region.blocks.emplace(block.state, std::move(block)).second)
-                return reject("duplicate_state");
-            firstCase = false;
-        }
-        if (firstCase || cursor + 2 >= lines.size() || indentation(lines[cursor].text) != caseIndent ||
-            trimView(lines[cursor].text) != "else" || indentation(lines[cursor + 1].text) != bodyIndent ||
-            trimView(lines[cursor + 1].text) != "return nil" || indentation(lines[cursor + 2].text) != caseIndent ||
-            trimView(lines[cursor + 2].text) != "end")
-            return reject("case_fallback");
-        cursor += 3;
-        firstBucket = false;
+        std::string parseFailure;
+        if (!parseLuraphCases(lines, cursor, region, wrapperIndent, wrapperIndent + 2, std::nullopt, parseFailure))
+            return reject(std::move(parseFailure));
+        if (cursor + 1 >= lines.size() || indentation(lines[cursor].text) != region.indent.size() ||
+            trimView(lines[cursor].text) != "end" || indentation(lines[cursor + 1].text) != region.indent.size() ||
+            trimView(lines[cursor + 1].text) != "return nil")
+            return reject("wrapper_end");
+        cursor += 2;
     }
+    else
+    {
+        const size_t caseIndent = wrapperIndent + 2;
+        const size_t bodyIndent = caseIndent + 2;
+        ++cursor;
+        bool firstBucket = true;
+        while (cursor < lines.size() && indentation(lines[cursor].text) == wrapperIndent)
+        {
+            const auto bucket = parseEqualityBranchHeader(lines[cursor].text, "dispatch_bucket", firstBucket);
+            if (!bucket)
+                break;
+            if (*bucket < 0)
+                return reject("bucket_value");
+            ++cursor;
 
-    if (firstBucket || cursor + 4 >= lines.size() || indentation(lines[cursor].text) != wrapperIndent ||
-        trimView(lines[cursor].text) != "else" || indentation(lines[cursor + 1].text) != caseIndent ||
-        trimView(lines[cursor + 1].text) != "return nil" || indentation(lines[cursor + 2].text) != wrapperIndent ||
-        trimView(lines[cursor + 2].text) != "end" || indentation(lines[cursor + 3].text) != region.indent.size() ||
-        trimView(lines[cursor + 3].text) != "end" || indentation(lines[cursor + 4].text) != region.indent.size() ||
-        trimView(lines[cursor + 4].text) != "return nil")
-        return reject("wrapper_end");
-    cursor += 5;
+            std::string parseFailure;
+            if (!parseLuraphCases(lines, cursor, region, caseIndent, bodyIndent, *bucket, parseFailure))
+                return reject(std::move(parseFailure));
+            firstBucket = false;
+        }
+
+        if (firstBucket || cursor + 4 >= lines.size() || indentation(lines[cursor].text) != wrapperIndent ||
+            trimView(lines[cursor].text) != "else" || indentation(lines[cursor + 1].text) != caseIndent ||
+            trimView(lines[cursor + 1].text) != "return nil" || indentation(lines[cursor + 2].text) != wrapperIndent ||
+            trimView(lines[cursor + 2].text) != "end" || indentation(lines[cursor + 3].text) != region.indent.size() ||
+            trimView(lines[cursor + 3].text) != "end" || indentation(lines[cursor + 4].text) != region.indent.size() ||
+            trimView(lines[cursor + 4].text) != "return nil")
+            return reject("wrapper_end");
+        cursor += 5;
+    }
     region.end = cursor;
 
     for (auto& [state, block] : region.blocks)
@@ -8421,7 +8483,7 @@ size_t simplifyIgnoredCallScopes(std::vector<OutputLine>& lines)
 size_t inlineReplayTargetConditions(std::vector<OutputLine>& lines)
 {
     static const std::regex Assignment(
-        R"(^(\s*)local (replay_target_[0-9]+) = (replay_activation_transition\(.*\))$)");
+        R"(^(\s*)local (replay_target_[0-9]+) = (replay_(?:activation_)?transition\(.*\))$)");
     size_t inlined = 0;
     for (size_t line = 0; line + 1 < lines.size(); ++line)
     {

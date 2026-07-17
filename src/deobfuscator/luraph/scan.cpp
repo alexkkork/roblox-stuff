@@ -1607,7 +1607,12 @@ void inspectLphDollarSchema(
     schema.variable_integer_reader_slot = rootReaderSlot;
     schema.scalar_byte_order = directReadersVerified ? ByteOrder::LittleEndian : ByteOrder::Unknown;
     if (rootReaderSlot)
-        schema.root = RootCandidateMetadata{true, true, false, rootReaderSlot, rootRange};
+    {
+        schema.root.present = true;
+        schema.root.prototype_table_index = true;
+        schema.root.reader_slot = rootReaderSlot;
+        schema.root.evidence_range = rootRange;
+    }
     if (tagReaderSlot)
         schema.tags = TagScheduleMetadata{true, true, false, tagReaderSlot, tagBoundaries, tagRange};
     schema.keys = KeyScheduleMetadata{opaqueWordCount >= 4, false, false, opaqueWordCount, opaqueWordRange};
@@ -1658,7 +1663,10 @@ void inspectLphDollarSchema(
     schema.record_lanes.push_back(RecordLaneMetadata{
         RecordLaneKind::RootSelector, laneOrder++, *rootReaderSlot, std::nullopt, false, true, rootRange});
 
-    schema.root = RootCandidateMetadata{true, true, false, rootReaderSlot, rootRange};
+    schema.root.present = true;
+    schema.root.prototype_table_index = true;
+    schema.root.reader_slot = rootReaderSlot;
+    schema.root.evidence_range = rootRange;
     schema.tags = TagScheduleMetadata{true, true, false, tagReaderSlot, std::move(tagBoundaries), tagRange};
     schema.keys = KeyScheduleMetadata{opaqueWordCount >= 4, false, false, opaqueWordCount, opaqueWordRange};
 
@@ -2029,6 +2037,56 @@ bool decodeBiasedCount(
     return true;
 }
 
+void finalizeStaticPrototypeReferences(ContainerAnalysis& analysis)
+{
+    analysis.root_selector_in_bounds = analysis.root_selector >= 1 && analysis.root_selector <= analysis.prototypes.size();
+    analysis.root_metadata_index = analysis.root_selector_in_bounds
+        ? std::optional<size_t>(static_cast<size_t>(analysis.root_selector - 1))
+        : std::nullopt;
+
+    analysis.closure_target_count = 0;
+    analysis.valid_closure_target_count = 0;
+    analysis.invalid_closure_target_count = 0;
+    constexpr std::array<size_t, 3> operandWords = {0, 1, 3};
+    for (PrototypeMetadata& prototype : analysis.prototypes)
+    {
+        prototype.closure_targets.clear();
+        for (const InstructionMetadata& instruction : prototype.instructions)
+        {
+            for (size_t wordIndex : operandWords)
+            {
+                const InstructionWordMetadata& word = instruction.words[wordIndex];
+                int64_t residue = word.value % 8;
+                if (residue < 0)
+                    residue += 8;
+                if (residue != 3)
+                    continue;
+
+                const int64_t wrapperIndex = (word.value - residue) / 8;
+                const bool inBounds = wrapperIndex >= 1 &&
+                    static_cast<uint64_t>(wrapperIndex) <= analysis.prototypes.size();
+                ClosureTargetMetadata target;
+                target.instruction_index = instruction.index;
+                target.operand_word_index = wordIndex;
+                target.raw_operand = word.value;
+                target.wrapper_index = wrapperIndex;
+                target.in_bounds = inBounds;
+                target.span = word.span;
+                if (inBounds)
+                {
+                    target.metadata_index = static_cast<size_t>(wrapperIndex - 1);
+                    target.capture_descriptor_count = analysis.prototypes[*target.metadata_index].descriptors.size();
+                    ++analysis.valid_closure_target_count;
+                }
+                else
+                    ++analysis.invalid_closure_target_count;
+                prototype.closure_targets.push_back(std::move(target));
+                ++analysis.closure_target_count;
+            }
+        }
+    }
+}
+
 bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnalysis& analysis, const AnalysisLimits& limits)
 {
     constexpr uint64_t constantCountBias = 12618;
@@ -2243,6 +2301,7 @@ bool parseContainerBytes(const std::vector<unsigned char>& bytes, ContainerAnaly
         return setCursorFailure(analysis, cursor);
     analysis.root_selector = rootSelector.value;
     analysis.root_selector_span = rootSelector.span;
+    finalizeStaticPrototypeReferences(analysis);
     analysis.trailer_span = ByteSpan{cursor.offset(), bytes.size()};
     if (cursor.remaining() > limits.max_preserved_trailer_bytes)
     {
@@ -2492,6 +2551,7 @@ bool parseLphDollarStructure(
                     analysis.trailer_span = retained.trailer_span;
                     analysis.prototypes = std::move(retained.prototypes);
                     analysis.trailer_bytes = std::move(retained.trailer_bytes);
+                    finalizeStaticPrototypeReferences(analysis);
                     analysis.randomized_tag_semantics = true;
                     analysis.tag_semantic_mapping_recovered = false;
                     analysis.parse_status = ContainerParseStatus::StructuralMetadataRecovered;
@@ -2533,6 +2593,10 @@ bool parseLphDollarStructure(
                     addLane(RecordLaneKind::RangeMapRecord, true, std::nullopt);
                     addLane(RecordLaneKind::InstructionWords, true, schema.variable_integer_reader_slot);
                     schema.root.selector_value_known = true;
+                    schema.root.selector_in_bounds = analysis.root_selector_in_bounds;
+                    schema.root.wrapper_index = analysis.root_selector;
+                    schema.root.metadata_index = analysis.root_metadata_index;
+                    schema.root.selector_span = analysis.root_selector_span;
                     return true;
                 }
             }
@@ -2783,6 +2847,12 @@ std::optional<size_t> inspectLphContainer(
                         " unread trailer bytes. These are serialized-container totals, not runtime-observed or runtime-reachable coverage; randomized constant and opcode meanings remain opaque.");
                 addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE",
                     "Delimited the complete constant-record region without assigning randomized tag values to Lua types.");
+                addDiagnostic(result, limits, DiagnosticSeverity::Info, "LPH_STATIC_PROTOTYPE_REFERENCES_RECOVERED",
+                    "Resolved serialized root selector " + std::to_string(analysis.root_selector) + " to prototype metadata index " +
+                        (analysis.root_metadata_index ? std::to_string(*analysis.root_metadata_index) : std::string("invalid")) +
+                        "; retained " + std::to_string(analysis.valid_closure_target_count) + " in-bounds and " +
+                        std::to_string(analysis.invalid_closure_target_count) +
+                        " out-of-bounds packed prototype-reference operands. Capture descriptors remain numeric kind/index pairs.");
             }
             else
             {

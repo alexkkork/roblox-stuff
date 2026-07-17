@@ -64,6 +64,9 @@ struct Candidate
     std::string semantic_base;
     double semantic_confidence = 0.0;
     size_t unknown_value_assignments = 0;
+    bool generated_parameter = false;
+    bool rename_eligible = true;
+    std::vector<Luau::AstExprFunction*> function_values;
 };
 
 struct LocalDeclaration
@@ -123,9 +126,13 @@ bool aliasCandidateName(std::string_view name)
 class BindingCollector final : public Luau::AstVisitor
 {
 public:
-    explicit BindingCollector(bool include_residual = false, bool include_callbacks = false)
+    explicit BindingCollector(
+        bool include_residual = false,
+        bool include_callbacks = false,
+        bool include_parameters = false)
         : include_residual(include_residual)
         , include_callbacks(include_callbacks)
+        , include_parameters(include_parameters)
     {
     }
 
@@ -184,6 +191,7 @@ public:
 private:
     bool include_residual = false;
     bool include_callbacks = false;
+    bool include_parameters = false;
     std::unordered_set<Luau::AstLocal*> seen;
 
     void add(Luau::AstLocal* local)
@@ -197,6 +205,9 @@ private:
             family = residualCandidateFamily(name);
         if (!family && include_callbacks && hasDecimalSuffix(name, "callback_"))
             family = CandidateFamily::Generated;
+        const bool generated_parameter = !family && include_parameters && hasDecimalSuffix(name, "argument_");
+        if (generated_parameter)
+            family = CandidateFamily::Generated;
         if (!family)
             return;
 
@@ -204,6 +215,7 @@ private:
         candidate.local = local;
         candidate.family = *family;
         candidate.original_name = std::string(name);
+        candidate.generated_parameter = generated_parameter;
         candidate.occurrences.push_back(local->location);
         candidates.push_back(std::move(candidate));
     }
@@ -265,6 +277,57 @@ std::optional<std::string> callbackPurposeFromSignal(Luau::AstExpr* expression)
             return "on_" + role;
     }
     return std::nullopt;
+}
+
+std::optional<std::string> signalIdentifier(Luau::AstExpr* expression)
+{
+    expression = unwrapTransparent(expression);
+    if (!expression)
+        return std::nullopt;
+    if (auto property = expression->as<Luau::AstExprIndexName>(); property && property->index.value)
+        return std::string(property->index.value);
+    if (auto local = expression->as<Luau::AstExprLocal>(); local && local->local && local->local->name.value)
+    {
+        std::string name = withoutNumericSuffix(local->local->name.value);
+        constexpr std::string_view suffix = "_signal";
+        if (name.ends_with(suffix))
+            name.erase(name.size() - suffix.size());
+        return name;
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> callbackParameterRoles(std::string_view signal)
+{
+    static const std::map<std::string_view, std::vector<std::string>> Roles{
+        {"activated", {"input"}},
+        {"animation_played", {"animation_track"}},
+        {"changed", {"changed_value"}},
+        {"character_added", {"character"}},
+        {"character_removing", {"character"}},
+        {"child_added", {"child"}},
+        {"child_removed", {"child"}},
+        {"descendant_added", {"descendant"}},
+        {"descendant_removing", {"descendant"}},
+        {"heartbeat", {"delta_time"}},
+        {"input_began", {"input", "game_processed"}},
+        {"input_changed", {"input", "game_processed"}},
+        {"input_ended", {"input", "game_processed"}},
+        {"player_added", {"player"}},
+        {"player_removing", {"player"}},
+        {"post_simulation", {"delta_time"}},
+        {"pre_animation", {"delta_time"}},
+        {"pre_render", {"delta_time"}},
+        {"pre_simulation", {"delta_time"}},
+        {"render_stepped", {"delta_time"}},
+        {"stepped", {"time", "delta_time"}},
+        {"touch_ended", {"hit"}},
+        {"touched", {"hit"}},
+    };
+    const std::string normalized = snakeCase(signal);
+    if (auto found = Roles.find(normalized); found != Roles.end())
+        return found->second;
+    return {};
 }
 
 bool isFunctionValue(Luau::AstExpr* expression)
@@ -494,11 +557,12 @@ std::optional<std::string> assignedValueRole(Luau::AstExpr* expression)
             "activated_signal", "animation", "animation_id", "animation_played_signal", "animation_track",
             "animation_tracks", "animator", "attribute_value", "attributes", "callback", "cframe", "changed_signal",
             "character", "character_added_signal", "child", "child_added_signal", "child_removed_signal", "children",
-            "color", "condition", "connection", "current_camera", "decoded_value", "descendants", "enabled",
-            "frame", "health", "heartbeat_signal", "humanoid", "humanoid_root_part", "input", "json", "key_code",
+            "color", "condition", "connection", "current_camera", "decoded_value", "delta_time", "descendant",
+            "descendants", "enabled", "frame", "game_processed", "health", "heartbeat_signal", "hit", "humanoid",
+            "humanoid_root_part", "input", "json", "key_code",
             "local_player", "magnitude", "mouse", "name", "number", "parent", "part", "player", "players",
             "position", "raycast_result", "remote_event", "render_stepped_signal", "screen_gui", "signal", "size",
-            "task", "text", "text_label", "transparency", "tween", "udim", "udim2", "user_id",
+            "task", "text", "text_label", "time", "transparency", "tween", "udim", "udim2", "user_id",
             "user_input_type", "values", "vector2", "vector3", "workspace", "x", "y", "z",
         };
         if (ProvenRoles.contains(base))
@@ -567,7 +631,13 @@ void noteIndex(Candidate& candidate, Luau::AstExpr* index, bool dynamic_is_multi
 void noteAssignedValue(Candidate& candidate, Luau::AstExpr* value)
 {
     if (isFunctionValue(value))
+    {
         candidate.callback = true;
+        if (auto function = unwrapTransparent(value)->as<Luau::AstExprFunction>();
+            function && std::find(candidate.function_values.begin(), candidate.function_values.end(), function) ==
+                candidate.function_values.end())
+            candidate.function_values.push_back(function);
+    }
     else
     {
         Luau::AstExpr* assigned = unwrapTransparent(value);
@@ -599,6 +669,39 @@ void noteAssignedValue(Candidate& candidate, Luau::AstExpr* value)
     }
 }
 
+class DirectReturnCollector final : public Luau::AstVisitor
+{
+public:
+    std::vector<Luau::AstStatReturn*> returns;
+
+    bool visit(Luau::AstStatReturn* node) override
+    {
+        returns.push_back(node);
+        return false;
+    }
+
+    bool visit(Luau::AstExprFunction*) override
+    {
+        return false;
+    }
+};
+
+std::string functionNameForReturnRole(std::string_view role)
+{
+    if (role == "condition")
+        return "check_condition";
+    if (role == "number")
+        return "calculate_number";
+    if (role == "text")
+        return "build_text";
+    if (role == "values" || role == "children" || role == "descendants" || role == "players" ||
+        role == "attributes")
+        return "build_" + std::string(role);
+    if (role == "callback")
+        return {};
+    return "get_" + std::string(role);
+}
+
 class UsageCollector final : public Luau::AstVisitor
 {
 public:
@@ -608,6 +711,25 @@ public:
     {
         for (size_t index = 0; index < candidates.size(); ++index)
             by_local.emplace(candidates[index].local, index);
+    }
+
+    void finish()
+    {
+        for (Candidate& candidate : candidates)
+            noteFunctionReturnBehavior(candidate);
+
+        for (const CallbackUse& use : callback_uses)
+        {
+            Luau::AstExprFunction* function = use.function;
+            if (!function && use.callback_local)
+            {
+                Candidate* callback = find(use.callback_local);
+                if (!callback || callback->function_values.size() != 1)
+                    continue;
+                function = callback->function_values.front();
+            }
+            noteCallbackParameters(function, use.signal);
+        }
     }
 
     bool visit(Luau::AstExprLocal* node) override
@@ -696,6 +818,16 @@ public:
                     noteArgument(0, *purpose, 12.0);
                 else
                     noteArgument(0, "event_handler", 8.0);
+
+                if (node->args.size > 0)
+                    if (std::optional<std::string> signal = signalIdentifier(method->expr))
+                    {
+                        Luau::AstExpr* callback = unwrapTransparent(node->args.data[0]);
+                        if (auto local = callback ? callback->as<Luau::AstExprLocal>() : nullptr)
+                            callback_uses.push_back({local->local, nullptr, *signal});
+                        else if (auto function = callback ? callback->as<Luau::AstExprFunction>() : nullptr)
+                            callback_uses.push_back({nullptr, function, *signal});
+                    }
             }
             if (auto receiver = unwrapTransparent(method->expr)->as<Luau::AstExprGlobal>();
                 receiver && receiver->name.value)
@@ -857,14 +989,20 @@ public:
     {
         if (Luau::AstExprLocal* target = directLocal(node->name))
             if (Candidate* candidate = find(target->local))
+            {
                 candidate->callback = true;
+                noteFunctionValue(*candidate, node->func);
+            }
         return true;
     }
 
     bool visit(Luau::AstStatLocalFunction* node) override
     {
         if (Candidate* candidate = find(node->name))
+        {
             candidate->callback = true;
+            noteFunctionValue(*candidate, node->func);
+        }
         return true;
     }
 
@@ -874,14 +1012,108 @@ public:
     }
 
 private:
+    struct CallbackUse
+    {
+        Luau::AstLocal* callback_local = nullptr;
+        Luau::AstExprFunction* function = nullptr;
+        std::string signal;
+    };
+
     std::vector<Candidate>& candidates;
     const std::unordered_set<Luau::AstStatLocal*>& removed_declarations;
     std::unordered_map<Luau::AstLocal*, size_t> by_local;
+    std::vector<CallbackUse> callback_uses;
 
     Candidate* find(Luau::AstLocal* local)
     {
         const auto found = by_local.find(local);
         return found == by_local.end() ? nullptr : &candidates[found->second];
+    }
+
+    static void noteFunctionValue(Candidate& candidate, Luau::AstExprFunction* function)
+    {
+        if (function && std::find(candidate.function_values.begin(), candidate.function_values.end(), function) ==
+                candidate.function_values.end())
+            candidate.function_values.push_back(function);
+    }
+
+    std::optional<std::string> provenCandidateRole(Candidate& candidate)
+    {
+        std::set<std::string> roles;
+        for (const std::string& role : candidate.value_roles)
+            if (role != "callback" && role != "forwarded_value" && role != "object")
+                roles.insert(role);
+        for (const std::string& role : candidate.usage_roles)
+            if (role != "callback" && role != "forwarded_value" && role != "object")
+                roles.insert(role);
+        if (roles.size() == 1)
+            return *roles.begin();
+
+        std::vector<std::pair<std::string, double>> ranked;
+        for (const auto& [role, score] : candidate.name_scores)
+            if (role != "callback" && role != "forwarded_value" && role != "object")
+                ranked.emplace_back(role, score);
+        std::sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) {
+            return left.second != right.second ? left.second > right.second : left.first < right.first;
+        });
+        if (!ranked.empty() && ranked[0].second >= 7.0 &&
+            (ranked.size() == 1 || ranked[0].second - ranked[1].second >= 3.0))
+            return ranked[0].first;
+        return std::nullopt;
+    }
+
+    std::optional<std::string> provenExpressionRole(Luau::AstExpr* expression)
+    {
+        if (std::optional<std::string> role = assignedValueRole(expression);
+            role && *role != "forwarded_value" && *role != "callback" && *role != "object")
+            return role;
+        if (Luau::AstExprLocal* local = directLocal(expression))
+            if (Candidate* candidate = find(local->local))
+                return provenCandidateRole(*candidate);
+        return std::nullopt;
+    }
+
+    void noteFunctionReturnBehavior(Candidate& candidate)
+    {
+        if (candidate.function_values.size() != 1)
+            return;
+
+        DirectReturnCollector returns;
+        candidate.function_values.front()->body->visit(&returns);
+        std::set<std::string> roles;
+        bool saw_value_return = false;
+        bool unresolved = false;
+        for (Luau::AstStatReturn* statement : returns.returns)
+        {
+            if (statement->list.size == 0)
+                continue;
+            saw_value_return = true;
+            std::optional<std::string> role = provenExpressionRole(statement->list.data[0]);
+            if (!role)
+                unresolved = true;
+            else
+                roles.insert(*role);
+        }
+        if (!saw_value_return || unresolved || roles.size() != 1)
+            return;
+
+        const std::string function_name = functionNameForReturnRole(*roles.begin());
+        if (!function_name.empty())
+            addNameEvidence(candidate, function_name, 10.0);
+    }
+
+    void noteCallbackParameters(Luau::AstExprFunction* function, std::string_view signal)
+    {
+        if (!function)
+            return;
+        const std::vector<std::string> roles = callbackParameterRoles(signal);
+        const size_t count = std::min(function->args.size, roles.size());
+        for (size_t index = 0; index < count; ++index)
+            if (Candidate* candidate = find(function->args.data[index]))
+            {
+                candidate->usage_roles.insert(roles[index]);
+                addNameEvidence(*candidate, roles[index], 14.0);
+            }
     }
 
     void noteCondition(Luau::AstExpr* expression)
@@ -1972,7 +2204,7 @@ ResidualBindingRenameResult renameImpl(std::string_view source)
         return result;
     }
 
-    BindingCollector bindings;
+    BindingCollector bindings(false, false, true);
     parsed->result.root->visit(&bindings);
     const CleanupPlan cleanup = planUnusedDeclarationCleanup(parsed->result.root, bindings);
     const std::vector<DeclaratorCleanup> declarator_cleanup =
@@ -2014,6 +2246,7 @@ ResidualBindingRenameResult renameImpl(std::string_view source)
 
     UsageCollector usages(bindings.candidates, cleanup.statement_set);
     parsed->result.root->visit(&usages);
+    usages.finish();
     LexicalAliasFacts lexical_facts;
     parsed->result.root->visit(&lexical_facts);
 
@@ -2026,7 +2259,25 @@ ResidualBindingRenameResult renameImpl(std::string_view source)
         candidate.role = lexical_facts.captured(candidate.local) && writes > 1
             ? (candidate.family == CandidateFamily::Temporary ? BindingRole::VmTemporary : BindingRole::VmValue)
             : inferRole(candidate);
+        if (candidate.generated_parameter &&
+            (candidate.role == BindingRole::VmValue || candidate.role == BindingRole::VmTemporary))
+        {
+            candidate.rename_eligible = false;
+            continue;
+        }
         candidate.replacement = names.allocate(candidate);
+    }
+    bindings.candidates.erase(
+        std::remove_if(bindings.candidates.begin(), bindings.candidates.end(), [](const Candidate& candidate) {
+            return !candidate.rename_eligible;
+        }),
+        bindings.candidates.end());
+
+    if (bindings.candidates.empty() && cleanup.statements.empty() && declarator_cleanup.empty())
+    {
+        result.changed = result.lexical_alias_versions_eliminated != 0;
+        result.committed = true;
+        return result;
     }
 
     const SourceOffsets offsets(source);
@@ -2217,6 +2468,7 @@ ResidualBindingRenameResult refineResidualImpl(std::string_view source, bool sta
     const std::unordered_set<Luau::AstStatLocal*> removed_declarations;
     UsageCollector usages(bindings.candidates, removed_declarations);
     parsed->result.root->visit(&usages);
+    usages.finish();
     LexicalAliasFacts lexical_facts;
     parsed->result.root->visit(&lexical_facts);
 
@@ -2599,7 +2851,7 @@ ResidualBindingRenameResult renameGeneratedCallbackPurposesImpl(std::string_view
     if (!parsed->result.root || !parsed->result.errors.empty())
         return result;
 
-    BindingCollector bindings(false, true);
+    BindingCollector bindings(false, true, true);
     parsed->result.root->visit(&bindings);
     if (bindings.candidates.empty())
     {
@@ -2610,6 +2862,7 @@ ResidualBindingRenameResult renameGeneratedCallbackPurposesImpl(std::string_view
     const std::unordered_set<Luau::AstStatLocal*> no_removed_declarations;
     UsageCollector usages(bindings.candidates, no_removed_declarations);
     parsed->result.root->visit(&usages);
+    usages.finish();
     FreshNameAllocator names(collectOccupiedNames(source));
     std::vector<Candidate*> proven;
     for (Candidate& candidate : bindings.candidates)
