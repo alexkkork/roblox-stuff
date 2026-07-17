@@ -2936,9 +2936,33 @@ private:
         return *adjustment == 0 ? base : "(" + base + " + (" + std::to_string(*adjustment) + "))";
     }
 
+    static std::optional<std::string> constantString(const json& value)
+    {
+        if (!value.is_object() || value.value("kind", "") != "constant" || !value.contains("value"))
+            return std::nullopt;
+        const json& primitive = value["value"];
+        if (primitive.is_string())
+            return primitive.get<std::string>();
+        if (!primitive.is_object() || primitive.value("type", "") != "string")
+            return std::nullopt;
+        if (primitive.contains("value") && primitive["value"].is_string())
+            return primitive["value"].get<std::string>();
+        if (primitive.contains("bytes_hex") && primitive["bytes_hex"].is_string())
+            return decodeHexBytes(primitive["bytes_hex"].get<std::string>());
+        return std::nullopt;
+    }
+
+    static std::string recoveredOperationName(
+        std::string_view role, const Context& context, size_t operationId)
+    {
+        return "recovered_" + std::string(role) + "_p" + std::to_string(context.prototype) +
+            "_pc" + std::to_string(context.pc) + "_op" + std::to_string(operationId);
+    }
+
     void operation(const json& value, size_t depth, Context& context, bool controlHandled = false)
     {
         ++result.operations;
+        const size_t operationId = result.operations;
         const std::string prefix = indentation(depth);
         const std::string kind = value.value("kind", "");
         if (controlHandled && kind == "jump")
@@ -2963,7 +2987,19 @@ private:
             const std::optional<std::string> observed = structuralCapture
                 ? std::nullopt : observedLiteral(value);
             const std::string source = observed ? *observed : expression(value.value("value", json::object()), context);
-            append(prefix + "registers[" + registerIndex + "] = " + source + ";\n");
+            if (!context.path_specific)
+                append(prefix + "registers[" + registerIndex + "] = " + source + ";\n");
+            else
+            {
+                const std::optional<int64_t> staticRegister = integerValue(value["register"]);
+                const std::string role = staticRegister
+                    ? "register_" + std::to_string(*staticRegister) : "register_value";
+                const std::string recoveredValue = recoveredOperationName(role, context, operationId);
+                append(prefix + "do\n");
+                append(prefix + "  local " + recoveredValue + " = " + source + "\n");
+                append(prefix + "  registers[" + registerIndex + "] = " + recoveredValue + "\n");
+                append(prefix + "end\n");
+            }
             return;
         }
         if (kind == "table_write")
@@ -2975,9 +3011,32 @@ private:
                 unsupportedOperation(kind, "table, index, or value evidence is incomplete", depth, context);
                 return;
             }
-            append(prefix + "(" + expression(value.value("table", json::object()), context) + ")[" +
-                expression(value.value("index", json::object()), context) + "] = " +
-                expression(value.value("value", json::object()), context) + ";\n");
+            const std::string table = expression(value.value("table", json::object()), context);
+            const std::string index = expression(value.value("index", json::object()), context);
+            const std::string source = expression(value.value("value", json::object()), context);
+            if (!context.path_specific)
+                append(prefix + "(" + table + ")[" + index + "] = " + source + ";\n");
+            else
+            {
+                const std::string recoveredTable = recoveredOperationName("table", context, operationId);
+                const std::string recoveredValue = recoveredOperationName("table_value", context, operationId);
+                append(prefix + "do\n");
+                append(prefix + "  local " + recoveredTable + " = " + table + "\n");
+                const std::optional<std::string> field = constantString(value["index"]);
+                if (field && plainIdentifier(*field) && identifier(*field) == *field)
+                {
+                    append(prefix + "  local " + recoveredValue + " = " + source + "\n");
+                    append(prefix + "  " + recoveredTable + "." + *field + " = " + recoveredValue + "\n");
+                }
+                else
+                {
+                    const std::string recoveredKey = recoveredOperationName("table_key", context, operationId);
+                    append(prefix + "  local " + recoveredKey + " = " + index + "\n");
+                    append(prefix + "  local " + recoveredValue + " = " + source + "\n");
+                    append(prefix + "  " + recoveredTable + "[" + recoveredKey + "] = " + recoveredValue + "\n");
+                }
+                append(prefix + "end\n");
+            }
             return;
         }
         if (kind == "call")
@@ -3157,8 +3216,10 @@ private:
             append(prefix + "pc = " + *destination + ";\n");
             return;
         }
+        constexpr std::string_view reason = "operation kind is not implemented by the semantic emitter";
+        recordUnknownOperation(value, reason, context);
         unsupportedOperation(kind.empty() ? std::string_view("unknown") : std::string_view(kind),
-            "operation kind is not implemented by the semantic emitter", depth, context);
+            reason, depth, context);
     }
 
     std::optional<json> instructionAt(uint64_t prototype, size_t pc) const
@@ -3517,6 +3578,8 @@ private:
                 currentBucket = bucket;
             }
             const size_t firstLine = line;
+            const size_t firstProvenanceRecord = result.path_specific_operation_provenance.size();
+            const size_t firstUnknownOperation = result.unknown_operations.size();
             std::set<size_t> pathSpecificPcs;
             append(std::string(firstBlock ? "      if pc == " : "      elseif pc == ") +
                 std::to_string(block.start) + " then\n");
@@ -3548,7 +3611,8 @@ private:
                         if (context.path_specific)
                         {
                             pathSpecificPcs.insert(pc);
-                            recordPathSpecificOperation(*semantic);
+                            recordPathSpecificOperation(*semantic, context);
+                            emitPathSpecificProvenanceComment(*semantic, 4);
                         }
                         const bool controlHandled = pc == block.end;
                         if (!closureConstruction(instruction, *semantic, 4, context))
@@ -3559,12 +3623,21 @@ private:
                     {
                         context.path_specific = true;
                         pathSpecificPcs.insert(pc);
+                        constexpr std::string_view reason = "path-specific proof metadata is incomplete";
+                        recordUnknownOperation(instruction["observational_semantic_operation"], reason, context);
                         unsupportedOperation("observational_semantic_operation",
-                            "path-specific proof metadata is incomplete", 4, context);
+                            reason, 4, context);
                     }
                 }
             }
             transition(block, lastInstruction, 4, context);
+            json blockOperationProvenance = json::array();
+            for (size_t index = firstProvenanceRecord;
+                 index < result.path_specific_operation_provenance.size(); ++index)
+                blockOperationProvenance.push_back(result.path_specific_operation_provenance[index]);
+            json blockUnknownOperations = json::array();
+            for (size_t index = firstUnknownOperation; index < result.unknown_operations.size(); ++index)
+                blockUnknownOperations.push_back(result.unknown_operations[index]);
             result.mapping.push_back({
                 {"prototype", id},
                 {"block", block.id},
@@ -3574,6 +3647,9 @@ private:
                 {"successors", block.successors},
                 {"path_specific", !pathSpecificPcs.empty()},
                 {"path_specific_pcs", pathSpecificPcs},
+                {"path_specific_operation_provenance", std::move(blockOperationProvenance)},
+                {"unknown_operations", std::move(blockUnknownOperations)},
+                {"source_claim", false},
                 {"line_start", firstLine},
                 {"line_end", line > 0 ? line - 1 : 0},
             });

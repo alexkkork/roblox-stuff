@@ -162,6 +162,15 @@ if(TARGET alex_deobfuscator)
 
     if(TARGET rbx_luau_runtime)
         rbx_add_python_test(
+            deobfuscator_luraph_guard_state_trace
+            "conformance;integration;security;subject;deobfuscator"
+            60
+            test_luraph_guard_state_trace.py
+            --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+            --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+        )
+
+        rbx_add_python_test(
             deobfuscator_luraph_guard_path_replay
             "conformance;integration;security;subject;deobfuscator"
             120

@@ -125,6 +125,41 @@ def read_runtime_artifacts(output: pathlib.Path) -> tuple[dict, dict]:
     )
 
 
+def assert_null_caller_evidence_preserved(output: pathlib.Path, report: dict) -> None:
+    diagnostics = report.get("diagnostics") or []
+    require(
+        not any(
+            str(diagnostic.get("message", "")).startswith("payload semantic slicing failed:")
+            for diagnostic in diagnostics
+        ),
+        "explicitly null caller metadata aborted payload semantic slicing",
+    )
+    closure_path = output / "payload_closure_ir.json"
+    reachable_path = output / "payload_reachable_ir.json"
+    require(closure_path.is_file(), "null caller metadata prevented payload closure emission")
+    require(reachable_path.is_file(), "null caller metadata prevented reachable payload emission")
+
+    closure = json.loads(closure_path.read_text(encoding="utf-8"))
+    payload_root = closure.get("payload_root")
+    require(isinstance(payload_root, dict), "payload closure omitted its root evidence")
+    require("bootstrap_activation" in payload_root and payload_root["bootstrap_activation"] is None,
+            "unresolved caller activation was coerced to a numeric value")
+    require("caller_pc" in payload_root and payload_root["caller_pc"] is None,
+            "unresolved caller PC was coerced to a numeric value")
+    require("caller_opcode" in payload_root and payload_root["caller_opcode"] is None,
+            "unresolved caller opcode was coerced to a numeric value")
+
+    reachable = json.loads(reachable_path.read_text(encoding="utf-8"))
+    activation = reachable.get("payload_activation_arguments")
+    require(isinstance(activation, dict), "reachable slicing omitted the payload activation evidence")
+    require("caller_activation" in activation and activation["caller_activation"] is None,
+            "reachable slicing discarded the null caller activation")
+    require("caller_pc" in activation and activation["caller_pc"] is None,
+            "reachable slicing discarded the null caller PC")
+    require("caller_opcode" in activation and activation["caller_opcode"] is None,
+            "reachable slicing discarded the null caller opcode")
+
+
 def semantic_rows(semantic: dict) -> list[dict]:
     return [
         instruction
@@ -281,6 +316,7 @@ def main() -> int:
             args.deobfuscator, root, "valid", trace=refined_trace
         )
         assert_source_withheld(valid_output, valid_report, "valid guard replay")
+        assert_null_caller_evidence_preserved(valid_output, valid_report)
         valid_structure, valid_semantic = read_runtime_artifacts(valid_output)
         replayed = assert_replay_labels(valid_semantic)
         assert_divergent_paths_not_merged(valid_structure, valid_semantic)

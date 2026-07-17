@@ -1366,10 +1366,13 @@ bool testPathSpecificWritesCallAndReturnRenderCleanly()
     }), 0, 4);
 
     bool ok = true;
-    ok &= require(candidate.source.find("registers[2] = 7;") != std::string::npos,
-        "path-specific register write was not rendered");
-    ok &= require(candidate.source.find("(registers[1])[\"answer\"] = registers[2];") != std::string::npos,
-        "path-specific table write was not rendered");
+    ok &= require(candidate.source.find("local recovered_register_2_p2_pc1_op1 = 7") != std::string::npos &&
+            candidate.source.find("registers[2] = recovered_register_2_p2_pc1_op1") != std::string::npos,
+        "path-specific register write was not rendered through a readable synthetic value");
+    ok &= require(candidate.source.find("local recovered_table_p2_pc2_op2 = registers[1]") != std::string::npos &&
+            candidate.source.find("recovered_table_p2_pc2_op2.answer = recovered_table_value_p2_pc2_op2") !=
+                std::string::npos,
+        "path-specific table write was not rendered through readable table roles");
     ok &= require(candidate.source.find("(registers[3])(registers[2]);") != std::string::npos,
         "path-specific call was not rendered");
     ok &= require(candidate.source.find("return 7") != std::string::npos,
@@ -1382,6 +1385,22 @@ bool testPathSpecificWritesCallAndReturnRenderCleanly()
         "stable path-specific return evidence was not verified");
     ok &= require(candidate.unsupported_path_specific_operations == 0,
         "fully described path-specific operations were marked unsupported");
+    ok &= require(candidate.path_specific_operation_provenance.size() == 4 &&
+            candidate.path_specific_operation_provenance[0].value("proof", "") == "complete_observation_set" &&
+            !candidate.path_specific_operation_provenance[0].value("source_claim", true) &&
+            candidate.path_specific_operation_provenance[0]["operation"].value("kind", "") == "register_write",
+        "path-specific operation provenance was not retained with the emitted candidate");
+    bool mappedProvenance = false;
+    for (const json& row : candidate.mapping)
+        if (row.value("prototype", 0) == 2 && row.value("pc_start", 0) == 2)
+            mappedProvenance = !row.value("source_claim", true) &&
+                row.value("path_specific_operation_provenance", json::array()).size() == 1 &&
+                row["path_specific_operation_provenance"][0]["operation"].value("kind", "") == "table_write";
+    ok &= require(mappedProvenance,
+        "table-write provenance was not retained in the serialized block map");
+    ok &= require(candidate.source.find("not a claim of original source") != std::string::npos &&
+            candidate.source.find("not original source") != std::string::npos,
+        "readable path-specific output did not preserve its reconstruction disclaimer");
     return ok;
 }
 
@@ -1622,6 +1641,49 @@ bool testUnsupportedPathSpecificExpressionFailsClosed()
             "unsupported expression was not counted as an incomplete reconstruction");
 }
 
+bool testUnknownPathSpecificOperationPreservesIrAndProvenance()
+{
+    const json opaqueMetadata = {
+        {"trace_id", "activation-17"},
+        {"table_shape", json::array({"alpha", "beta"})},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "future_table_transform"},
+            {"semantic_family", "table_transform"},
+            {"opaque_metadata", opaqueMetadata},
+        }),
+    }), 0);
+
+    bool mappedProvenance = false;
+    for (const json& row : candidate.mapping)
+        if (row.value("prototype", 0) == 2 && row.value("pc_start", 0) == 1)
+        {
+            const json records = row.value("path_specific_operation_provenance", json::array());
+            const json unknown = row.value("unknown_operations", json::array());
+            mappedProvenance = records.size() == 1 && !row.value("source_claim", true) &&
+                records[0]["operation"].value("opaque_metadata", json::object()) == opaqueMetadata &&
+                unknown.size() == 1 &&
+                unknown[0]["operation"].value("opaque_metadata", json::object()) == opaqueMetadata;
+        }
+
+    return require(candidate.source.find(
+               "Path-specific future_table_transform; provenance: complete_observation_set; not original source") !=
+               std::string::npos,
+               "unknown path-specific operation lost its provenance marker") &&
+        require(candidate.source.find("unsupported_semantic_operation(2, 1, \"future_table_transform\"") !=
+                std::string::npos,
+            "unknown path-specific operation was silently discarded") &&
+        require(candidate.unknown_operations.size() == 1 &&
+                candidate.unknown_operations[0]["operation"].value("opaque_metadata", json::object()) == opaqueMetadata &&
+                !candidate.unknown_operations[0].value("source_claim", true),
+            "unknown operation IR was not preserved intact") &&
+        require(candidate.path_specific_operation_provenance.size() == 1 && mappedProvenance,
+            "unknown operation provenance was not preserved in the candidate and block map") &&
+        require(candidate.unsupported_path_specific_operations == 1 && !candidate.fully_rendered(),
+            "unknown path-specific operation did not remain an explicit recovery boundary");
+}
+
 } // namespace
 
 int main()
@@ -1664,6 +1726,7 @@ int main()
     ok &= testVerifiedOpcode112ClosureDescriptorRenders();
     ok &= testCaptureKindThreeRemainsExplicitlyUnsupported();
     ok &= testUnsupportedPathSpecificExpressionFailsClosed();
+    ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
     return ok ? 0 : 1;

@@ -3922,7 +3922,8 @@ size_t retainedLuraphInstructionCount(const luraph::EnvelopeAnalysis& analysis)
     size_t count = 0;
     for (const luraph::ContainerAnalysis& container : analysis.containers)
     {
-        if (container.parse_status != luraph::ContainerParseStatus::Parsed)
+        if (container.parse_status != luraph::ContainerParseStatus::Parsed &&
+            container.parse_status != luraph::ContainerParseStatus::StructuralMetadataRecovered)
             continue;
         for (const luraph::PrototypeMetadata& prototype : container.prototypes)
             count += prototype.instructions.size();
@@ -7299,6 +7300,15 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
     const std::string opcodeTableName(shape->opcode_table->name.value);
     const std::string registersName(registerRole->first->name.value);
     const bool fullTraceEnabled = fullTraceStart > 0 && fullTraceEnd >= fullTraceStart;
+    const auto appendGuardStateCapture = [&](std::string& target) {
+        if (guardNames.empty())
+            return;
+        target += "if __alex_lph_step_enabled then ";
+        for (const std::string& guard : guardNames)
+            target += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
+                quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
+        target += "end;";
+    };
     std::string instrumentation =
         "_G.__vmc=(_G.__vmc or 0)+1;_G.__curAid=__aid;_G.__curPc=" + pcName + ";_G.__curOp=" + opcodeName + ";";
     if (structureDump)
@@ -7343,6 +7353,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
             instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+            appendGuardStateCapture(instrumentation);
             if (!dynamicGuardConditions.empty())
                 instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
             for (const std::string& lane : laneNames)
@@ -7369,14 +7380,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
         instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
-        if (!guardNames.empty())
-        {
-            instrumentation += "if __alex_lph_step_enabled then ";
-            for (const std::string& guard : guardNames)
-                instrumentation += "__alex_lph_pre_guards[#__alex_lph_pre_guards+1]=" +
-                    quoteLuau(guard + "=") + "..__alex_lph_encode_operand(" + guard + ");";
-            instrumentation += "end;";
-        }
+        appendGuardStateCapture(instrumentation);
         if (!dynamicGuardConditions.empty())
             instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
         for (const std::string& lane : laneNames)
@@ -10820,15 +10824,10 @@ json luraphRuntimeSemanticDispatchArtifact(
                         operation["proof"] = "recorded_guard_path_candidate_runtime_validated";
                         operation["runtime_validation"] = *validation;
                         operation["guard_replay_observations"] = observedSite->second.size();
-                        row["observational_semantic_operation"] = std::move(operation);
+                        row["guard_replay_validated_effect"] = std::move(operation);
                         row["guard_path_replayed"] = true;
                         row["guard_replay_validation"] = *validation;
                         ++guardReplaySitesValidated;
-                        ++observationalSemanticLifted;
-                        const std::string family = row["observational_semantic_operation"].value(
-                            "semantic_family", row["observational_semantic_operation"].value("kind", "unknown"));
-                        observationalOperationCounts[family] =
-                            observationalOperationCounts.value(family, size_t(0)) + 1;
                     }
                     else
                     {
@@ -11594,24 +11593,30 @@ json luraphPayloadClosureArtifact(
         if (sharedActivation && confirmed != runtime.activations.end())
         {
             const json& activation = confirmed->second;
-            const int64_t callerActivation = activation.value("caller_activation", int64_t(-1));
+            const json callerActivationEvidence = activation.value("caller_activation", json(nullptr));
+            const std::optional<int64_t> callerActivation = callerActivationEvidence.is_number_integer()
+                ? std::optional<int64_t>(callerActivationEvidence.get<int64_t>()) : std::nullopt;
+            const json callerPcEvidence = activation.value("caller_pc", json(nullptr));
+            const json callerOpcodeEvidence = activation.value("caller_opcode", json(nullptr));
             uint64_t bootstrapPrototype = 0;
-            if (callerActivation >= 0)
-                if (auto caller = runtime.activations.find(static_cast<uint64_t>(callerActivation)); caller != runtime.activations.end())
+            if (callerActivation && *callerActivation >= 0)
+                if (auto caller = runtime.activations.find(static_cast<uint64_t>(*callerActivation)); caller != runtime.activations.end())
                     bootstrapPrototype = caller->second.value("prototype", uint64_t(0));
             payloadRootArtifact = {
-                {"bootstrap_activation", callerActivation >= 0 ? json(callerActivation) : json(nullptr)},
+                {"bootstrap_activation", callerActivation && *callerActivation >= 0
+                    ? json(*callerActivation) : json(nullptr)},
                 {"bootstrap_prototype", bootstrapPrototype > 0 ? json(bootstrapPrototype) : json(nullptr)},
                 {"payload_activation", confirmedActivation},
-                {"payload_prototype", activation.value("prototype", uint64_t(0))},
-                {"caller_pc", activation.value("caller_pc", int64_t(-1))},
-                {"caller_opcode", activation.value("caller_opcode", int64_t(-1))},
+                {"payload_prototype", activation.value("prototype", json(nullptr))},
+                {"caller_pc", callerPcEvidence},
+                {"caller_opcode", callerOpcodeEvidence},
                 {"evidence", "confirmed_payload_call_activation"},
                 {"closure_descriptor", nullptr},
             };
-            if (bootstrapPrototype > 0)
+            if (bootstrapPrototype > 0 && callerPcEvidence.is_number_integer() &&
+                callerPcEvidence.get<int64_t>() >= 0)
                 if (auto descriptor = runtime.closure_descriptors.find({
-                        bootstrapPrototype, static_cast<size_t>(std::max<int64_t>(0, activation.value("caller_pc", int64_t(-1))))});
+                        bootstrapPrototype, static_cast<size_t>(callerPcEvidence.get<int64_t>())});
                     descriptor != runtime.closure_descriptors.end())
                     payloadRootArtifact["closure_descriptor"] = descriptor->second;
         }
@@ -13772,7 +13777,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeObservationalUnresolved = 0;
     size_t runtimeGuardedCandidatesValidated = 0;
     size_t runtimeGuardedCandidatesRejected = 0;
+    size_t runtimeGuardReplaySitesAttached = 0;
     size_t runtimeGuardReplaySitesValidated = 0;
+    size_t runtimeGuardReplaySitesRejected = 0;
     size_t runtimeGuardReplaySitesDivergent = 0;
     size_t runtimeUnobservedInstructions = 0;
     json runtimeObservationalOperationCounts = json::object();
@@ -13814,6 +13821,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "guarded_candidates_rejected", size_t(0));
                     runtimeGuardReplaySitesValidated = runtimeSemanticDocument->value(
                         "guard_replay_sites_validated", size_t(0));
+                    runtimeGuardReplaySitesAttached = runtimeSemanticDocument->value(
+                        "guard_replay_sites_attached", size_t(0));
+                    runtimeGuardReplaySitesRejected = runtimeSemanticDocument->value(
+                        "guard_replay_sites_rejected", size_t(0));
                     runtimeGuardReplaySitesDivergent = runtimeSemanticDocument->value(
                         "guard_replay_sites_divergent", size_t(0));
                     runtimeUnobservedInstructions = runtimeSemanticDocument->value("unobserved_instructions", size_t(0));
@@ -13863,6 +13874,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"guarded_candidates_validated", runtimeGuardedCandidatesValidated},
                 {"guarded_candidates_rejected", runtimeGuardedCandidatesRejected},
                 {"guard_replay_sites_validated", runtimeGuardReplaySitesValidated},
+                {"guard_replay_sites_attached", runtimeGuardReplaySitesAttached},
+                {"guard_replay_sites_rejected", runtimeGuardReplaySitesRejected},
                 {"guard_replay_sites_divergent", runtimeGuardReplaySitesDivergent},
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},

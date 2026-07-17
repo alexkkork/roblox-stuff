@@ -76,6 +76,7 @@ struct ClosureTargetShape
     size_t source_pc = 0;
     size_t target_instruction_count = 0;
     std::vector<CaptureDescriptorShape> target_captures;
+    bool target_captures_complete = false;
 
     bool operator==(const ClosureTargetShape&) const = default;
 };
@@ -99,7 +100,9 @@ struct PrototypeStructuralFingerprint
     std::vector<InstructionShape> opcode_lanes;
     uint64_t opcode_lane_digest = 0;
     std::vector<CaptureDescriptorShape> captures;
+    bool captures_complete = false;
     std::vector<ClosureTargetShape> closure_targets;
+    bool closure_targets_complete = false;
     uint64_t digest = 0;
 
     bool operator==(const PrototypeStructuralFingerprint&) const = default;
@@ -126,6 +129,8 @@ struct StaticPrototypeShape
 struct StaticPrototypeIndex
 {
     bool valid = false;
+    bool graph_complete = false;
+    bool root_graph_validated = false;
     std::optional<size_t> root_metadata_index;
     std::vector<StaticPrototypeShape> prototypes;
     std::string diagnostic;
