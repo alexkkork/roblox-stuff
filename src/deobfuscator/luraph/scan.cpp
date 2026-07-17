@@ -2440,6 +2440,8 @@ bool parseLphDollarStructure(
     if (!header.readByte(poolMode, poolModeSpan))
         return false;
     const size_t constantsBegin = header.offset();
+    size_t framingAttempts = 0;
+    const size_t maxFramingAttempts = std::max<size_t>(4096, std::min<size_t>(limits.max_container_instructions, 1000000));
 
     for (size_t constantBiasIndex = 0; constantBiasIndex < biases.size(); ++constantBiasIndex)
     {
@@ -2464,6 +2466,8 @@ bool parseLphDollarStructure(
                 {
                     if (instructionBiasIndex == constantBiasIndex || instructionBiasIndex == prototypeBiasIndex)
                         continue;
+                    if (++framingAttempts > maxFramingAttempts)
+                        return false;
                     ContainerAnalysis validation;
                     if (!parseLphDollarPrototypeSection(bytes, sectionBegin, biases[prototypeBiasIndex], biases[instructionBiasIndex],
                             validation, limits, false))
@@ -2514,18 +2518,20 @@ bool parseLphDollarStructure(
                     }
                     const SourceRange prototypeEvidence = schema.root.evidence_range;
                     size_t laneOrder = schema.record_lanes.size();
-                    const auto addLane = [&](RecordLaneKind kind, bool repeated) {
+                    const auto addLane = [&](RecordLaneKind kind, bool repeated, std::optional<size_t> readerSlot) {
+                        if (std::any_of(schema.record_lanes.begin(), schema.record_lanes.end(), [&](const RecordLaneMetadata& lane) {
+                                return lane.kind == kind;
+                            }))
+                            return;
                         schema.record_lanes.push_back(RecordLaneMetadata{
-                            kind, laneOrder++, schema.variable_integer_reader_slot, std::nullopt, repeated, true, prototypeEvidence});
+                            kind, laneOrder++, readerSlot, std::nullopt, repeated, true, prototypeEvidence});
                     };
-                    addLane(RecordLaneKind::DescriptorCount, true);
-                    addLane(RecordLaneKind::DescriptorRecord, true);
-                    addLane(RecordLaneKind::PrototypeMetadata, true);
-                    schema.record_lanes.push_back(RecordLaneMetadata{
-                        RecordLaneKind::RangeMapCount, laneOrder++, std::nullopt, std::nullopt, true, true, prototypeEvidence});
-                    schema.record_lanes.push_back(RecordLaneMetadata{
-                        RecordLaneKind::RangeMapRecord, laneOrder++, std::nullopt, std::nullopt, true, true, prototypeEvidence});
-                    addLane(RecordLaneKind::InstructionWords, true);
+                    addLane(RecordLaneKind::DescriptorCount, true, schema.variable_integer_reader_slot);
+                    addLane(RecordLaneKind::DescriptorRecord, true, schema.variable_integer_reader_slot);
+                    addLane(RecordLaneKind::PrototypeMetadata, true, schema.variable_integer_reader_slot);
+                    addLane(RecordLaneKind::RangeMapCount, true, std::nullopt);
+                    addLane(RecordLaneKind::RangeMapRecord, true, std::nullopt);
+                    addLane(RecordLaneKind::InstructionWords, true, schema.variable_integer_reader_slot);
                     schema.root.selector_value_known = true;
                     return true;
                 }

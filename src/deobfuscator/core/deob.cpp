@@ -9038,6 +9038,12 @@ json luraphRuntimeSemanticDispatchArtifact(
     effectClassified = 0;
     unresolved = 0;
     semanticLifted = 0;
+    size_t declaredInstructionCount = 0;
+    for (const auto& [prototypeId, prototype] : trace.prototypes)
+    {
+        (void)prototypeId;
+        declaredInstructionCount += prototype.declared_instruction_count;
+    }
     std::map<int64_t, json> handlers;
     if (catalog.available && catalog.document.contains("handlers"))
     {
@@ -9051,6 +9057,12 @@ json luraphRuntimeSemanticDispatchArtifact(
     std::map<RuntimeSite, std::vector<json>> returnsBySite;
     std::map<RuntimeSite, std::vector<json>> childActivationsBySite;
     std::map<RuntimeSite, std::set<int64_t>> observedOpcodesBySite;
+    size_t writeStepRows = 0;
+    size_t writeOriginRows = 0;
+    size_t writeOriginDestinations = 0;
+    size_t uniqueRegisterOrigins = 0;
+    size_t uniqueArgumentOrigins = 0;
+    size_t ambiguousWriteOrigins = 0;
     for (const json& observed : trace.steps)
     {
         const uint64_t activation = observed.value("activation", uint64_t(0));
@@ -9065,6 +9077,31 @@ json luraphRuntimeSemanticDispatchArtifact(
         observationsBySite[site].push_back(observed);
         if (observed.contains("opcode") && observed["opcode"].is_number_integer())
             observedOpcodesBySite[site].insert(observed["opcode"].get<int64_t>());
+        const json writes = observed.value("register_writes", json::array());
+        if (writes.is_array() && !writes.empty())
+            ++writeStepRows;
+        const json origins = observed.value("write_origins", json::object());
+        if (origins.is_object() && !origins.empty())
+        {
+            ++writeOriginRows;
+            writeOriginDestinations += origins.size();
+            for (auto origin = origins.begin(); origin != origins.end(); ++origin)
+            {
+                if (!origin.value().is_array() || origin.value().size() != 1 ||
+                    !origin.value()[0].is_object())
+                {
+                    ++ambiguousWriteOrigins;
+                    continue;
+                }
+                const std::string kind = origin.value()[0].value("kind", "");
+                if (kind == "register")
+                    ++uniqueRegisterOrigins;
+                else if (kind == "argument")
+                    ++uniqueArgumentOrigins;
+                else
+                    ++ambiguousWriteOrigins;
+            }
+        }
     }
     for (const LuraphVmEvent& event : trace.vm_events)
     {
@@ -9482,8 +9519,10 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"scope", "reachable-prototypes-observed-offline"},
         {"handler_leaf_selection_complete", catalog.resolved == 256},
         {"effect_classification_complete", unresolved == 0},
-        {"semantic_lifting_complete", semanticLifted == effectClassified + unresolved},
+        {"semantic_lifting_complete", declaredInstructionCount > 0 && semanticLifted == declaredInstructionCount},
         {"instruction_count", effectClassified + unresolved},
+        {"declared_instruction_count", declaredInstructionCount},
+        {"observed_instruction_count", effectClassified + unresolved},
         {"effect_classified_instructions", effectClassified},
         {"unresolved_instructions", unresolved},
         {"semantic_lifted_instructions", semanticLifted},
@@ -9493,10 +9532,25 @@ json luraphRuntimeSemanticDispatchArtifact(
         {"observational_sites", observationalSites.size()},
         {"observational_semantic_lifted", observationalSemanticLifted},
         {"observational_semantic_unresolved", observationalSites.size() - observationalSemanticLifted},
-        {"unobserved_instructions", effectClassified + unresolved > observationalSites.size()
+        {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
+            ? declaredInstructionCount - observationalSites.size() : size_t(0)},
+        {"structurally_missing_instructions", declaredInstructionCount > effectClassified + unresolved
+            ? declaredInstructionCount - (effectClassified + unresolved) : size_t(0)},
+        {"captured_but_unexecuted_instructions", effectClassified + unresolved > observationalSites.size()
             ? effectClassified + unresolved - observationalSites.size() : size_t(0)},
         {"observational_operation_counts", std::move(observationalOperationCounts)},
         {"observational_path_specific", true},
+        {"write_origin_evidence", {
+            {"available", writeOriginRows > 0},
+            {"step_rows", trace.steps.size()},
+            {"write_step_rows", writeStepRows},
+            {"origin_rows", writeOriginRows},
+            {"origin_destinations", writeOriginDestinations},
+            {"unique_register_origins", uniqueRegisterOrigins},
+            {"unique_argument_origins", uniqueArgumentOrigins},
+            {"ambiguous_origins", ambiguousWriteOrigins},
+            {"absent_from_all_steps", !trace.steps.empty() && writeOriginRows == 0},
+        }},
         {"runtime_opcode_overrides", runtimeOpcodeOverrides},
         {"runtime_operand_overrides", runtimeOperandOverrides},
         {"observed_semantic_coverage", semanticLifted + traceSpecialized},
@@ -12186,6 +12240,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     size_t runtimeObservationalUnresolved = 0;
     size_t runtimeUnobservedInstructions = 0;
     json runtimeObservationalOperationCounts = json::object();
+    json runtimeWriteOriginEvidence = json::object();
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -12218,6 +12273,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     runtimeUnobservedInstructions = runtimeSemanticDocument->value("unobserved_instructions", size_t(0));
                     runtimeObservationalOperationCounts = runtimeSemanticDocument->value(
                         "observational_operation_counts", json::object());
+                    runtimeWriteOriginEvidence = runtimeSemanticDocument->value(
+                        "write_origin_evidence", json::object());
                 }
                 catch (const std::exception& error)
                 {
@@ -12260,11 +12317,20 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
+                {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved_instructions", runtimeUnresolved},
                 {"semantic_lifted_instructions", runtimeSemanticLifted},
                 {"semantic_unresolved_instructions", decodedDeclaredInstructions - runtimeSemanticLifted},
                 {"semantic_lifting_complete", decodedDeclaredInstructions > 0 && runtimeSemanticLifted == decodedDeclaredInstructions},
             });
+            if (runtimeWriteOriginEvidence.value("absent_from_all_steps", false))
+                report["diagnostics"].push_back({
+                    {"stage", "semantic_classify"},
+                    {"severity", "info"},
+                    {"code", "luraph_write_origin_evidence_missing"},
+                    {"message", "This trace predates origin-aware step rows. Move and argument-copy semantics remain unresolved until an evidence-only probe records write_origins."},
+                    {"details", runtimeWriteOriginEvidence},
+                });
             report["diagnostics"].push_back({
                 {"stage", "runtime_decode"},
                 {"severity", decodedComplete ? "info" : "warning"},
@@ -12297,7 +12363,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             report["diagnostics"].push_back({
                 {"stage", "runtime_decode"},
                 {"severity", runtimeSchemaComplete ? "info" : "warning"},
-                {"code", runtimeSchemaComplete ? "luraph_runtime_schema_recovered" : "luraph_runtime_schema_partial"},
+                {"code", "luraph_runtime_schema_bypass"},
                 {"message", runtimeSchemaComplete
                     ? "The runtime exposed a complete prototype and instruction corpus for this bounded execution."
                     : "The runtime exposed only a partial prototype or instruction corpus; retained rows remain useful evidence but are not reported as complete."},
@@ -12453,6 +12519,16 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     if (runtimeStructure && dynamicTrace && dynamicTrace->calls.empty() && !payloadRoot && !runtimeStructure->steps.empty())
     {
         guardHotspotDocument = luraphGuardHotspotArtifact(*runtimeStructure);
+        (*guardHotspotDocument)["static_semantic_lifted"] = runtimeSemanticLifted;
+        (*guardHotspotDocument)["static_semantic_unresolved"] =
+            runtimeDeclaredInstructions - runtimeSemanticLifted;
+        (*guardHotspotDocument)["observational_sites"] = runtimeObservationalSites;
+        (*guardHotspotDocument)["observational_semantic_lifted"] = runtimeObservationalLifted;
+        (*guardHotspotDocument)["observational_semantic_unresolved"] = runtimeObservationalUnresolved;
+        (*guardHotspotDocument)["unobserved_instructions"] = runtimeUnobservedInstructions;
+        (*guardHotspotDocument)["observational_operation_counts"] = runtimeObservationalOperationCounts;
+        (*guardHotspotDocument)["observational_path_specific"] = true;
+        (*guardHotspotDocument)["write_origin_evidence"] = runtimeWriteOriginEvidence;
         writeJson(guardHotspotPath, *guardHotspotDocument);
         report["passes"].push_back({
             {"stage", "guard_hotspot"},
@@ -12461,7 +12537,14 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"observed_activations", (*guardHotspotDocument)["observed_activations"]},
             {"observed_prototypes", (*guardHotspotDocument)["observed_prototypes"]},
             {"semantic_lifted", runtimeSemanticLifted},
-            {"semantic_unresolved", runtimeStructure->instruction_count - runtimeSemanticLifted},
+            {"semantic_unresolved", runtimeDeclaredInstructions - runtimeSemanticLifted},
+            {"observational_sites", runtimeObservationalSites},
+            {"observational_semantic_lifted", runtimeObservationalLifted},
+            {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+            {"unobserved_instructions", runtimeUnobservedInstructions},
+            {"observational_operation_counts", runtimeObservationalOperationCounts},
+            {"observational_path_specific", true},
+            {"write_origin_evidence", runtimeWriteOriginEvidence},
         });
         report["diagnostics"].push_back({
             {"stage", "trace"},
@@ -12986,7 +13069,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"trace_specialized_is_path_specific", true},
                     {"unresolved", runtimeUnresolved},
                     {"semantic_lifted", runtimeSemanticLifted},
-                    {"semantic_unresolved", runtimeStructure ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(0)}}},
+                    {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)}}},
                 {"payload_closure", {{"available", true},
                     {"activations", payloadClosureMetrics->activations},
                     {"prototypes", payloadClosureMetrics->prototypes},
@@ -13060,8 +13143,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             ? runtimeStructure->prototypes.size() : analysis.container_metrics.prototype_count;
         const size_t structuralInstructionCount = runtimeDecoded
             ? runtimeStructure->instruction_count : retainedInstructions;
-        const bool reachedSemanticsComplete = runtimeStructure &&
-            runtimeSemanticLifted == runtimeStructure->instruction_count;
+        const bool reachedSemanticsComplete = runtimeSchemaComplete &&
+            runtimeSemanticLifted == runtimeDeclaredInstructions;
         report["passes"].push_back({
             {"stage", "decode"},
             {"ok", true},
@@ -13111,8 +13194,15 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"attempted", runtimeDecoded},
             {"scope", runtimeDecoded ? "runtime-decoded-prototypes" : "decoded-container"},
             {"semantic_lifted", runtimeSemanticLifted},
-            {"semantic_unresolved", runtimeStructure
-                ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(retainedInstructions)},
+            {"semantic_unresolved", runtimeDecoded
+                ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(retainedInstructions)},
+            {"observational_sites", runtimeObservationalSites},
+            {"observational_semantic_lifted", runtimeObservationalLifted},
+            {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+            {"unobserved_instructions", runtimeUnobservedInstructions},
+            {"observational_operation_counts", runtimeObservationalOperationCounts},
+            {"observational_path_specific", true},
+            {"write_origin_evidence", runtimeWriteOriginEvidence},
             {"reason", reachedSemanticsComplete
                 ? json(dynamicTrace && dynamicTrace->calls.empty() && !payloadRoot
                     ? "payload_call_not_reached" : "source_structure_not_reconstructed")
@@ -13125,7 +13215,9 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"code", parsedContainer ? "luraph_container_decoded" : "luraph_runtime_container_decoded"},
             {"message", parsedContainer
                 ? "Strict LPH& framing was decoded and its bounded constant and prototype records were parsed."
-                : "The LPH$ carrier was decoded, then the protected runtime deserializer exposed its complete prototype and instruction objects offline."},
+                : runtimeSchemaComplete
+                    ? "The LPH$ carrier was decoded, then the protected runtime deserializer exposed a complete prototype and instruction corpus offline."
+                    : "The LPH$ carrier was decoded, but the protected runtime deserializer exposed only a partial prototype or instruction corpus offline."},
             {"details", {{"containers", analysis.container_metrics.parsed_count},
                 {"decoded_bytes", analysis.container_metrics.decoded_bytes},
                 {"prototypes", structuralPrototypeCount}, {"instructions", structuralInstructionCount}}},
@@ -13150,7 +13242,16 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"severity", "warning"},
             {"code", "luraph_semantic_lift_incomplete"},
             {"message", "The decoded instruction lanes are available, but opcode handlers have not all been lifted into semantic operations; no source was emitted."},
-            {"details", {{"unresolved_instruction_records", structuralInstructionCount - runtimeSemanticLifted}}},
+            {"details", {
+                {"static_semantic_lifted", runtimeSemanticLifted},
+                {"static_semantic_unresolved", runtimeDecoded
+                    ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(structuralInstructionCount)},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_path_specific", true},
+            }},
         });
     }
     else if (decodedContainer)
@@ -13228,10 +13329,15 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"stage", "guard_hotspot"},
             {"severity", "warning"},
             {"code", "luraph_payload_guard_not_cleared"},
-            {"message", "All reached VM instructions were lifted, but the bounded offline run remained inside a repeated integrity/environment guard graph before entering the payload."},
+            {"message", "The bounded offline run remained inside a repeated integrity/environment guard graph before entering the payload. Path-specific observational classifications were retained separately from unresolved static semantics."},
             {"details", {{"observed_steps", (*guardHotspotDocument)["observed_steps"]},
                 {"observed_activations", (*guardHotspotDocument)["observed_activations"]},
-                {"observed_prototypes", (*guardHotspotDocument)["observed_prototypes"]}}},
+                {"observed_prototypes", (*guardHotspotDocument)["observed_prototypes"]},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_path_specific", true}}},
         });
     }
     if (!inputParsed)
@@ -13665,9 +13771,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
+                {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeDecoded ? json(runtimeObservedInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_declared_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"static_container_instruction_records", retainedInstructions},
@@ -13700,7 +13807,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"constants", {{"total", nullptr}, {"decoded", 0}}},
             {"payload_decoded", runtimeDecoded},
             {"container_decoded", decodedContainer},
-            {"runtime_prototype_schema_recovered", runtimeSchemaComplete},
+            {"runtime_prototype_schema_recovered", runtimeDecoded},
+            {"runtime_prototype_schema_complete", runtimeSchemaComplete},
             {"static_serialized_schema_recovered", false},
             {"semantic_lifted", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions},
             {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions},
@@ -13719,9 +13827,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"trace_specialized_is_path_specific", true},
+                {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved", runtimeUnresolved},
                 {"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeDecoded ? json(runtimeObservedInstructions - runtimeSemanticLifted) : json(0)},
+                {"semantic_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_declared_unresolved", runtimeDecoded ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
                 {"semantic_lifting_complete", runtimeDecoded && runtimeSemanticLifted == runtimeDeclaredInstructions}}},
             {"unresolved_operations", runtimeDecoded
@@ -13793,8 +13902,15 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
         {"observed_activations", (*guardHotspotDocument)["observed_activations"]},
         {"observed_prototypes", (*guardHotspotDocument)["observed_prototypes"]},
         {"semantic_lifted", runtimeSemanticLifted},
-        {"semantic_unresolved", runtimeStructure
-            ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(0)},
+        {"semantic_unresolved", runtimeDecoded
+            ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+        {"observational_sites", runtimeObservationalSites},
+        {"observational_semantic_lifted", runtimeObservationalLifted},
+        {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+        {"unobserved_instructions", runtimeUnobservedInstructions},
+        {"observational_operation_counts", runtimeObservationalOperationCounts},
+        {"observational_path_specific", true},
+        {"write_origin_evidence", runtimeWriteOriginEvidence},
     }) : json({{"available", false}});
     report["verification"] = {
         {"input_parsed", inputParsed},
@@ -13896,15 +14012,22 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {{"prototypes", runtimeDecoded ? json(runtimeStructure->prototypes.size()) : json(analysis.container_metrics.prototype_count)},
                 {"instructions", runtimeDecoded ? json(runtimeStructure->instruction_count) : json(retainedInstructions)},
                 {"semantic_lifted", false}});
-        const bool reachedSemanticsComplete = runtimeStructure &&
-            runtimeSemanticLifted == runtimeStructure->instruction_count;
+        const bool reachedSemanticsComplete = runtimeSchemaComplete &&
+            runtimeSemanticLifted == runtimeDeclaredInstructions;
         publishProgress(options, "lift", reachedSemanticsComplete ? "done" : "failed",
             reachedSemanticsComplete
                 ? "Every instruction in the reached Luraph runtime prototypes was semantically classified"
                 : "Decoded Luraph instructions still need randomized opcode-handler semantics",
             {{"semantic_lifted", runtimeSemanticLifted},
-                {"semantic_unresolved", runtimeStructure
-                    ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(retainedInstructions)},
+                {"semantic_unresolved", runtimeDecoded
+                    ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(retainedInstructions)},
+                {"observational_sites", runtimeObservationalSites},
+                {"observational_semantic_lifted", runtimeObservationalLifted},
+                {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                {"unobserved_instructions", runtimeUnobservedInstructions},
+                {"observational_operation_counts", runtimeObservationalOperationCounts},
+                {"observational_path_specific", true},
+                {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"source_emitted", false}});
         if (guardHotspotDocument)
             publishProgress(options, "guard_hotspot", "failed", "Execution remained inside the pre-payload integrity and environment guard graph",
@@ -13912,8 +14035,15 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     {"observed_activations", (*guardHotspotDocument)["observed_activations"]},
                     {"observed_prototypes", (*guardHotspotDocument)["observed_prototypes"]},
                     {"semantic_lifted", runtimeSemanticLifted},
-                    {"semantic_unresolved", runtimeStructure
-                        ? json(runtimeStructure->instruction_count - runtimeSemanticLifted) : json(0)}});
+                    {"semantic_unresolved", runtimeDecoded
+                        ? json(runtimeDeclaredInstructions - runtimeSemanticLifted) : json(0)},
+                    {"observational_sites", runtimeObservationalSites},
+                    {"observational_semantic_lifted", runtimeObservationalLifted},
+                    {"observational_semantic_unresolved", runtimeObservationalUnresolved},
+                    {"unobserved_instructions", runtimeUnobservedInstructions},
+                    {"observational_operation_counts", runtimeObservationalOperationCounts},
+                    {"observational_path_specific", true},
+                    {"write_origin_evidence", runtimeWriteOriginEvidence}});
         if (options.mode == "disassemble")
         {
             report["status"] = "disassembled";

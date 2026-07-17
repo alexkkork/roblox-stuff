@@ -304,6 +304,81 @@ std::string luaAuthReaderRoleFixture(std::string_view carrierLiteral)
     return source;
 }
 
+struct StructuralDollarContainer
+{
+    std::vector<unsigned char> decoded;
+    std::string carrier;
+    size_t constants_begin = 0;
+    size_t prototypes_begin = 0;
+};
+
+StructuralDollarContainer structuralDollarContainer()
+{
+    constexpr uint64_t constantBias = 101;
+    constexpr uint64_t prototypeBias = 203;
+    constexpr uint64_t instructionBias = 307;
+    StructuralDollarContainer fixture;
+    appendUleb(fixture.decoded, constantBias + 2);
+    fixture.decoded.push_back(0x5a);
+    fixture.constants_begin = fixture.decoded.size();
+    // Two opaque constant records. Their tags and payload meanings are
+    // intentionally not part of the scanner's structural claim.
+    fixture.decoded.insert(fixture.decoded.end(), {0x21, 0xa1, 0x42, 0xb2});
+    fixture.prototypes_begin = fixture.decoded.size();
+
+    appendUleb(fixture.decoded, prototypeBias + 2);
+
+    appendUleb(fixture.decoded, 1);
+    appendUleb(fixture.decoded, 6);
+    appendUleb(fixture.decoded, 7);
+    appendUleb(fixture.decoded, 8);
+    appendLittle(fixture.decoded, 1, 4);
+    appendLittle(fixture.decoded, 1, 4);
+    appendLittle(fixture.decoded, 10, 4);
+    appendLittle(fixture.decoded, 20, 4);
+    appendUleb(fixture.decoded, instructionBias + 2);
+    for (const std::array<int64_t, 4>& words : std::array{
+             std::array<int64_t, 4>{5, 1, -2, 3},
+             std::array<int64_t, 4>{6, 4, 5, -6}})
+        for (int64_t word : words)
+            appendUleb(fixture.decoded, signedFold(word));
+
+    appendUleb(fixture.decoded, 0);
+    appendUleb(fixture.decoded, 9);
+    appendUleb(fixture.decoded, 10);
+    appendLittle(fixture.decoded, 0, 4);
+    appendUleb(fixture.decoded, instructionBias + 1);
+    for (int64_t word : std::array<int64_t, 4>{7, -8, 9, 10})
+        appendUleb(fixture.decoded, signedFold(word));
+
+    appendUleb(fixture.decoded, 2);
+    fixture.decoded.insert(fixture.decoded.end(), {0xde, 0xad, 0xbe});
+    while (fixture.decoded.size() % 4 != 0)
+        fixture.decoded.push_back(0xef);
+    fixture.carrier = radix85DollarCarrier(fixture.decoded);
+    return fixture;
+}
+
+std::string luaAuthStructuralSchemaFixture(std::string_view carrierLiteral)
+{
+    std::string source = "la_code=271828182;la_script_id='structural_schema_fixture'\n";
+    source += "--[[ LuaAuth protected loader. https://luaauth.com ]]\n\n";
+    source += "return({P=function(self)local state={} local runtime=buffer local words={1,2,3,4,5,6,7,8,9} ";
+    source += "state[7]=buffer.readu8 state[8]=buffer.readi16 state[11]=buffer.readu16 ";
+    source += "state[12]=buffer.readi32 state[13]=buffer.readu32 state[14]=buffer.readf32 ";
+    source += "state[15]=buffer.readf64 state[49]=buffer.readstring ";
+    source += "state[42]=function()return 0 end ";
+    source += "state[50]=function()local byte,total,factor=0,0,1 repeat byte=state[42]() ";
+    source += "total+=(byte>127 and byte-128 or byte)*factor factor*=128 until byte<=127 return total end ";
+    source += "local function constants()local count=state[50]()-101 if state[42]()~=0 then return end ";
+    source += "for index=1,count do local tag=state[42]() if tag<=12 then elseif tag<=34 then elseif tag<=56 then ";
+    source += "elseif tag<=78 then elseif tag<=90 then elseif tag<=123 then elseif tag<=210 then end end end ";
+    source += "local function prototypes()local count=state[50]()-203 local instructionCount=state[50]()-307 return count+instructionCount end ";
+    source += "local prototypeTable={} local root=prototypeTable[state[50]()] constants() prototypes() ";
+    source += "return function(...)return root,... end end,payload=" + std::string(carrierLiteral) + "}):P()(...);";
+    return source;
+}
+
 std::string fixture(std::string_view version)
 {
     std::string source = "-- This file was protected using Luraph Obfuscator v" + std::string(version) + " [https://lura.ph/]\nreturn({";
@@ -493,6 +568,73 @@ int main()
         "LPH$ aggregate metrics claim randomized tag or key schedule records were parsed");
     ok &= require(hasDiagnostic(schemaShapedDollar, "LPH_DOLLAR_SCHEMA_UNSUPPORTED"),
         "schema-shaped LPH$ input did not retain its randomized-schema boundary");
+
+    const StructuralDollarContainer structuralDollarFixture = structuralDollarContainer();
+    const luraph::EnvelopeAnalysis structuralDollar = luraph::analyzeEnvelope(
+        luaAuthStructuralSchemaFixture(longCarrierLiteral(structuralDollarFixture.carrier)));
+    ok &= require(structuralDollar.family_kind == luraph::FamilyKind::LuaAuthLphDollar &&
+                      structuralDollar.support_level == luraph::SupportLevel::StructuralSchemaRecovered,
+        "verified LPH$ structural schema was not promoted to family support");
+    ok &= require(structuralDollar.lph_dollar_schema.detected &&
+                      structuralDollar.lph_dollar_schema.reader_bindings_verified &&
+                      structuralDollar.lph_dollar_schema.variable_integer_reader_verified &&
+                      structuralDollar.lph_dollar_schema.scalar_byte_order == luraph::ByteOrder::LittleEndian,
+        "LPH$ wrapper reader/schema evidence was not retained");
+    ok &= require(structuralDollar.container_metrics.structural_count == 1 &&
+                      structuralDollar.container_metrics.parsed_count == 0 &&
+                      structuralDollar.container_metrics.failure_count == 0,
+        "LPH$ structural parse metrics crossed the semantic parse boundary");
+    ok &= require(structuralDollar.containers.size() == 1, "LPH$ structural container is missing");
+    if (structuralDollar.containers.size() == 1)
+    {
+        const luraph::ContainerAnalysis& parsed = structuralDollar.containers.front();
+        ok &= require(parsed.parse_status == luraph::ContainerParseStatus::StructuralMetadataRecovered,
+            "verified LPH$ structural records were not parsed");
+        ok &= require(parsed.transport_byte_order == luraph::ByteOrder::LittleEndian &&
+                          parsed.constant_count == 2 && parsed.prototype_count == 2 &&
+                          parsed.instruction_count == 3 && parsed.descriptor_count == 1,
+            "LPH$ count or byte-order metadata is incorrect");
+        ok &= require(parsed.constants.empty() && parsed.randomized_tag_semantics &&
+                          !parsed.tag_semantic_mapping_recovered,
+            "LPH$ randomized tags were assigned unproven constant meanings");
+        ok &= require(parsed.constant_pool_mode == 0x5a &&
+                          parsed.constants_span.begin == structuralDollarFixture.constants_begin &&
+                          parsed.constants_span.end == structuralDollarFixture.prototypes_begin,
+            "LPH$ constant envelope span is incorrect");
+        ok &= require(parsed.constant_count_span.end == parsed.constant_pool_mode_span.begin &&
+                          parsed.constant_pool_mode_span.end == parsed.constants_span.begin &&
+                          parsed.constants_span.end == parsed.prototype_count_span.begin &&
+                          parsed.prototype_count_span.end == parsed.prototypes_span.begin &&
+                          parsed.prototypes_span.end == parsed.root_selector_span.begin &&
+                          parsed.root_selector_span.end == parsed.trailer_span.begin &&
+                          parsed.trailer_span.end == parsed.decoded_data.size(),
+            "LPH$ structural lane spans are not contiguous");
+        ok &= require(parsed.root_selector == 2 && parsed.prototypes.size() == 2,
+            "LPH$ one-based root or prototype metadata is incorrect");
+        if (parsed.prototypes.size() == 2)
+        {
+            ok &= require(parsed.prototypes[0].descriptor_count == 1 &&
+                              parsed.prototypes[0].range_map_count == 1 &&
+                              parsed.prototypes[0].instruction_count == 2 &&
+                              parsed.prototypes[1].descriptor_count == 0 &&
+                              parsed.prototypes[1].range_map_count == 0 &&
+                              parsed.prototypes[1].instruction_count == 1,
+                "LPH$ prototype subrecords are incorrect");
+        }
+    }
+    ok &= require(structuralDollar.lph_dollar_schema.tags.randomized &&
+                      !structuralDollar.lph_dollar_schema.tags.semantic_mapping_recovered &&
+                      structuralDollar.lph_dollar_schema.tags.decision_boundaries.size() == 7,
+        "LPH$ randomized tag decision schedule is incorrect");
+    ok &= require(structuralDollar.lph_dollar_schema.keys.candidate_present &&
+                      !structuralDollar.lph_dollar_schema.keys.applied_to_container_proven &&
+                      !structuralDollar.lph_dollar_schema.keys.semantic_mapping_recovered,
+        "opaque wrapper control words were presented as a proven key schedule");
+    ok &= require(structuralDollar.lph_dollar_schema.root.selector_value_known,
+        "LPH$ validated root selector was not reflected in schema metadata");
+    ok &= require(hasDiagnostic(structuralDollar, "LPH_DOLLAR_SCHEMA_BOUNDARY_ADVANCED") &&
+                      hasDiagnostic(structuralDollar, "LPH_DOLLAR_CONSTANT_TAGS_OPAQUE"),
+        "LPH$ structural boundary diagnostics are missing");
 
     const luraph::EnvelopeAnalysis container = luraph::analyzeEnvelope(wrapperFixture(longCarrierLiteral(containerFixture.carrier)));
     ok &= require(container.static_decode.complete, "valid LPH& container decoding should complete");

@@ -207,7 +207,11 @@ def assert_carrier_invariants(
     container = containers[0]
     require(container.get("marker") == "$", "decoded container marker drifted")
     require(container.get("decode_status") == "decoded", "container did not decode")
-    require(container.get("parse_status") == "unsupported_schema", "LPH$ schema boundary changed silently")
+    expected_parse_status = "unsupported_schema" if expect_zero_stream else "structural_metadata_recovered"
+    require(
+        container.get("parse_status") == expected_parse_status,
+        f"LPH$ parse status drifted: expected {expected_parse_status}",
+    )
     require(
         container.get("decoded_sha256") == expected_hash,
         "decoded carrier content changed",
@@ -270,7 +274,7 @@ def assert_partial_trace(
     require(runtime.get("instructions") == observed, "partial instruction count drifted")
     require(runtime.get("observed_steps") == expected["observed_step_count"], "partial step count drifted")
     require(runtime.get("semantic_lifted") == 0, "unresolved opcode handlers were falsely lifted")
-    require(runtime.get("semantic_unresolved") == observed, "unresolved semantic count drifted")
+    require(runtime.get("semantic_unresolved") == declared, "declared unresolved semantic count drifted")
     require(runtime.get("trace_specialized_sites") == observed, "trace specialization did not retain every site")
     require(runtime.get("trace_specialized_is_path_specific") is True, "path-specific evidence lost its label")
     require(coverage.get("runtime_prototype_schema_recovered") is True, "runtime schema evidence was discarded")
