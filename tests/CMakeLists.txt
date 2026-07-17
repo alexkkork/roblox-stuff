@@ -117,6 +117,19 @@ endif()
 add_test(NAME deobfuscator_luraph_vm_unit COMMAND luraph_vm_test)
 set_tests_properties(deobfuscator_luraph_vm_unit PROPERTIES LABELS "unit;deobfuscator;security" TIMEOUT 30)
 
+add_executable(luraph_call_semantics_test
+    deobfuscator/luraph/call_semantics_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/deobfuscator/luraph/call_semantics.cpp
+)
+target_include_directories(luraph_call_semantics_test PRIVATE ${PROJECT_SOURCE_DIR}/src/deobfuscator)
+if(MSVC)
+    target_compile_options(luraph_call_semantics_test PRIVATE /W4)
+else()
+    target_compile_options(luraph_call_semantics_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME deobfuscator_luraph_call_semantics_unit COMMAND luraph_call_semantics_test)
+set_tests_properties(deobfuscator_luraph_call_semantics_unit PROPERTIES LABELS "unit;deobfuscator;security" TIMEOUT 30)
+
 add_executable(luraph_semantic_emitter_test
     deobfuscator/luraph/emit_test.cpp
     ${PROJECT_SOURCE_DIR}/src/deobfuscator/luraph/emit.cpp

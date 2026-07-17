@@ -9715,11 +9715,8 @@ json luraphPrototypeCorrespondenceArtifact(
     const luraph::EnvelopeAnalysis& analysis,
     const LuraphRuntimeStructureTrace& trace)
 {
-    const std::vector<luraph::vm::RuntimePrototypeRecord> runtimeRecords =
-        luraphRuntimePrototypeRecords(trace);
-    std::map<uint64_t, const luraph::vm::RuntimePrototypeRecord*> runtimeById;
-    for (const luraph::vm::RuntimePrototypeRecord& record : runtimeRecords)
-        runtimeById.emplace(record.runtime_id, &record);
+    const std::vector<luraph::vm::RuntimeOperandLaneAnchor> runtimeLaneAnchors =
+        luraphRuntimeOperandLaneAnchors(trace);
 
     json containerReports = json::array();
     size_t validStaticContainers = 0;
@@ -9731,6 +9728,20 @@ json luraphPrototypeCorrespondenceArtifact(
         if (container.parse_status != luraph::ContainerParseStatus::Parsed &&
             container.parse_status != luraph::ContainerParseStatus::StructuralMetadataRecovered)
             continue;
+        const luraph::vm::NormalizedContainer normalizedContainer =
+            luraph::vm::normalizeContainer(container);
+        const luraph::vm::OperandLaneProjectionResult laneProjection =
+            luraph::vm::inferOperandLaneProjection(normalizedContainer, runtimeLaneAnchors);
+        const std::optional<luraph::vm::OperandLaneProjection> uniqueLaneProjection =
+            laneProjection.status == luraph::vm::OperandLaneProjectionStatus::Unique &&
+                laneProjection.candidates.size() == 1
+            ? std::optional<luraph::vm::OperandLaneProjection>(laneProjection.candidates.front())
+            : std::nullopt;
+        const std::vector<luraph::vm::RuntimePrototypeRecord> runtimeRecords =
+            luraphRuntimePrototypeRecords(trace, uniqueLaneProjection);
+        std::map<uint64_t, const luraph::vm::RuntimePrototypeRecord*> runtimeById;
+        for (const luraph::vm::RuntimePrototypeRecord& record : runtimeRecords)
+            runtimeById.emplace(record.runtime_id, &record);
         const luraph::vm::StaticPrototypeIndex staticIndex = luraph::vm::buildStaticPrototypeIndex(container);
         const luraph::vm::PrototypeCorrespondenceResult result =
             luraph::vm::correlateRuntimePrototypes(staticIndex, runtimeRecords);
@@ -9787,6 +9798,14 @@ json luraphPrototypeCorrespondenceArtifact(
             ++completeContainerMatches;
             completeContainerIndex = containerIndex;
         }
+        json projectionCandidates = json::array();
+        for (const luraph::vm::OperandLaneProjection& candidate : laneProjection.candidates)
+        {
+            json bindings = json::object();
+            for (const luraph::vm::OperandLaneProjectionBinding& binding : candidate.bindings)
+                bindings[luraph::vm::toString(binding.normalized_lane)] = binding.runtime_name;
+            projectionCandidates.push_back(std::move(bindings));
+        }
         containerReports.push_back({
             {"container_index", containerIndex},
             {"status", !result.static_evidence_valid || !result.runtime_evidence_valid
@@ -9801,6 +9820,14 @@ json luraphPrototypeCorrespondenceArtifact(
             {"unmatched", result.unmatched_count},
             {"ambiguity_preserved", result.ambiguous_count > 0},
             {"diagnostic", result.diagnostic},
+            {"operand_lane_projection", {
+                {"status", luraph::vm::toString(laneProjection.status)},
+                {"runtime_anchor_count", runtimeLaneAnchors.size()},
+                {"uniquely_count_matched_anchor_count", laneProjection.uniquely_matched_anchor_count},
+                {"candidate_count", laneProjection.candidates.size()},
+                {"candidates", std::move(projectionCandidates)},
+                {"diagnostic", laneProjection.diagnostic},
+            }},
             {"static_prototypes", std::move(staticPrototypes)},
             {"matches", std::move(matches)},
         });
@@ -9819,10 +9846,14 @@ json luraphPrototypeCorrespondenceArtifact(
             ? json(*completeContainerIndex) : json(nullptr)},
         {"valid_static_container_count", validStaticContainers},
         {"complete_container_match_count", completeContainerMatches},
-        {"runtime_prototype_count", runtimeRecords.size()},
+        {"runtime_prototype_count", trace.prototypes.size()},
         {"evidence", {
             {"instruction_counts", true},
-            {"ordered_opcode_lane_fingerprints", true},
+            {"ordered_opcode_lane_fingerprints", std::any_of(
+                containerReports.begin(), containerReports.end(), [](const json& row) {
+                    return row.contains("operand_lane_projection") &&
+                        row["operand_lane_projection"].value("status", "") == "unique";
+                })},
             {"observed_parent_child_edges", trace.closure_descriptors.size()},
             {"hash_only_matching", false},
         }},
