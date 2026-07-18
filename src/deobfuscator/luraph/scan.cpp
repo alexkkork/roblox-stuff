@@ -329,17 +329,40 @@ BannerInfo inspectBanner(std::string_view source)
     if (source.size() >= 3 && static_cast<unsigned char>(source[0]) == 0xef && static_cast<unsigned char>(source[1]) == 0xbb &&
         static_cast<unsigned char>(source[2]) == 0xbf)
         begin = 3;
-    while (begin < source.size() && (source[begin] == ' ' || source[begin] == '\t'))
-        ++begin;
-    if (begin + 2 > source.size() || source.substr(begin, 2) != "--")
-        return banner;
-
-    size_t end = begin + 2;
-    while (end < source.size() && source[end] != '\n' && source[end] != '\r')
-        ++end;
-    const std::string_view comment = source.substr(begin + 2, end - begin - 2);
     constexpr std::string_view product = "Luraph Obfuscator";
-    const size_t productPosition = findIgnoreCase(comment, product);
+    constexpr size_t maxPreambleBytes = 4096;
+    constexpr size_t maxPreambleLines = 16;
+    const size_t scanEnd = std::min(source.size(), begin + maxPreambleBytes);
+
+    size_t end = begin;
+    size_t productPosition = std::string_view::npos;
+    std::string_view comment;
+    for (size_t line = 0; line < maxPreambleLines && begin < scanEnd; ++line)
+    {
+        size_t commentBegin = begin;
+        while (commentBegin < scanEnd && (source[commentBegin] == ' ' || source[commentBegin] == '\t'))
+            ++commentBegin;
+
+        end = commentBegin;
+        while (end < source.size() && source[end] != '\n' && source[end] != '\r')
+            ++end;
+        if (commentBegin + 2 <= source.size() && source.substr(commentBegin, 2) == "--")
+        {
+            comment = source.substr(commentBegin + 2, end - commentBegin - 2);
+            productPosition = findIgnoreCase(comment, product);
+            if (productPosition != std::string_view::npos)
+            {
+                begin = commentBegin;
+                break;
+            }
+        }
+
+        begin = end;
+        if (begin < source.size() && source[begin] == '\r')
+            ++begin;
+        if (begin < source.size() && source[begin] == '\n')
+            ++begin;
+    }
     if (productPosition == std::string_view::npos)
         return banner;
 

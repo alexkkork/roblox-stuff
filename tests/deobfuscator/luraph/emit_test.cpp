@@ -305,6 +305,40 @@ json pathSpecificInstruction(int pc, json operation)
     };
 }
 
+json focusedOpcode72MoveInstruction(int pc, int destination, int source,
+    int changedObservations, int unchangedObservations, int framedUnchangedObservations)
+{
+    const int observations = changedObservations + unchangedObservations;
+    json validation = {
+        {"proof", changedObservations > 0
+            ? "observed_destination_and_register_origin"
+            : "observed_unchanged_destination_and_source_operand_frame"},
+        {"validated_fields", changedObservations > 0
+            ? json::array({"destination_register", "source_register"})
+            : json::array({"destination_register", "source_register", "operand_frame"})},
+        {"observation_count", observations},
+        {"changed_write_observations", changedObservations},
+        {"unchanged_write_observations", unchangedObservations},
+    };
+    if (framedUnchangedObservations >= 0)
+        validation["operand_frame_validated_unchanged_observations"] = framedUnchangedObservations;
+
+    return {
+        {"pc", pc},
+        {"opcode", 72},
+        {"semantic_operation", nullptr},
+        {"observational_semantic_operation", {
+            {"kind", "register_write"},
+            {"register", immediate("S", destination)},
+            {"value", {{"kind", "register_read"}, {"index", immediate("D", source)}}},
+            {"path_specific", true},
+            {"static_semantic", false},
+            {"proof", "runtime_validated_incomplete_register_move_candidate"},
+            {"runtime_validation", std::move(validation)},
+        }},
+    };
+}
+
 json prototype(int id, json instructions)
 {
     return {{"runtime_id", id}, {"entry_pc", 1}, {"instructions", std::move(instructions)}};
@@ -1900,6 +1934,49 @@ bool testPathSpecificClosureAndJumpUseRecoveredMetadata()
     return ok;
 }
 
+bool testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        focusedOpcode72MoveInstruction(1, 18, 4, 1, 2, 2),
+    }), 0);
+
+    return require(candidate.source.find(
+               "local recovered_register_18_p2_pc1_op1 = registers[4]") != std::string::npos,
+               "mixed changed/unchanged opcode-72 move was not emitted from complete focused-frame evidence") &&
+        require(candidate.source.find("registers[18] = recovered_register_18_p2_pc1_op1") !=
+                std::string::npos,
+            "opcode-72 move lost its proven destination register") &&
+        require(candidate.path_specific_register_writes == 1 && candidate.unsupported_operations == 0,
+            "complete mixed opcode-72 move evidence was not counted as one supported register write");
+}
+
+bool testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        focusedOpcode72MoveInstruction(1, 24, 6, 0, 3, 3),
+    }), 0);
+
+    return require(candidate.source.find(
+               "local recovered_register_24_p2_pc1_op1 = registers[6]") != std::string::npos,
+               "unchanged-only opcode-72 move was not emitted from same-run object identity frames") &&
+        require(candidate.path_specific_register_writes == 1 && candidate.unsupported_operations == 0,
+            "identity-framed unchanged opcode-72 move was not accepted cleanly");
+}
+
+bool testOpcode72MoveRejectsUnframedUnchangedObjectVisits()
+{
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        focusedOpcode72MoveInstruction(1, 18, 4, 1, 2, 1),
+    }), 0);
+
+    return require(candidate.source.find("recovered_register_18_p2_pc1") == std::string::npos,
+               "opcode-72 move was emitted without identity frames for every unchanged visit") &&
+        require(candidate.source.find("path-specific proof metadata is incomplete") != std::string::npos,
+            "under-framed opcode-72 move did not stop at an explicit recovery boundary") &&
+        require(candidate.unsupported_path_specific_operations == 1 && !candidate.fully_rendered(),
+            "under-framed opcode-72 object move was not retained as unsupported");
+}
+
 bool testConditionlessPathSpecificBranchUsesOrderedReplay()
 {
     const json returnOperation = {{"kind", "return"}, {"values", json::array()}};
@@ -2387,6 +2464,9 @@ int main()
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
+    ok &= testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits();
+    ok &= testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits();
+    ok &= testOpcode72MoveRejectsUnframedUnchangedObjectVisits();
     ok &= testObservedGlobalIdentitySpecializesCallArgument();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
     ok &= testFixedArgumentLoadUsesStableIncomingCallIdentities();

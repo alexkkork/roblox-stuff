@@ -120,6 +120,147 @@ def main() -> int:
         require(first_window["execution_coverage_ratio"] == 1.0, "window ratio drifted")
         require(json.loads(report_path.read_text(encoding="utf-8"))["offline"] is True, "offline claim missing")
 
+        same_run_source = temp / "same-run-source.log"
+        same_run_source.write_text(
+            "\n".join(
+                structure()
+                + [
+                    marker("@@LPH_STEP_V1@@", 1, 1, 1, 80, 2, 0, "", "D=x:table"),
+                    marker(
+                        "@@LPH_OPERAND_FRAME_V1@@",
+                        1,
+                        1,
+                        1,
+                        80,
+                        2,
+                        "S@1=z:|r@2=t:42",
+                    ),
+                    marker("@@LPH_STEP_V1@@", 2, 1, 2, 16, 3, 0, "", "D=n:2"),
+                    marker("@@LPH_CALL_FRAME_V1@@", 2, 1, 2, 16, 2, "1=t:42|2=n:2"),
+                    marker("@@LPH_STEP_V1@@", 9, 1, 3, 188, 10, 0, "", "D=x:table"),
+                    marker(
+                        "@@LPH_OPERAND_FRAME_V1@@",
+                        9,
+                        1,
+                        3,
+                        188,
+                        2,
+                        "S@1=t:42|r@2=t:42",
+                    ),
+                    marker("@@LPH_STEP_V1@@", 10, 1, 3, 188, 11, 0, "", "D=n:10"),
+                    marker("@@LPH_CALL_FRAME_V1@@", 10, 1, 3, 188, 1, "1=t:99"),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        windowed = temp / "same-run-windowed.log"
+        windowed_report = run_campaign(
+            [same_run_source],
+            windowed,
+            temp / "same-run-windowed-report.json",
+            trace_windows=[(9, 9), (1, 2)],
+        )
+        windowed_lines = windowed.read_text(encoding="utf-8").splitlines()
+        require(
+            sum(line.startswith("@@LPH_TRACE_RUN_V1@@\t") for line in windowed_lines) == 1,
+            "windowed trace did not carry one deterministic-run identity",
+        )
+        require(
+            any(line.startswith("@@LPH_OPERAND_FRAME_V1@@\t9\t") for line in windowed_lines),
+            "second disjoint operand-frame window was not selected",
+        )
+        require(
+            not any("@@LPH_STEP_V1@@\t10\t" in line or "@@LPH_CALL_FRAME_V1@@\t10\t" in line for line in windowed_lines),
+            "a marker outside the requested disjoint windows survived",
+        )
+        require(
+            windowed_report["trace_capture"]["requested_windows"]
+            == [{"start": 1, "end": 2}, {"start": 9, "end": 9}],
+            "requested trace windows were not normalized and reported",
+        )
+        require(
+            windowed_report["trace_capture"]["same_process_identity_verified"] is True,
+            "one-run object identity was not marked verified",
+        )
+        run_id = windowed_report["trace_capture"]["trace_run_id"]
+        require(len(run_id) == 64, "windowed capture identity is not a SHA-256 digest")
+
+        early_bundle = temp / "same-run-early.log"
+        late_bundle = temp / "same-run-late.log"
+        run_campaign(
+            [same_run_source],
+            early_bundle,
+            temp / "same-run-early-report.json",
+            trace_windows=[(1, 2)],
+        )
+        run_campaign(
+            [same_run_source],
+            late_bundle,
+            temp / "same-run-late-report.json",
+            trace_windows=[(9, 9)],
+        )
+        recombined_report = run_campaign(
+            [early_bundle, late_bundle],
+            temp / "same-run-recombined.log",
+            temp / "same-run-recombined-report.json",
+        )
+        require(
+            recombined_report["trace_capture"]["inputs_with_table_object_ids"] == 2,
+            "same-run object-bearing bundles were not both recognized",
+        )
+        require(
+            recombined_report["trace_capture"]["trace_run_id"] == run_id
+            and recombined_report["trace_capture"]["same_process_identity_verified"] is True,
+            "same-run split bundles did not preserve their process identity",
+        )
+
+        foreign_source = temp / "foreign-run-source.log"
+        foreign_source.write_text(
+            same_run_source.read_text(encoding="utf-8") + "foreign process trailer\n",
+            encoding="utf-8",
+        )
+        foreign_bundle = temp / "foreign-run-windowed.log"
+        run_campaign(
+            [foreign_source],
+            foreign_bundle,
+            temp / "foreign-run-windowed-report.json",
+            trace_windows=[(1, 2)],
+        )
+        try:
+            run_campaign(
+                [early_bundle, foreign_bundle],
+                temp / "foreign-run-merged.log",
+                temp / "foreign-run-merged-report.json",
+            )
+        except CampaignError as error:
+            require("different or unproven runtime processes" in str(error), "foreign-run rejection was unclear")
+        else:
+            raise AssertionError("table object IDs from separate runtime processes were merged")
+
+        try:
+            run_campaign(
+                [same_run_source, foreign_source],
+                temp / "unproven-runs-merged.log",
+                temp / "unproven-runs-merged-report.json",
+            )
+        except CampaignError as error:
+            require("different or unproven runtime processes" in str(error), "unproven-run rejection was unclear")
+        else:
+            raise AssertionError("unproven raw table object IDs were merged across inputs")
+
+        try:
+            run_campaign(
+                [same_run_source],
+                temp / "overlap.log",
+                temp / "overlap-report.json",
+                trace_windows=[(1, 5), (5, 9)],
+            )
+        except CampaignError as error:
+            require("overlap" in str(error), "overlapping-window rejection was unclear")
+        else:
+            raise AssertionError("overlapping trace windows were accepted")
+
         checked = temp / "checked.log"
         checked_report = temp / "checked.json"
         checked_result = run_campaign(
@@ -595,10 +736,11 @@ def main() -> int:
         )
         require(help_result.returncode == 0, "CLI help failed")
         require("VM-count window" in help_result.stdout, "CLI help is missing its purpose")
+        require("--trace-window START END" in help_result.stdout, "repeatable trace-window CLI is missing")
 
     print(
         "Luraph trace campaign OK: merge, hashes, windows, guards, guard paths, JSONL, "
-        "and conflict checks passed"
+        "same-run disjoint windows, object identities, and conflict checks passed"
     )
     return 0
 

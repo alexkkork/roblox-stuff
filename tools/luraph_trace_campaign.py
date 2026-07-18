@@ -30,6 +30,8 @@ VM_COUNT_FIELDS = {
     "@@LPH_VM@@": 0,
     "@@LPH_ACTIVATION@@": 0,
     "@@LPH_CALL_V2@@": 0,
+    "@@LPH_CALL_FRAME_V1@@": 0,
+    "@@LPH_OPERAND_FRAME_V1@@": 0,
     "@@LPH_STEP_V1@@": 0,
     "@@LPH_RETURN_V1@@": 0,
     "@@LPH_ACT_PROTO_V1@@": 8,
@@ -226,7 +228,12 @@ def normalize_trace_windows(windows: Sequence[tuple[int, int]]) -> tuple[TraceWi
         if len(window) != 2:
             raise CampaignError(f"trace window {ordinal} must contain START and END")
         start, end = window
-        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+        ):
             raise CampaignError(f"trace window {ordinal} bounds must be integers")
         if start < 1 or end < start:
             raise CampaignError(f"trace window {ordinal} requires START > 0 and END >= START")
@@ -875,6 +882,14 @@ def _read_input(path: pathlib.Path) -> tuple[list[Record], dict[str, Any], Struc
             records.append(record)
     shape = structure_shape(records, label=str(path))
     counts = [count for record in records if (count := vm_count(record)) is not None]
+    trace_run_ids = {
+        run_id
+        for record in records
+        if (run_id := parse_trace_run_record(record, location=str(path))) is not None
+    }
+    if len(trace_run_ids) > 1:
+        raise CampaignError(f"{path}: trace contains records from more than one deterministic run")
+    table_object_identity_records = sum(_has_table_object_identity(record) for record in records)
     stats = {
         "path": str(path),
         "bytes": len(data),
@@ -891,6 +906,8 @@ def _read_input(path: pathlib.Path) -> tuple[list[Record], dict[str, Any], Struc
         },
         "vm_count_min": min(counts) if counts else None,
         "vm_count_max": max(counts) if counts else None,
+        "trace_run_id": next(iter(trace_run_ids), None),
+        "table_object_identity_records": table_object_identity_records,
         "guards": _guard_summary(records),
         "guard_paths": _guard_path_summary(records),
     }
@@ -912,6 +929,7 @@ def run_campaign(
     window_size: int = 5000,
     output_format: str = "tsv",
     expected_structure_hash: str | None = None,
+    trace_windows: Sequence[tuple[int, int]] = (),
 ) -> dict[str, Any]:
     if not inputs:
         raise CampaignError("at least one input trace is required")
@@ -921,6 +939,11 @@ def run_campaign(
         raise CampaignError("output format must be tsv or jsonl")
     if expected_structure_hash is not None and not SHA256_RE.fullmatch(expected_structure_hash):
         raise CampaignError("expected structure hash must be 64 hexadecimal characters")
+    selected_windows = normalize_trace_windows(trace_windows)
+    if selected_windows and len(inputs) != 1:
+        raise CampaignError(
+            "repeatable trace windows must be collected from exactly one deterministic input run"
+        )
 
     output_resolved = output.resolve()
     report_resolved = report_path.resolve()
@@ -938,6 +961,37 @@ def run_campaign(
     structureless_inputs = 0
     for path in inputs:
         records, stats, shape = _read_input(path)
+        if selected_windows:
+            source_run_id = stats["trace_run_id"] or stats["sha256"]
+            selected_records = [
+                record
+                for record in records
+                if record.marker in STRUCTURE_MARKERS
+                or record.marker == TRACE_RUN_MARKER
+                or (count := vm_count(record)) is None
+                or any(window.contains(count) for window in selected_windows)
+            ]
+            if stats["trace_run_id"] is None:
+                selected_records.append(Record(TRACE_RUN_MARKER, (source_run_id,)))
+            stats["selection"] = {
+                "mode": "same_run_disjoint_windows",
+                "source_marker_records": len(records),
+                "selected_marker_records": len(selected_records),
+                "trace_run_id": source_run_id,
+                "windows": [
+                    {"start": window.start, "end": window.end}
+                    for window in selected_windows
+                ],
+            }
+            records = selected_records
+        stats["selected_table_object_identity_records"] = sum(
+            _has_table_object_identity(record) for record in records
+        )
+        stats["effective_trace_run_id"] = (
+            stats["selection"]["trace_run_id"]
+            if selected_windows
+            else stats["trace_run_id"]
+        )
         all_records.extend(records)
         input_reports.append(stats)
         if not shape.prototypes and not shape.instructions:
@@ -954,6 +1008,18 @@ def run_campaign(
                 }
             )
         merge_shapes(merged_shape, shape, label=str(path))
+
+    identity_inputs = [
+        stats
+        for stats in input_reports
+        if stats["selected_table_object_identity_records"] > 0
+    ]
+    identity_run_ids = {stats["effective_trace_run_id"] for stats in identity_inputs}
+    if len(identity_inputs) > 1 and (None in identity_run_ids or len(identity_run_ids) != 1):
+        raise CampaignError(
+            "refusing to merge table object IDs from different or unproven runtime processes; "
+            "collect disjoint --trace-window ranges from one source trace first"
+        )
 
     seen: set[Any] = set()
     structure_records: list[Record] = []
@@ -1004,13 +1070,38 @@ def run_campaign(
             "bytes": len(merged_bytes),
             "sha256": hashlib.sha256(merged_bytes).hexdigest(),
         },
+        "trace_capture": {
+            "schema": TRACE_RUN_SCHEMA,
+            "windowed": bool(selected_windows),
+            "trace_run_id": (
+                input_reports[0]["selection"]["trace_run_id"]
+                if selected_windows
+                else next(iter(identity_run_ids), None)
+            ),
+            "requested_windows": [
+                {"start": window.start, "end": window.end}
+                for window in selected_windows
+            ],
+            "inputs_with_table_object_ids": len(identity_inputs),
+            "table_object_identity_records": sum(
+                stats["selected_table_object_identity_records"] for stats in identity_inputs
+            ),
+            "same_process_identity_verified": (
+                len(identity_inputs) <= 1
+                or (None not in identity_run_ids and len(identity_run_ids) == 1)
+            ),
+        },
         "structure": {
             "schema": STRUCTURE_HASH_SCHEMA,
             "algorithm": "sha256",
             "sha256": merged_hash,
             "complete": complete,
             "consistent": True,
-            "validated": complete and (expected_structure_hash is None or merged_hash == expected_structure_hash.lower()),
+            "validated": complete
+            and (
+                expected_structure_hash is None
+                or merged_hash == expected_structure_hash.lower()
+            ),
             "expected_sha256": expected_structure_hash.lower() if expected_structure_hash else None,
             "prototypes": len(merged_shape.prototypes),
             "instructions": len(merged_shape.instructions),
@@ -1051,12 +1142,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Merge local Luraph marker traces, validate structure, and report VM-window coverage.",
     )
-    parser.add_argument("traces", nargs="+", type=pathlib.Path, help="input .log or marker JSONL traces")
-    parser.add_argument("-o", "--output", required=True, type=pathlib.Path, help="deduplicated merged trace")
-    parser.add_argument("--report", type=pathlib.Path, help="coverage JSON (default: OUTPUT.report.json)")
-    parser.add_argument("--window-size", type=int, default=5000, help="one-based VM-count window size (default: 5000)")
-    parser.add_argument("--format", choices=("tsv", "jsonl"), default="tsv", help="merged trace format (default: tsv)")
-    parser.add_argument("--expected-structure-hash", metavar="SHA256", help="require this complete structure fingerprint")
+    parser.add_argument(
+        "traces", nargs="+", type=pathlib.Path, help="input .log or marker JSONL traces"
+    )
+    parser.add_argument(
+        "-o", "--output", required=True, type=pathlib.Path, help="deduplicated merged trace"
+    )
+    parser.add_argument(
+        "--report", type=pathlib.Path, help="coverage JSON (default: OUTPUT.report.json)"
+    )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=5000,
+        help="one-based VM-count window size (default: 5000)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("tsv", "jsonl"),
+        default="tsv",
+        help="merged trace format (default: tsv)",
+    )
+    parser.add_argument(
+        "--expected-structure-hash",
+        metavar="SHA256",
+        help="require this complete structure fingerprint",
+    )
+    parser.add_argument(
+        "--trace-window",
+        action="append",
+        nargs=2,
+        type=int,
+        default=[],
+        metavar=("START", "END"),
+        help=(
+            "collect an inclusive VM-count range; repeat for disjoint ranges from one "
+            "deterministic input trace"
+        ),
+    )
     return parser
 
 
@@ -1072,6 +1195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             window_size=args.window_size,
             output_format=args.format,
             expected_structure_hash=args.expected_structure_hash,
+            trace_windows=args.trace_window,
         )
     except CampaignError as error:
         print(f"error: {error}", file=sys.stderr)

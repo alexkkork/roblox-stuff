@@ -2056,10 +2056,88 @@ private:
         return false;
     }
 
-    static bool isPathSpecificOperation(const json& value)
+    static std::optional<size_t> nonnegativeEvidenceCount(const json& value)
     {
-        return value.is_object() && value.value("path_specific", false) &&
-            !value.value("static_semantic", true) && !value.value("proof", "").empty();
+        if (value.is_number_unsigned())
+        {
+            const uint64_t count = value.get<uint64_t>();
+            if (count <= std::numeric_limits<size_t>::max())
+                return static_cast<size_t>(count);
+        }
+        if (value.is_number_integer())
+        {
+            const int64_t count = value.get<int64_t>();
+            if (count >= 0 && static_cast<uint64_t>(count) <= std::numeric_limits<size_t>::max())
+                return static_cast<size_t>(count);
+        }
+        return std::nullopt;
+    }
+
+    static bool validatedFieldContains(const json& validation, std::string_view field)
+    {
+        const json fields = validation.value("validated_fields", json::array());
+        return fields.is_array() && std::any_of(fields.begin(), fields.end(), [&](const json& value) {
+            return value.is_string() && value.get<std::string>() == field;
+        });
+    }
+
+    static bool isRegisterMove(const json& value)
+    {
+        return value.is_object() && value.value("kind", "") == "register_write" &&
+            value.contains("register") && value["register"].is_object() &&
+            value.contains("value") && value["value"].is_object() &&
+            value["value"].value("kind", "") == "register_read";
+    }
+
+    static bool isFocusedOperandProvenOpcode72Move(const json& instruction, const json& value)
+    {
+        if (!instruction.is_object() || instruction.value("opcode", int64_t(-1)) != 72 ||
+            !value.value("path_specific", false) || value.value("static_semantic", true) ||
+            !isRegisterMove(value) || !value.contains("runtime_validation") ||
+            !value["runtime_validation"].is_object())
+            return false;
+
+        const json& validation = value["runtime_validation"];
+        const std::string proof = validation.value("proof", "");
+        if (proof != "observed_destination_and_register_origin" &&
+            proof != "observed_unchanged_destination_and_source_operand_frame")
+            return false;
+        if (!validatedFieldContains(validation, "destination_register") ||
+            !validatedFieldContains(validation, "source_register"))
+            return false;
+
+        const std::optional<size_t> observations = nonnegativeEvidenceCount(
+            validation.value("observation_count", json(nullptr)));
+        const std::optional<size_t> changed = nonnegativeEvidenceCount(
+            validation.value("changed_write_observations", json(nullptr)));
+        const std::optional<size_t> unchanged = nonnegativeEvidenceCount(
+            validation.value("unchanged_write_observations", json(nullptr)));
+        if (!observations || !changed || !unchanged || *observations == 0 ||
+            *changed > *observations || *unchanged != *observations - *changed)
+            return false;
+
+        if (*unchanged > 0)
+        {
+            const std::optional<size_t> framed = nonnegativeEvidenceCount(
+                validation.value("operand_frame_validated_unchanged_observations", json(nullptr)));
+            if (!framed || *framed != *unchanged)
+                return false;
+        }
+        return true;
+    }
+
+    static bool isPathSpecificOperation(const json& value, const json* instruction = nullptr)
+    {
+        if (!value.is_object() || !value.value("path_specific", false) ||
+            value.value("static_semantic", true))
+            return false;
+
+        // A changed object write only proves type-compatible origin flow. Every later
+        // unchanged visit must still carry focused, same-run object identity evidence.
+        if (instruction && instruction->value("opcode", int64_t(-1)) == 72 && isRegisterMove(value))
+            return isFocusedOperandProvenOpcode72Move(*instruction, value);
+
+        return !value.value("proof", "").empty();
     }
 
     static const json* semanticOperationForInstruction(const json& instruction)
@@ -2067,7 +2145,7 @@ private:
         if (instruction.contains("semantic_operation") && instruction["semantic_operation"].is_object())
             return &instruction["semantic_operation"];
         if (instruction.contains("observational_semantic_operation") &&
-            isPathSpecificOperation(instruction["observational_semantic_operation"]))
+            isPathSpecificOperation(instruction["observational_semantic_operation"], &instruction))
             return &instruction["observational_semantic_operation"];
         return nullptr;
     }
@@ -4551,7 +4629,7 @@ private:
                     context.path_specific = false;
                     if (const json* semantic = semanticOperationForInstruction(instruction))
                     {
-                        context.path_specific = isPathSpecificOperation(*semantic);
+                        context.path_specific = isPathSpecificOperation(*semantic, &instruction);
                         if (context.path_specific)
                         {
                             pathSpecificPcs.insert(pc);

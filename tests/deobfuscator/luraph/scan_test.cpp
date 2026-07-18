@@ -445,6 +445,20 @@ int main()
     ok &= require(hasDiagnostic(supported, "CARRIER_LITERAL_DECODED"), "carrier decode diagnostic is missing");
     ok &= require(hasDiagnostic(supported, "VM_SEMANTICS_NOT_ATTEMPTED"), "VM semantics boundary diagnostic is missing");
 
+    const std::string metadataPrefixedSource =
+        "getgenv().Script_Url = \"https://example.invalid/raw/id\"\n"
+        "script_id = \"fixture-id\"\n\n" + supportedSource;
+    const luraph::EnvelopeAnalysis metadataPrefixed = luraph::analyzeEnvelope(metadataPrefixedSource);
+    ok &= require(metadataPrefixed.family_detected && metadataPrefixed.version_supported,
+        "a bounded metadata preamble hid the supported Luraph banner");
+    ok &= require(metadataPrefixed.banner.range.has_value() && metadataPrefixed.banner.range->begin > 0,
+        "metadata-prefixed banner source range is missing or incorrect");
+
+    const luraph::EnvelopeAnalysis markerInsideString = luraph::analyzeEnvelope(
+        "local notice = \"-- This file was protected using Luraph Obfuscator v14.7 [https://lura.ph/]\"\nprint(notice)\n");
+    ok &= require(!markerInsideString.family_detected,
+        "a Luraph marker inside a quoted preamble string was treated as an official banner comment");
+
     const std::string luaAuthSource = luaAuthWrapperFixture(longCarrierLiteral("LPH$!!!!!z!!!!!"));
     const luraph::EnvelopeAnalysis luaAuth = luraph::analyzeEnvelope(luaAuthSource);
     ok &= require(luaAuth.complete && luaAuth.family_detected, "LuaAuth-wrapped LPH$ family was not detected");
