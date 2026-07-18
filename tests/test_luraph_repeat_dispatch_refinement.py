@@ -37,7 +37,7 @@ def generated_interpreter() -> str:
 
     run = (
         "run=function(...)"
-        "local registers={[1]=print,[2]='repeat-dispatch-ok',[3]=false,[4]=true};"
+        "local registers={[1]=print,[2]='repeat-dispatch-ok'};"
         "local opcode_table={[1]=1,[2]=2};"
         "local lane_a={[1]=1,[2]=3};"
         "local lane_b={[1]=2,[2]=2};"
