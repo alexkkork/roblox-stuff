@@ -446,6 +446,23 @@ public:
         append("    or unresolved_helper\n");
         append("end\n");
         append("local helper_values = setmetatable({}, { __index = function() return unresolved_helper end })\n");
+        append("helper_values[1] = setmetatable({\n");
+        append("  [5] = bit32 and bit32.countrz or unresolved_helper,\n");
+        append("  [6] = bit32 and bit32.bor or unresolved_helper,\n");
+        append("  [8] = string.byte,\n");
+        append("  [9] = bit32 and bit32.lrotate or unresolved_helper,\n");
+        append("  [10] = bit32 and bit32.bxor or unresolved_helper,\n");
+        append("  [12] = bit32 and bit32.countlz or unresolved_helper,\n");
+        append("  [13] = string.packsize or unresolved_helper,\n");
+        append("  [14] = unpack_values,\n");
+        append("  [16] = math.pi,\n");
+        append("  [17] = bit32 and bit32.lshift or unresolved_helper,\n");
+        append("  [18] = bit32 and bit32.rrotate or unresolved_helper,\n");
+        append("  [19] = math.floor,\n");
+        append("  [20] = bit32 and bit32.bnot or unresolved_helper,\n");
+        append("  [21] = bit32 and bit32.band or unresolved_helper,\n");
+        append("  [22] = math.modf,\n");
+        append("}, { __index = function() return unresolved_helper end })\n");
         append("helper_values[23] = function(first, values, last) return unpack_values(values, first, last) end\n");
         append("helper_values[34] = function(fn, env) return setfenv and setfenv(fn, env) or fn end\n");
         append("helper_values[36] = table.move or unresolved_helper\n");
@@ -454,6 +471,56 @@ public:
         append("helper_values[53] = function(...) return select_value(\"#\", ...), {...} end\n");
         append("local opcode_values = {}\n");
         append("local operand_values = {}\n");
+        const auto collectOperandTableLanes = [&](const auto& self, const json& value,
+                                                   std::set<std::string>& lanes) -> void {
+            if (value.is_object())
+            {
+                if (value.value("kind", "") == "operand_table")
+                {
+                    const std::string lane = value.value("lane", "");
+                    if (!lane.empty())
+                        lanes.insert(lane);
+                }
+                for (const auto& [name, child] : value.items())
+                {
+                    (void)name;
+                    self(self, child, lanes);
+                }
+            }
+            else if (value.is_array())
+                for (const json& child : value)
+                    self(self, child, lanes);
+        };
+        for (const auto& [prototype, rows] : instructions)
+        {
+            std::set<std::string> lanes;
+            for (const auto& [pc, instructionRows] : rows)
+            {
+                (void)pc;
+                for (const json& instruction : instructionRows)
+                    if (const json* semantic = semanticOperationForInstruction(instruction))
+                        collectOperandTableLanes(collectOperandTableLanes, *semantic, lanes);
+            }
+            if (lanes.empty())
+                continue;
+            append("operand_values[" + std::to_string(prototype) + "] = {\n");
+            for (const std::string& lane : lanes)
+            {
+                append("  [" + quoteLuau(lane) + "] = {\n");
+                for (const auto& [pc, instructionRows] : rows)
+                {
+                    if (instructionRows.empty())
+                        continue;
+                    const json& laneValue = instructionRows.front().value("lanes", json::object())
+                        .value(lane, json(nullptr));
+                    if (supportedPrimitive(laneValue) && !laneValue.is_null() &&
+                        !(laneValue.is_object() && laneValue.value("type", "") == "nil"))
+                        append("    [" + std::to_string(pc) + "] = " + primitiveLiteral(laneValue) + ",\n");
+                }
+                append("  },\n");
+            }
+            append("}\n");
+        }
         append("local function capture_register_cell(open_cells, registers, slot)\n");
         append("  local cell = open_cells[slot]\n");
         append("  if not cell then cell = { [2] = slot, [3] = registers }; open_cells[slot] = cell end\n");
@@ -3178,7 +3245,8 @@ private:
         if (kind == "opcode_read")
             return "opcode_values[" + expression(value.value("index", json::object()), context, depth + 1) + "]";
         if (kind == "operand_table")
-            return "operand_values";
+            return "operand_values[" + std::to_string(context.prototype) + "][" +
+                quoteLuau(jsonStringOr(value, "lane")) + "]";
         if (kind == "index_read")
         {
             const json table = value.value("table", json::object());

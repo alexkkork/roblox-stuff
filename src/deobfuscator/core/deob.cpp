@@ -12952,6 +12952,200 @@ json luraphImmediateRuntimeLane(const json& lanes, std::string_view name)
     };
 }
 
+bool luraphExactOperand(const json& value, std::string_view lane)
+{
+    return value.is_object() && value.value("kind", "") == "operand" &&
+        value.value("lane", "") == lane;
+}
+
+bool luraphExactConstant(const json& value, double expected)
+{
+    return value.is_object() && value.value("kind", "") == "constant" &&
+        value.contains("value") && value["value"].is_number() &&
+        value["value"].get<double>() == expected;
+}
+
+bool luraphOpcode87HelperLoadHandlerMatches(const json& handler)
+{
+    if (handler.value("opcode", int64_t(-1)) != 87 ||
+        handler.value("selection_status", "") != "exact" ||
+        !handler.value("resolved", false) || handler.value("unresolved_guard_path", true) ||
+        !handler.value("vm_state_independent", false) ||
+        !handler.value("executed_path_complete", false))
+        return false;
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    const json operations = normalized.value("operations", json(nullptr));
+    if (!normalized.is_object() || normalized.value("kind", "") != "handler_sequence" ||
+        normalized.value("opcode", int64_t(-1)) != 87 || !operations.is_array() ||
+        operations.size() != 2)
+        return false;
+    const json& write = operations[0];
+    const json& increment = operations[1];
+    if (!write.is_object() || write.value("kind", "") != "register_write" ||
+        !luraphExactOperand(write.value("register", json(nullptr)), "V"))
+        return false;
+    const json value = write.value("value", json(nullptr));
+    const json bank = value.value("table", json(nullptr));
+    return value.is_object() && value.value("kind", "") == "index_read" &&
+        luraphExactOperand(value.value("index", json(nullptr)), "h") &&
+        bank.is_object() && bank.value("kind", "") == "index_read" &&
+        luraphExactConstant(bank.value("index", json(nullptr)), 1.0) &&
+        bank.value("table", json(nullptr)).value("kind", "") == "helper_table" &&
+        increment.is_object() && increment.value("kind", "") == "compound_write" &&
+        increment.value("operator", "") == "+" &&
+        increment.value("target", json(nullptr)).value("kind", "") == "program_counter" &&
+        luraphExactConstant(increment.value("value", json(nullptr)), 1.0);
+}
+
+LuraphExactLeafRecognition recognizeLuraphOpcode87HelperLoad(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphOpcode87HelperLoadHandlerMatches(handler))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-87 handler does not match the exact helper-bank load";
+        return output;
+    }
+    const std::optional<int64_t> destination = luraphRuntimeLaneInteger(effectiveLanes, "V");
+    const std::optional<int64_t> helperIndex = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    if (!destination || *destination < 0 || !helperIndex || *helperIndex < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-87 destination or helper index is not a nonnegative integer";
+        return output;
+    }
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            if (observation.value("opcode", int64_t(-1)) != 87 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "V") != destination ||
+                luraphRuntimeLaneInteger(runtimeLanes, "h") != helperIndex ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !writes.is_array() || writes.size() != 1 ||
+                writes.front().value("register", int64_t(-1)) != *destination ||
+                !guardPath.is_object() || !guardPath.value("complete", false) ||
+                guardPath.value("overflow", true))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-87 runtime evidence disagrees with the exact helper-bank load";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+    output.status = "recognized";
+    output.diagnostic = "the exact opcode-87 branch loads helper bank 1 and falls through once";
+    output.operation = {
+        {"kind", "register_write"},
+        {"semantic_family", "helper_load"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "exact_opcode87_helper_bank_load"},
+        {"observation_count", output.validated_observations},
+        {"register", luraphImmediateRuntimeLane(effectiveLanes, "V")},
+        {"value", {
+            {"kind", "index_read"},
+            {"table", {
+                {"kind", "index_read"},
+                {"table", {{"kind", "helper_table"}}},
+                {"index", {{"kind", "constant"}, {"value", 1.0}}},
+            }},
+            {"index", luraphImmediateRuntimeLane(effectiveLanes, "h")},
+        }},
+        {"may_raise", true},
+        {"evaluated_once", true},
+    };
+    return output;
+}
+
+bool luraphOpcode142OperandTableHandlerMatches(const json& handler)
+{
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    const json operations = normalized.value("operations", json(nullptr));
+    if (handler.value("opcode", int64_t(-1)) != 142 ||
+        !handler.value("vm_state_independent", false) || !range.is_object() ||
+        range.value("begin", size_t(0)) != 45812 || range.value("end", size_t(0)) != 45826 ||
+        handler.value("candidate_source", "") != "(t)[Q[_]]=(Q);" ||
+        !normalized.is_object() || normalized.value("kind", "") != "handler_sequence" ||
+        normalized.value("opcode", int64_t(-1)) != 142 || !operations.is_array() ||
+        operations.size() != 1)
+        return false;
+    const json& write = operations.front();
+    const json value = write.value("value", json(nullptr));
+    return write.is_object() && write.value("kind", "") == "register_write" &&
+        luraphExactOperand(write.value("register", json(nullptr)), "Q") &&
+        value.is_object() && value.value("kind", "") == "operand_table" &&
+        value.value("lane", "") == "Q";
+}
+
+LuraphExactLeafRecognition recognizeLuraphOpcode142OperandTableLoad(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphOpcode142OperandTableHandlerMatches(handler))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-142 handler does not match the locked Q-lane table alias";
+        return output;
+    }
+    const std::optional<int64_t> destination = luraphRuntimeLaneInteger(effectiveLanes, "Q");
+    if (!destination || *destination < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-142 destination Q is not a nonnegative register";
+        return output;
+    }
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json written = writes.is_array() && writes.size() == 1
+                ? writes.front().value("value", json(nullptr)) : json(nullptr);
+            if (observation.value("opcode", int64_t(-1)) != 142 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "Q") != destination ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !writes.is_array() || writes.size() != 1 ||
+                writes.front().value("register", int64_t(-1)) != *destination ||
+                !written.is_object() || written.value("type", "") != "table" ||
+                !guardPath.is_object() || !guardPath.value("complete", false) ||
+                guardPath.value("overflow", true))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-142 runtime evidence disagrees with the Q-lane table alias";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+    output.status = "recognized";
+    output.diagnostic = "the locked opcode-142 branch aliases the complete Q operand lane table";
+    output.operation = {
+        {"kind", "register_write"},
+        {"semantic_family", "protector_operand_table_load"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"source_semantic", false},
+        {"protector_state", true},
+        {"proof", "locked_opcode142_Q_operand_table_alias"},
+        {"observation_count", output.validated_observations},
+        {"register", luraphImmediateRuntimeLane(effectiveLanes, "Q")},
+        {"value", {{"kind", "operand_table"}, {"lane", "Q"}}},
+        {"aliases_shared_prototype_storage", true},
+    };
+    return output;
+}
+
 bool luraphOpcode23ArgumentCopyHandlerMatches(const json& handler)
 {
     if (handler.value("opcode", int64_t(-1)) != 23 ||
@@ -13043,7 +13237,7 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
                 *observedArity != *arity ||
                 observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
                 !writes.is_array() || !origins.is_object() || activationRow == trace.activations.end() ||
-                activationRow->second.value("argument_count", size_t(kMaximumRecoveredArgumentCount + 1)) !=
+                activationRow->second.value("argument_count", size_t(0)) <
                     static_cast<size_t>(*arity))
             {
                 output.status = "evidence_mismatch";
@@ -13230,7 +13424,8 @@ LuraphExactLeafRecognition recognizeLuraphOpcode57TableWrite(
 LuraphExactLeafRecognition recognizeLuraphOpcode201DirectJump(
     const json& handler,
     const json& effectiveLanes,
-    const std::vector<json>* observations)
+    const std::vector<json>* observations,
+    size_t instructionCount)
 {
     LuraphExactLeafRecognition output;
     const json range = handler.value("range", json::object());
@@ -13251,10 +13446,11 @@ LuraphExactLeafRecognition recognizeLuraphOpcode201DirectJump(
     }
 
     const std::optional<int64_t> encodedTarget = luraphRuntimeLaneInteger(effectiveLanes, "Q");
-    if (!encodedTarget || *encodedTarget < 0 || *encodedTarget == std::numeric_limits<int64_t>::max())
+    if (!encodedTarget || *encodedTarget < 0 || *encodedTarget == std::numeric_limits<int64_t>::max() ||
+        static_cast<uint64_t>(*encodedTarget) + 1 > instructionCount)
     {
         output.status = "operand_mismatch";
-        output.diagnostic = "opcode-201 operand Q is not a bounded direct-jump target";
+        output.diagnostic = "opcode-201 operand Q does not resolve inside the current prototype";
         return output;
     }
 
@@ -13956,6 +14152,16 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode8CallObservationsValidated = 0;
     size_t opcode8EncodedOneQuirkSites = 0;
     json opcode8RecognitionStatusCounts = json::object();
+    size_t opcode87SitesTotal = 0;
+    size_t opcode87SitesStatic = 0;
+    size_t opcode87SitesRejected = 0;
+    size_t opcode87ObservationsValidated = 0;
+    json opcode87RecognitionStatusCounts = json::object();
+    size_t opcode142SitesTotal = 0;
+    size_t opcode142SitesStatic = 0;
+    size_t opcode142SitesRejected = 0;
+    size_t opcode142ObservationsValidated = 0;
+    json opcode142RecognitionStatusCounts = json::object();
     size_t opcode23SitesTotal = 0;
     size_t opcode23SitesStatic = 0;
     size_t opcode23SitesRejected = 0;
@@ -14072,7 +14278,59 @@ json luraphRuntimeSemanticDispatchArtifact(
             row["trace_specialized_operation"] = nullptr;
             row["guarded_candidate_validation"] = nullptr;
             bool semanticAccepted = false;
-            if (handler != handlers.end())
+            if (opcode == 87 && handler != handlers.end())
+            {
+                ++opcode87SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode87HelperLoad(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode87_helper_load_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode87RecognitionStatusCounts[recognized.status] =
+                    opcode87RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode87ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode87SitesStatic;
+                }
+                else
+                    ++opcode87SitesRejected;
+            }
+            if (!semanticAccepted && opcode == 142 && handler != handlers.end())
+            {
+                ++opcode142SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode142OperandTableLoad(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode142_operand_table_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode142RecognitionStatusCounts[recognized.status] =
+                    opcode142RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode142ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode142SitesStatic;
+                }
+                else
+                    ++opcode142SitesRejected;
+            }
+            if (!semanticAccepted && handler != handlers.end())
             {
                 if (std::optional<json> recognized =
                         recognizeLuraphStraightLineRegisterHandler(handler->second))
@@ -14314,7 +14572,7 @@ json luraphRuntimeSemanticDispatchArtifact(
                 const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
                     ? &observedSite->second : nullptr;
                 LuraphExactLeafRecognition recognized = recognizeLuraphOpcode201DirectJump(
-                    handler->second, effectiveLanes, siteObservations);
+                    handler->second, effectiveLanes, siteObservations, prototype.instructions.size());
                 row["opcode201_direct_jump_recognition"] = {
                     {"status", recognized.status},
                     {"diagnostic", recognized.diagnostic},
@@ -14851,6 +15109,30 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"static_requires_complete_guard_path", true},
             {"runtime_evidence_is_path_specific", true},
             {"encoded_one_quirk_preserved", true},
+        }},
+        {"opcode87_helper_load_coverage", {
+            {"available", opcode87SitesTotal > 0},
+            {"scope", "exact-v14.7-opcode-87-helper-bank-load"},
+            {"sites_total", opcode87SitesTotal},
+            {"static_semantic_sites", opcode87SitesStatic},
+            {"unresolved_sites", opcode87SitesTotal - opcode87SitesStatic},
+            {"rejected_sites", opcode87SitesRejected},
+            {"validated_runtime_executions", opcode87ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode87RecognitionStatusCounts)},
+            {"helper_bank", 1},
+            {"shared_helper_identity_preserved", true},
+        }},
+        {"opcode142_operand_table_coverage", {
+            {"available", opcode142SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-142-Q-lane-table-alias"},
+            {"sites_total", opcode142SitesTotal},
+            {"static_semantic_sites", opcode142SitesStatic},
+            {"unresolved_sites", opcode142SitesTotal - opcode142SitesStatic},
+            {"rejected_sites", opcode142SitesRejected},
+            {"validated_runtime_executions", opcode142ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode142RecognitionStatusCounts)},
+            {"source_semantic", false},
+            {"shared_operand_table_identity_preserved", true},
         }},
         {"opcode23_argument_copy_coverage", {
             {"available", opcode23SitesTotal > 0},
@@ -17991,6 +18273,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeObservationalOperationCounts = json::object();
     json runtimeWriteOriginEvidence = json::object();
     json runtimeOpcode8CallCoverage = json{{"available", false}};
+    json runtimeOpcode87HelperLoadCoverage = json{{"available", false}};
+    json runtimeOpcode142OperandTableCoverage = json{{"available", false}};
     json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
@@ -18047,6 +18331,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "write_origin_evidence", json::object());
                     runtimeOpcode8CallCoverage = runtimeSemanticDocument->value(
                         "opcode8_call_coverage", json{{"available", false}});
+                    runtimeOpcode87HelperLoadCoverage = runtimeSemanticDocument->value(
+                        "opcode87_helper_load_coverage", json{{"available", false}});
+                    runtimeOpcode142OperandTableCoverage = runtimeSemanticDocument->value(
+                        "opcode142_operand_table_coverage", json{{"available", false}});
                     runtimeOpcode23ArgumentCopyCoverage = runtimeSemanticDocument->value(
                         "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
@@ -18107,6 +18395,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"opcode8_call_coverage", runtimeOpcode8CallCoverage},
+                {"opcode87_helper_load_coverage", runtimeOpcode87HelperLoadCoverage},
+                {"opcode142_operand_table_coverage", runtimeOpcode142OperandTableCoverage},
                 {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
@@ -19794,6 +20084,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"trace_evidence_only_is_semantic", false},
         };
     report["coverage"]["opcode8_calls"] = runtimeOpcode8CallCoverage;
+    report["coverage"]["opcode87_helper_loads"] = runtimeOpcode87HelperLoadCoverage;
+    report["coverage"]["opcode142_operand_table_loads"] = runtimeOpcode142OperandTableCoverage;
     report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;
