@@ -362,7 +362,8 @@ SemanticCandidate emitWithTarget(json targetInstructions, int targetCaptureCount
     json observedLaneSequences = json::array(), json targetCfg = json(nullptr),
     json observedCaptureDomains = json::array(), json closureDescriptors = json::array(),
     json payloadActivationArguments = json(nullptr), int payloadRoot = 1,
-    json rootArgumentTablePrototypes = json::array())
+    json rootArgumentTablePrototypes = json::array(),
+    json observedActivationArgumentTables = json::array())
 {
     json prototypes = json::array({
         prototype(1, json::array({closureInstruction(1, descriptor(2, 1, targetCaptureCount))})),
@@ -380,6 +381,7 @@ SemanticCandidate emitWithTarget(json targetInstructions, int targetCaptureCount
         {"payload_root", {{"payload_prototype", payloadRoot}, {"closure_descriptor", rootDescriptor()}}},
         {"payload_activation_arguments", std::move(payloadActivationArguments)},
         {"root_argument_table_prototypes", std::move(rootArgumentTablePrototypes)},
+        {"observed_activation_argument_tables", std::move(observedActivationArgumentTables)},
         {"prototype_call_edges", json::array()},
         {"observed_transition_sequences", json::array()},
         {"observed_lane_sequences", std::move(observedLaneSequences)},
@@ -2043,6 +2045,46 @@ bool testOverloadedClosureOpcodeRespectsRecoveredScalarWrite()
             "recovered opcode-22 scalar write was counted as an unresolved closure");
 }
 
+bool testObservedActivationTableHydrationKeepsOnlyStableSlots()
+{
+    const auto snapshot = [](int activation, int changingValue) {
+        return json{
+            {"activation", activation},
+            {"prototype", 2},
+            {"argument_index", 2},
+            {"complete", true},
+            {"observed_entries", 2},
+            {"recovered_entries", 2},
+            {"prototype_activation_count", 2},
+            {"conflict", false},
+            {"entries", json::array({
+                {{"key", number(13)}, {"value", observedGlobalFunction("coroutine.yield")}},
+                {{"key", number(37)}, {"value", number(changingValue)}},
+            })},
+        };
+    };
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({registerAliasInstruction(1, 3, 1)}), 0, 1,
+        json::array(), json::array(), json::array(), json(nullptr), json::array(), json::array(),
+        json(nullptr), 1, json::array(), json::array({snapshot(11, 100), snapshot(12, 200)}));
+
+    return require(candidate.source.find("registers[2] = hydrate_observed_table(registers[2], {") !=
+                std::string::npos,
+            "complete activation table snapshots were not hydrated at prototype entry") &&
+        require(candidate.source.find(
+                    "[13] = (environment._G or environment)[\"coroutine\"][\"yield\"]") !=
+                std::string::npos,
+            "stable activation-table slot was not emitted") &&
+        require(candidate.source.find("[37] = 100") == std::string::npos &&
+                candidate.source.find("[37] = 200") == std::string::npos,
+            "activation-varying table slot was incorrectly specialized") &&
+        require(candidate.source.find("if value[key] == nil then value[key] = entry end") != std::string::npos,
+            "activation table hydration can overwrite a real runtime value") &&
+        require(candidate.observed_argument_tables_hydrated == 1 &&
+                candidate.observed_argument_slots_hydrated == 1,
+            "activation table hydration metrics drifted");
+}
+
 bool testUnknownPathSpecificOperationPreservesIrAndProvenance()
 {
     const json opaqueMetadata = {
@@ -2138,6 +2180,7 @@ int main()
     ok &= testCaptureKindThreeRemainsExplicitlyUnsupported();
     ok &= testUnsupportedPathSpecificExpressionFailsClosed();
     ok &= testOverloadedClosureOpcodeRespectsRecoveredScalarWrite();
+    ok &= testObservedActivationTableHydrationKeepsOnlyStableSlots();
     ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
