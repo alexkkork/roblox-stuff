@@ -104,8 +104,8 @@ def build_trace() -> str:
             # The preserved table claims the wrong register origin.
             step(4, 4, 186, sites[3][2], "10=f:|11=x:table", 2, "11=r:9"),
             guard_path(5, 5, 186),
-            # The preserved S+1 value must remain a capture table, not another function.
-            step(5, 5, 186, sites[4][2], "12=f:|13=f:", 2, "13=r:12"),
+            # String receivers are valid: this mirrors string_value.byte.
+            step(5, 5, 186, sites[4][2], "12=f:62797465|13=s:74657874", 2, "13=r:12"),
             guard_path(7, 6, 186),
             step(7, 6, 186, sites[5][2], "14=f:|15=x:table", 2, "15=r:14"),
             guard_path(8, 6, 186),
@@ -269,8 +269,28 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
     assert_evidence_mismatch(
         rows[4], "opcode186_lookup_preserve_recognition", "opcode 186 wrong write origin"
     )
-    assert_evidence_mismatch(
-        rows[5], "opcode186_lookup_preserve_recognition", "opcode 186 non-table preservation"
+    string_lookup = assert_runtime_validated(
+        rows[5], "opcode186_lookup_preserve_recognition"
+    )
+    require(
+        string_lookup.get("operations")
+        == [
+            {
+                "kind": "register_write",
+                "register": {"kind": "constant", "value": 13},
+                "value": {"kind": "register_read", "index": {"kind": "constant", "value": 12}},
+            },
+            {
+                "kind": "register_write",
+                "register": {"kind": "constant", "value": 12},
+                "value": {
+                    "kind": "index_read",
+                    "table": {"kind": "register_read", "index": {"kind": "constant", "value": 13}},
+                    "index": {"kind": "constant", "value": 189},
+                },
+            },
+        ],
+        f"opcode 186 did not preserve a string receiver before member lookup: {string_lookup}",
     )
     assert_evidence_mismatch(
         rows[6], "opcode186_lookup_preserve_recognition", "opcode 186 contradictory sparse write"
@@ -387,8 +407,8 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
 
     partition = (report.get("coverage") or {}).get("semantic_coverage_partition") or {}
     require(
-        partition.get("runtime_validated_observational_semantic") == 5
-        and partition.get("trace_evidence_only") == 4
+        partition.get("runtime_validated_observational_semantic") == 6
+        and partition.get("trace_evidence_only") == 3
         and partition.get("static_semantic") == 1
         and partition.get("total") == 10,
         f"capture opcode coverage partition drifted: {partition}",

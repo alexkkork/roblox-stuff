@@ -12092,10 +12092,21 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
     };
     const std::optional<int64_t> base = laneInteger(effectiveLanes, "S");
     const std::optional<int64_t> sourceRegister = laneInteger(effectiveLanes, "r");
-    const std::optional<int64_t> lookupIndex = laneInteger(effectiveLanes, "V");
+    const json lookupLane = effectiveLanes.is_object() && effectiveLanes.contains("V")
+        ? effectiveLanes["V"] : json(nullptr);
+    const std::optional<int64_t> lookupIndex = luraphObservedInteger(lookupLane);
+    std::optional<json> lookupKey;
+    if (lookupIndex)
+        lookupKey = json{{"kind", "constant"}, {"value", *lookupIndex}};
+    else if (lookupLane.is_object() && lookupLane.value("type", "") == "string" &&
+        lookupLane.contains("value") && lookupLane["value"].is_string())
+        lookupKey = json{{"kind", "constant"}, {"value", lookupLane["value"]}};
+    else if (lookupLane.is_object() && lookupLane.value("type", "") == "boolean" &&
+        lookupLane.contains("value") && lookupLane["value"].is_string())
+        lookupKey = json{{"kind", "constant"}, {"value", lookupLane["value"] == "true"}};
     if (!range.is_object() || range.value("begin", size_t(0)) != 307936 ||
         range.value("end", size_t(0)) != 323136 || source.find(exactPreserve) == std::string::npos ||
-        source.find(exactLookup) == std::string::npos || !base || !sourceRegister || !lookupIndex ||
+        source.find(exactLookup) == std::string::npos || !base || !sourceRegister || !lookupKey ||
         *base < 0 || *sourceRegister < 0 || *base == std::numeric_limits<int64_t>::max() ||
         observations.empty())
         return std::nullopt;
@@ -12108,7 +12119,8 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
         const json origins = observation.value("write_origins", json::object());
         const json lanes = observation.value("runtime_lanes", json::object());
         if (observation.value("opcode", int64_t(-1)) != 186 || laneInteger(lanes, "S") != base ||
-            laneInteger(lanes, "r") != sourceRegister || laneInteger(lanes, "V") != lookupIndex ||
+            laneInteger(lanes, "r") != sourceRegister || !lanes.contains("V") ||
+            !luraphObservedValuesEqual(lanes["V"], lookupLane) ||
             !guardPath.is_object() || !guardPath.value("complete", false) || guardPath.value("overflow", true) ||
             observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
                 static_cast<int64_t>(pc + 1) || !writes.is_array() || writes.empty() || writes.size() > 2)
@@ -12133,12 +12145,15 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
             return std::nullopt;
 
         // The tracer records changed register values. On repeated loop visits the
-        // preserved source table can already occupy base + 1, so that idempotent
-        // write is absent even though the handler executes it. A complete write
-        // from another visit must still prove the table type and exact origin.
+        // preserved receiver can already occupy base + 1, so that idempotent write
+        // is absent even though the handler executes it. Tables are common here,
+        // but Luau strings and values with index metamethods are valid receivers too;
+        // exact origin evidence proves the preservation without narrowing its type.
         if (!preservedWrite)
             continue;
-        if (preservedWrite->value("value", json::object()).value("type", "") != "table")
+        const json preservedValue = preservedWrite->value("value", json::object());
+        if (!preservedValue.is_object() || preservedValue.value("type", "invalid") == "invalid" ||
+            preservedValue.value("type", "") == "nil")
             return std::nullopt;
 
         const std::string preservedKey = std::to_string(*base + 1);
@@ -12192,7 +12207,7 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
                 {"value", {
                     {"kind", "index_read"},
                     {"table", registerRead(*base + 1)},
-                    {"index", constant(*lookupIndex)},
+                    {"index", *lookupKey},
                 }},
             },
         })},
@@ -12204,7 +12219,8 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
             {"source_register", *sourceRegister},
             {"preserved_register", *base + 1},
             {"destination_register", *base},
-            {"lookup_index", *lookupIndex},
+            {"lookup_index", lookupIndex ? json(*lookupIndex) : json(nullptr)},
+            {"lookup_key", lookupLane},
         }},
     };
 }
