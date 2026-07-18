@@ -2855,6 +2855,33 @@ private:
         return source;
     }
 
+    std::optional<std::string> stableObservedPrototypeArgument(
+        uint64_t prototype, size_t arity, size_t argumentIndex)
+    {
+        std::optional<ObservedValueIdentity> stable;
+        bool observed = false;
+        for (const auto& [site, frame] : observedCallFrames)
+        {
+            if (std::get<2>(site) != prototype)
+                continue;
+            observed = true;
+            if (!frame.argument_count_complete || !frame.argument_count || *frame.argument_count != arity)
+                return std::nullopt;
+            const auto identity = frame.argument_identities.find(argumentIndex);
+            if (identity == frame.argument_identities.end())
+                return std::nullopt;
+            if (stable && stable->key != identity->second.identity.key)
+                return std::nullopt;
+            stable = identity->second.identity;
+        }
+        if (!observed || !stable)
+            return std::nullopt;
+        const std::optional<std::string> source = observedBootstrapExpression(stable->value);
+        if (source)
+            ++result.observed_prototype_arguments_specialized;
+        return source;
+    }
+
     std::string expression(const json& value, Context& context, size_t depth = 0)
     {
         if (depth > 64 || !value.is_object())
