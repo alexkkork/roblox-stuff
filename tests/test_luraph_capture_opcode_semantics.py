@@ -67,10 +67,12 @@ def build_trace() -> str:
         (3, 186, encoded_lanes(S=8, r=8, V=187)),
         (4, 186, encoded_lanes(S=10, r=10, V=188)),
         (5, 186, encoded_lanes(S=12, r=12, V=189)),
+        (6, 186, encoded_lanes(S=14, r=14, V=190)),
+        (7, 61, encoded_lanes(r=3)),
     )
     return "\n".join(
         (
-            "@@LPH_PROTO_V1@@\t1\t5\tS,V,Z,g,r,v",
+            "@@LPH_PROTO_V1@@\t1\t7\tS,V,Z,g,r,v",
             "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
             *(f"@@LPH_INSN_V1@@\t1\t{pc}\t{opcode}\t{lanes}" for pc, opcode, lanes in sites),
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t0",
@@ -80,12 +82,20 @@ def build_trace() -> str:
             step(2, 2, 136, sites[1][2], "6=s:6361707475726564", 1),
             guard_path(3, 3, 186),
             step(3, 3, 186, sites[2][2], "8=f:|9=x:table", 2, "9=r:8"),
+            guard_path(6, 3, 186),
+            # A repeated visit may omit the unchanged preserved-table write.
+            step(6, 3, 186, sites[2][2], "8=f:", 1),
             guard_path(4, 4, 186),
             # The preserved table claims the wrong register origin.
             step(4, 4, 186, sites[3][2], "10=f:|11=x:table", 2, "11=r:9"),
             guard_path(5, 5, 186),
             # The preserved S+1 value must remain a capture table, not another function.
             step(5, 5, 186, sites[4][2], "12=f:|13=f:", 2, "13=r:12"),
+            guard_path(7, 6, 186),
+            step(7, 6, 186, sites[5][2], "14=f:|15=x:table", 2, "15=r:14"),
+            guard_path(8, 6, 186),
+            # Sparse observations still reject writes outside S and S+1.
+            step(8, 6, 186, sites[5][2], "16=f:", 1),
             "",
         )
     )
@@ -133,14 +143,17 @@ def instruction_rows(output: pathlib.Path) -> dict[int, dict]:
         if prototype.get("runtime_id") == 1
         for row in prototype.get("instructions") or []
     }
-    require(set(rows) == {1, 2, 3, 4, 5}, f"synthetic instruction rows drifted: {sorted(rows)}")
+    require(set(rows) == {1, 2, 3, 4, 5, 6, 7}, f"synthetic instruction rows drifted: {sorted(rows)}")
     return rows
 
 
-def assert_runtime_validated(row: dict, recognition_key: str) -> dict:
+def assert_runtime_validated(
+    row: dict, recognition_key: str, expected_observations: int = 1
+) -> dict:
     recognition = row.get(recognition_key)
     require(
-        recognition == {"status": "runtime_validated", "validated_observations": 1},
+        recognition
+        == {"status": "runtime_validated", "validated_observations": expected_observations},
         f"exact recognizer status drifted: {recognition}",
     )
     operation = row.get("observational_semantic_operation")
@@ -201,7 +214,7 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
         rows[2], "opcode136_capture_load_recognition", "opcode 136 incomplete guard path"
     )
 
-    lookup = assert_runtime_validated(rows[3], "opcode186_lookup_preserve_recognition")
+    lookup = assert_runtime_validated(rows[3], "opcode186_lookup_preserve_recognition", 2)
     require(lookup.get("kind") == "operation_sequence", f"opcode 186 shape drifted: {lookup}")
     require(lookup.get("semantic_family") == "lookup_and_preserve", f"opcode 186 family drifted: {lookup}")
     require(
@@ -239,12 +252,51 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
     assert_evidence_mismatch(
         rows[5], "opcode186_lookup_preserve_recognition", "opcode 186 non-table preservation"
     )
+    assert_evidence_mismatch(
+        rows[6], "opcode186_lookup_preserve_recognition", "opcode 186 contradictory sparse write"
+    )
+
+    discard_call = rows[7].get("semantic_operation")
+    require(
+        rows[7].get("opcode61_one_argument_discard_call_recognition")
+        == {"status": "static_validated", "validated_observations": 0},
+        f"opcode 61 exact handler was not statically recognized: {rows[7]}",
+    )
+    require(
+        isinstance(discard_call, dict)
+        and discard_call.get("semantic_family") == "call"
+        and discard_call.get("static_semantic") is True
+        and discard_call.get("path_specific") is False
+        and discard_call.get("source_claim") is False,
+        f"opcode 61 source boundary drifted: {discard_call}",
+    )
+    require(
+        discard_call.get("proof")
+        == "locked_opcode61_body_and_vm_state_independence_validated",
+        f"opcode 61 proof drifted: {discard_call}",
+    )
+    require(
+        discard_call.get("operations")
+        == [
+            {
+                "kind": "call",
+                "method": False,
+                "function": {"kind": "register_read", "index": {"kind": "constant", "value": 3}},
+                "arguments": [
+                    {"kind": "register_read", "index": {"kind": "constant", "value": 4}}
+                ],
+            },
+            {"kind": "set_top", "value": {"kind": "constant", "value": 2}},
+        ],
+        f"opcode 61 call layout drifted: {discard_call}",
+    )
 
     partition = (report.get("coverage") or {}).get("semantic_coverage_partition") or {}
     require(
         partition.get("runtime_validated_observational_semantic") == 2
-        and partition.get("trace_evidence_only") == 3
-        and partition.get("total") == 5,
+        and partition.get("trace_evidence_only") == 4
+        and partition.get("static_semantic") == 1
+        and partition.get("total") == 7,
         f"capture opcode coverage partition drifted: {partition}",
     )
 
@@ -266,9 +318,20 @@ def audit_locked_handler_ranges(output: pathlib.Path) -> None:
             "lookup_and_preserve",
             "locked_opcode186_lookup_preserve_branch_and_runtime_origins_validated",
         ),
+        (
+            7,
+            61,
+            "opcode61_one_argument_discard_call_recognition",
+            "call",
+            "locked_opcode61_body_and_vm_state_independence_validated",
+        ),
     ):
         handler_range = rows[pc].get("handler_range") or {}
-        locked_range = (326066, 326084) if opcode == 136 else (307936, 323136)
+        locked_range = {
+            136: (326066, 326084),
+            186: (307936, 323136),
+            61: (351789, 351819),
+        }[opcode]
         require(
             (handler_range.get("begin"), handler_range.get("end")) != locked_range,
             f"alternate family unexpectedly reused the locked opcode-{opcode} handler range",

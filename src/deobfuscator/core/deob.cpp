@@ -11793,6 +11793,80 @@ std::optional<json> recognizeLuraphOpcode38TwoArgumentDiscardCall(
     };
 }
 
+std::optional<json> recognizeLuraphOpcode61OneArgumentDiscardCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>& observations)
+{
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    constexpr std::string_view exactSource = "i=(r[_]);\nL[i](L[i+1]);\nq=(i-1);";
+    const auto laneInteger = [](const json& lanes, std::string_view name) -> std::optional<int64_t> {
+        if (!lanes.is_object() || !lanes.contains(std::string(name)))
+            return std::nullopt;
+        return luraphObservedInteger(lanes[std::string(name)]);
+    };
+    const std::optional<int64_t> base = laneInteger(effectiveLanes, "r");
+    if (!range.is_object() || range.value("begin", size_t(0)) != 351789 ||
+        range.value("end", size_t(0)) != 351819 || source != exactSource ||
+        !handler.value("normalization_complete", false) ||
+        !handler.value("vm_state_independent", false) || !base || *base < 1 ||
+        *base == std::numeric_limits<int64_t>::max())
+        return std::nullopt;
+
+    for (const json& observation : observations)
+    {
+        const json guardPath = observation.value("guard_path", json(nullptr));
+        const json writes = observation.value("register_writes", json::array());
+        const json lanes = observation.value("runtime_lanes", json::object());
+        if (observation.value("opcode", int64_t(-1)) != 61 || laneInteger(lanes, "r") != base ||
+            !guardPath.is_object() || !guardPath.value("complete", false) || guardPath.value("overflow", true) ||
+            observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
+                static_cast<int64_t>(pc + 1) || !writes.is_array() || !writes.empty())
+            return std::nullopt;
+    }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    return json{
+        {"kind", "operation_sequence"},
+        {"semantic_family", "call"},
+        {"opcode", 61},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"path_specific", false},
+        {"static_semantic", true},
+        {"source_claim", false},
+        {"proof", "locked_opcode61_body_and_vm_state_independence_validated"},
+        {"observation_count", observations.size()},
+        {"operations", json::array({
+            {
+                {"kind", "call"},
+                {"method", false},
+                {"function", registerRead(*base)},
+                {"arguments", json::array({registerRead(*base + 1)})},
+            },
+            {{"kind", "set_top"}, {"value", constant(*base - 1)}},
+        })},
+        {"static_validation", {
+            {"validated_fields", json::array({
+                "handler_range", "handler_body", "vm_state_independence", "callee_register",
+                "argument_register", "discarded_results", "top_after",
+            })},
+            {"callee_register", *base},
+            {"argument_register", *base + 1},
+            {"result_count", 0},
+            {"top_after", *base - 1},
+        }},
+    };
+}
+
 std::optional<json> recognizeLuraphOpcode136CaptureLoad(
     uint64_t prototype,
     size_t pc,
@@ -13295,6 +13369,29 @@ json luraphRuntimeSemanticDispatchArtifact(
                         {"status", "evidence_mismatch"},
                         {"validated_observations", 0},
                         {"validated_child_activations", 0},
+                    };
+            }
+            if (!semanticAccepted && opcode == 61 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null())
+            {
+                static const std::vector<json> noObservations;
+                const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
+                    ? observedSite->second : noObservations;
+                if (std::optional<json> recognized = recognizeLuraphOpcode61OneArgumentDiscardCall(
+                        id, pc, handler->second, effectiveLanes, siteObservations))
+                {
+                    row["semantic_operation"] = std::move(*recognized);
+                    row["opcode61_one_argument_discard_call_recognition"] = {
+                        {"status", "static_validated"},
+                        {"validated_observations", siteObservations.size()},
+                    };
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                }
+                else
+                    row["opcode61_one_argument_discard_call_recognition"] = {
+                        {"status", "evidence_mismatch"},
+                        {"validated_observations", 0},
                     };
             }
             if (!semanticAccepted && opcode == 136 && handler != handlers.end() &&
