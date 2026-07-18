@@ -10974,9 +10974,10 @@ std::optional<json> validateLuraphObservedCandidate(
                     const std::string sourceKind = source.value("kind", "");
                     if (sourceKind == "register")
                     {
-                        if (source.value("index", std::numeric_limits<int64_t>::min()) ==
+                        if (source.value("index", std::numeric_limits<int64_t>::min()) !=
                             *expectedRegisterOrigin)
-                            matchedRegisterOrigin = true;
+                            return std::nullopt;
+                        matchedRegisterOrigin = true;
                     }
                     else if (sourceKind != "argument" ||
                         source.value("index", std::numeric_limits<int64_t>::min()) !=

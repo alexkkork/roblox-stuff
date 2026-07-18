@@ -210,6 +210,14 @@ if(TARGET alex_deobfuscator)
     )
 
     rbx_add_python_test(
+        deobfuscator_luraph_unchanged_move_frame
+        "conformance;integration;security;subject;deobfuscator"
+        45
+        test_luraph_unchanged_move_frame.py
+        --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+    )
+
+    rbx_add_python_test(
         deobfuscator_luraph_capture_opcode_semantics
         "conformance;integration;security;subject;deobfuscator"
         45
