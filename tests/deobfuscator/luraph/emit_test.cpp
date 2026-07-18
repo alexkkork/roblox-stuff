@@ -1588,6 +1588,53 @@ bool testExactHelperAndOperandTableLoadsPreserveSharedStorage()
             "exact helper or operand-table load was marked unsupported");
 }
 
+bool testV147Opcode212PreservesFixedRangeAndSingleResult()
+{
+    const json instruction = {
+        {"pc", 1},
+        {"opcode", 212},
+        {"semantic_operation", {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "call"},
+            {"static_semantic", true},
+            {"operations", json::array({
+                {{"kind", "set_top"}, {"value", {{"kind", "constant"}, {"value", 22}}}},
+                {
+                    {"kind", "register_write"},
+                    {"register", {{"kind", "constant"}, {"value", 19}}},
+                    {"value", {
+                        {"kind", "call"},
+                        {"method", false},
+                        {"result_arity", {{"kind", "fixed"}, {"count", 1}}},
+                        {"function", {
+                            {"kind", "register_read"},
+                            {"index", {{"kind", "constant"}, {"value", 19}}},
+                        }},
+                        {"arguments", json::array({{
+                            {"kind", "register_range"},
+                            {"from", {{"kind", "constant"}, {"value", 20}}},
+                            {"to", {{"kind", "constant"}, {"value", 22}}},
+                            {"preserve_trailing_nil", true},
+                        }})},
+                    }},
+                },
+                {{"kind", "set_top"}, {"value", {{"kind", "constant"}, {"value", 19}}}},
+            })},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({instruction}), 0);
+    const size_t topBefore = candidate.source.find("top = 22");
+    const size_t call = candidate.source.find("unpack_values(registers, 20, 22)");
+    const size_t topAfter = candidate.source.find("top = 19", call);
+    return require(topBefore != std::string::npos && call != std::string::npos &&
+            topAfter != std::string::npos && topBefore < call && call < topAfter,
+        "v14.7 opcode-212 call did not preserve top, argument range, and result ordering") &&
+        require(candidate.source.find("registers[19] =") != std::string::npos,
+            "v14.7 opcode-212 call did not store its single result in the callable register") &&
+        require(candidate.unsupported_operations == 0,
+            "complete v14.7 opcode-212 call was marked unsupported");
+}
+
 json exactOpcode8Call(int functionRegister, int argumentBegin, int argumentEnd,
     std::string resultMode, int resultBase, int resultEnd = -1)
 {
@@ -2580,6 +2627,7 @@ int main()
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testStaticRegisterTableWriteRendersEffectfully();
     ok &= testExactHelperAndOperandTableLoadsPreserveSharedStorage();
+    ok &= testV147Opcode212PreservesFixedRangeAndSingleResult();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits();
     ok &= testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits();
