@@ -1667,10 +1667,14 @@ bool testV147Opcode61PreservesZeroArgumentsAndSingleResult()
     };
     const SemanticCandidate candidate = emitWithTarget(json::array({instruction}), 0);
     const size_t top = candidate.source.find("top = 7");
-    const size_t call = candidate.source.find("registers[7] = registers[7]();");
+    const size_t call = candidate.source.find("registers[7] = (registers[7])();");
+    const size_t callEnd = call == std::string::npos
+        ? std::string::npos : candidate.source.find('\n', call);
+    const std::string callLine = call == std::string::npos
+        ? std::string() : candidate.source.substr(call, callEnd - call);
     return require(top != std::string::npos && call != std::string::npos && top < call,
         "v14.7 opcode-61 call did not preserve top, zero arguments, and result ordering") &&
-        require(candidate.source.find("unpack_values(") == std::string::npos,
+        require(callLine.find("unpack_values(") == std::string::npos,
             "v14.7 opcode-61 zero-argument call invented an argument range") &&
         require(candidate.unsupported_operations == 0,
             "complete v14.7 opcode-61 call was marked unsupported");
