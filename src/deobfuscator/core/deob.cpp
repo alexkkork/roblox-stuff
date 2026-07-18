@@ -7788,6 +7788,16 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "if type(__alex_lph_key)==\"number\" and __alex_lph_key%1==0 and __alex_lph_key>=-200000 and __alex_lph_key<=200000 then __alex_lph_pre_regs[__alex_lph_key]=__alex_lph_value;end;end;end;";
     }
 
+    if (dynamicEvidence && fullTraceEnabled)
+    {
+        instrumentation += "if __alex_lph_step_enabled and __alex_lph_pre_op==8 then local __alex_lph_frame_keys={};";
+        instrumentation += "for __alex_lph_key in __alex_lph_pre_regs do if #__alex_lph_frame_keys>=512 then break end;__alex_lph_frame_keys[#__alex_lph_frame_keys+1]=__alex_lph_key;end;";
+        instrumentation += "table.sort(__alex_lph_frame_keys);local __alex_lph_frame_parts={};";
+        instrumentation += "for __alex_lph_frame_index=1,#__alex_lph_frame_keys do local __alex_lph_key=__alex_lph_frame_keys[__alex_lph_frame_index];";
+        instrumentation += "__alex_lph_frame_parts[__alex_lph_frame_index]=tostring(__alex_lph_key)..\"=\"..__alex_lph_encode_operand(rawget(__alex_lph_pre_regs,__alex_lph_key));end;";
+        instrumentation += "print(\"@@LPH_CALL_FRAME_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,#__alex_lph_frame_parts,table.concat(__alex_lph_frame_parts,\"|\"));end;";
+    }
+
     // Pure structure probes only need each prototype once. Call discovery is retained
     // for call-focused probes and refined payload windows, where activation evidence is
     // joined to the VM counter from the same execution.
@@ -8474,6 +8484,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     std::map<LaneSite, std::vector<json>> laneTableRows;
     std::map<GuardSite, json> guardStates;
     std::map<GuardSite, json> guardPaths;
+    std::map<GuardSite, json> callFrames;
     std::set<GuardSite> completedStepSites;
     std::set<std::pair<size_t, size_t>> guardManifest;
     if (catalog.available && catalog.document.contains("dynamic_guard_conditions") &&
@@ -8978,6 +8989,65 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             trace.vm_events.push_back({*vmCount, *activation, *pc, *opcode});
             continue;
         }
+        if (line.starts_with("@@LPH_CALL_FRAME_V1@@\t"))
+        {
+            const std::vector<std::string> fields = splitTraceFields(line);
+            const std::optional<uint64_t> vmCount = fields.size() == 7
+                ? parseTraceInteger<uint64_t>(fields[1]) : std::nullopt;
+            const std::optional<uint64_t> activation = fields.size() == 7
+                ? parseTraceInteger<uint64_t>(fields[2]) : std::nullopt;
+            const std::optional<int64_t> pc = fields.size() == 7
+                ? parseTraceInteger<int64_t>(fields[3]) : std::nullopt;
+            const std::optional<int64_t> opcode = fields.size() == 7
+                ? parseTraceInteger<int64_t>(fields[4]) : std::nullopt;
+            const std::optional<size_t> declared = fields.size() == 7
+                ? parseTraceInteger<size_t>(fields[5]) : std::nullopt;
+            bool valid = vmCount && activation && pc && opcode && declared && *vmCount > 0 &&
+                *activation > 0 && *pc > 0 && *opcode == 8 && *declared <= 512 &&
+                ((*declared == 0 && fields[6].empty()) || (*declared > 0 && !fields[6].empty()));
+            json frame = json::object();
+            size_t begin = 0;
+            while (valid && begin < fields[6].size())
+            {
+                const size_t end = fields[6].find('|', begin);
+                const std::string_view item(fields[6].data() + begin,
+                    (end == std::string::npos ? fields[6].size() : end) - begin);
+                const size_t equal = item.find('=');
+                const std::optional<int64_t> reg = equal == std::string_view::npos
+                    ? std::nullopt : parseTraceInteger<int64_t>(item.substr(0, equal));
+                if (!reg || *reg < -200000 || *reg > 200000 || equal + 1 >= item.size())
+                {
+                    valid = false;
+                    break;
+                }
+                const std::string key = std::to_string(*reg);
+                const json value = luraphRuntimeLaneValue(item.substr(equal + 1));
+                if (frame.contains(key) || !value.is_object() ||
+                    value.value("type", "invalid") == "invalid")
+                {
+                    valid = false;
+                    break;
+                }
+                frame[key] = value;
+                if (end == std::string::npos)
+                    break;
+                begin = end + 1;
+            }
+            if (!valid || frame.size() != *declared)
+            {
+                markMalformed();
+                continue;
+            }
+            const GuardSite site{*vmCount, *activation, *pc, *opcode};
+            if (auto existing = callFrames.find(site); existing != callFrames.end() &&
+                existing->second != frame)
+            {
+                markMalformed();
+                continue;
+            }
+            callFrames[site] = std::move(frame);
+            continue;
+        }
         if (line.starts_with("@@LPH_GUARD_V1@@\t"))
         {
             const std::vector<std::string> fields = splitTraceFields(line);
@@ -9283,6 +9353,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             const GuardSite guardSite{*vmCount, *activation, *pc, *opcode};
             const auto guardState = guardStates.find(guardSite);
             const auto guardPath = guardPaths.find(guardSite);
+            const auto callFrame = callFrames.find(guardSite);
             trace.steps.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -9294,6 +9365,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"write_origins", std::move(writeOrigins)},
                 {"guard_state", guardState != guardStates.end() ? guardState->second : json::object()},
                 {"guard_path", guardPath != guardPaths.end() ? guardPath->second : json(nullptr)},
+                {"call_frame", callFrame != callFrames.end() ? callFrame->second : json::object()},
             });
             completedStepSites.insert(guardSite);
             continue;
@@ -9513,11 +9585,13 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
         auto existing = uniqueSteps.find(key);
         const size_t evidenceFields = size_t(!step.value("runtime_lanes", json::object()).empty()) +
             size_t(!step.value("guard_state", json::object()).empty()) +
-            size_t(!step.value("write_origins", json::object()).empty());
+            size_t(!step.value("write_origins", json::object()).empty()) +
+            size_t(!step.value("call_frame", json::object()).empty());
         const size_t existingEvidenceFields = existing != uniqueSteps.end() && existing->second.is_object()
             ? size_t(!existing->second.value("runtime_lanes", json::object()).empty()) +
                 size_t(!existing->second.value("guard_state", json::object()).empty()) +
-                size_t(!existing->second.value("write_origins", json::object()).empty())
+                size_t(!existing->second.value("write_origins", json::object()).empty()) +
+                size_t(!existing->second.value("call_frame", json::object()).empty())
             : 0;
         if (existing == uniqueSteps.end() || evidenceFields > existingEvidenceFields)
             uniqueSteps[key] = std::move(step);
@@ -12492,6 +12566,8 @@ json luraphOpcode8CallArtifact(
         // closed until the result-placement contract is implemented there.
         {"emission_status", "requires_register_call_result_lowering"},
         {"runtime_validated", semantics.runtime_validated},
+        {"function_register_adjusted_from_runtime_frame",
+            semantics.function_register_adjusted_from_runtime_frame},
         {"observation_count", observationCount},
     };
     if (pathSpecific)
@@ -12540,7 +12616,9 @@ LuraphOpcode8PipelineRecognition recognizeLuraphOpcode8PipelineCall(
     }
 
     const auto recognize = [&](luraph::call_semantics::GuardPathProof proof,
-                               const std::vector<int64_t>& changedRegisters) {
+                               const std::vector<int64_t>& changedRegisters,
+                               const std::vector<int64_t>& callableRegisters,
+                               const std::vector<int64_t>& nonCallableRegisters) {
         luraph::call_semantics::Opcode8CallEvidence evidence;
         evidence.opcode = 8;
         evidence.packed_handler_shape_verified = true;
@@ -12550,12 +12628,15 @@ LuraphOpcode8PipelineRecognition recognizeLuraphOpcode8PipelineCall(
         evidence.encoded_argument_count = *argumentCount;
         evidence.encoded_result_count = *resultCount;
         evidence.observed_changed_registers = changedRegisters;
+        evidence.observed_callable_registers = callableRegisters;
+        evidence.observed_non_callable_registers = nonCallableRegisters;
         return luraph::call_semantics::recognizeOpcode8Call(evidence);
     };
 
     if (shape.value("static_guard_path_complete", false))
     {
-        const auto recognized = recognize(luraph::call_semantics::GuardPathProof::StaticallyProven, {});
+        const auto recognized = recognize(
+            luraph::call_semantics::GuardPathProof::StaticallyProven, {}, {}, {});
         output.status = luraph::call_semantics::toString(recognized.status);
         output.diagnostic = recognized.diagnostic;
         if (recognized.semantics)
@@ -12605,8 +12686,26 @@ LuraphOpcode8PipelineRecognition recognizeLuraphOpcode8PipelineCall(
             }
             changedRegisters.push_back(write["register"].get<int64_t>());
         }
+        std::vector<int64_t> callableRegisters;
+        std::vector<int64_t> nonCallableRegisters;
+        const json callFrame = observation.value("call_frame", json::object());
+        if (callFrame.is_object())
+        {
+            for (auto entry = callFrame.begin(); entry != callFrame.end(); ++entry)
+            {
+                const std::optional<int64_t> reg = parseTraceInteger<int64_t>(entry.key());
+                if (!reg || !entry.value().is_object())
+                    continue;
+                if (entry.value().value("type", "") == "function" &&
+                    entry.value().value("callable", false))
+                    callableRegisters.push_back(*reg);
+                else
+                    nonCallableRegisters.push_back(*reg);
+            }
+        }
         const auto recognized = recognize(
-            luraph::call_semantics::GuardPathProof::RuntimeObserved, changedRegisters);
+            luraph::call_semantics::GuardPathProof::RuntimeObserved, changedRegisters,
+            callableRegisters, nonCallableRegisters);
         if (!recognized.semantics)
         {
             output.status = luraph::call_semantics::toString(recognized.status);

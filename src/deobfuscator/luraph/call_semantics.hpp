@@ -63,6 +63,11 @@ struct Opcode8CallEvidence
     std::optional<int64_t> incoming_top;
     std::optional<uint64_t> actual_result_arity;
     std::vector<int64_t> observed_changed_registers;
+    // Some guarded handlers retain the callee scratch register instead of
+    // assigning it from the encoded result base on every path. A pre-call
+    // frame can prove that split without guessing from post-call writes.
+    std::vector<int64_t> observed_callable_registers;
+    std::vector<int64_t> observed_non_callable_registers;
 };
 
 struct ArgumentPack
@@ -98,6 +103,7 @@ struct Opcode8CallSemantics
     ArgumentPack arguments;
     ResultPlacement results;
     bool runtime_validated = false;
+    bool function_register_adjusted_from_runtime_frame = false;
 };
 
 struct RecognitionResult

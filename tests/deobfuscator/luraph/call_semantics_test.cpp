@@ -115,6 +115,30 @@ int main()
                       emptyArguments.semantics->arguments.registers == call::RegisterRange{8, 8},
         "encoded argument count one did not produce an empty pack");
 
+    call::Opcode8CallEvidence retainedCallee = verified(7, 4, 0);
+    retainedCallee.observed_callable_registers = {6};
+    retainedCallee.observed_non_callable_registers = {7, 8, 9};
+    const call::RecognitionResult retained = call::recognizeOpcode8Call(retainedCallee);
+    ok &= require(retained.status == call::RecognitionStatus::Recognized && retained.semantics &&
+                      retained.semantics->function_register == 6 &&
+                      retained.semantics->result_base_register == 7 &&
+                      retained.semantics->arguments.registers == call::RegisterRange{7, 10} &&
+                      retained.semantics->function_register_adjusted_from_runtime_frame,
+        "guard-retained callee register was not separated from the encoded result base");
+
+    call::Opcode8CallEvidence disprovedCallee = verified(7, 4, 0);
+    disprovedCallee.observed_non_callable_registers = {7};
+    ok &= require(call::recognizeOpcode8Call(disprovedCallee).status ==
+                      call::RecognitionStatus::ContradictoryEvidence,
+        "disproved callee was accepted without a callable predecessor");
+
+    call::Opcode8CallEvidence conflictingFrame = verified(7, 4, 0);
+    conflictingFrame.observed_callable_registers = {7};
+    conflictingFrame.observed_non_callable_registers = {7};
+    ok &= require(call::recognizeOpcode8Call(conflictingFrame).status ==
+                      call::RecognitionStatus::ContradictoryEvidence,
+        "contradictory pre-call register classification was accepted");
+
     call::Opcode8CallEvidence discardNoWrites = verified(8, 2, 1);
     discardNoWrites.actual_result_arity = 5;
     const call::RecognitionResult discardLowArity = call::recognizeOpcode8Call(discardNoWrites);

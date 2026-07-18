@@ -68,15 +68,34 @@ RecognitionResult recognizeOpcode8Call(const Opcode8CallEvidence& evidence)
     if (evidence.incoming_top && *evidence.incoming_top < -1)
         return fail(RecognitionStatus::InvalidEvidence, "incoming top is outside the VM register domain");
 
+    const auto contains = [](const std::vector<int64_t>& values, int64_t value) {
+        return std::find(values.begin(), values.end(), value) != values.end();
+    };
+    for (int64_t reg : evidence.observed_callable_registers)
+        if (contains(evidence.observed_non_callable_registers, reg))
+            return fail(RecognitionStatus::ContradictoryEvidence,
+                "pre-call frame classifies one register as both callable and non-callable");
+
     Opcode8CallSemantics semantics;
     semantics.function_register = evidence.base_register;
+    const bool encodedBaseCallable = contains(evidence.observed_callable_registers, evidence.base_register);
+    const bool encodedBaseNonCallable = contains(evidence.observed_non_callable_registers, evidence.base_register);
+    if (!encodedBaseCallable && encodedBaseNonCallable)
+    {
+        if (evidence.base_register == 0 ||
+            !contains(evidence.observed_callable_registers, evidence.base_register - 1))
+            return fail(RecognitionStatus::ContradictoryEvidence,
+                "pre-call frame disproves the encoded callee without proving a retained callee register");
+        semantics.function_register = evidence.base_register - 1;
+        semantics.function_register_adjusted_from_runtime_frame = true;
+    }
     semantics.result_base_register = evidence.base_register;
     semantics.encoded_argument_count = evidence.encoded_argument_count;
     semantics.encoded_result_count = evidence.encoded_result_count;
     semantics.runtime_validated = evidence.guard_path_proof == GuardPathProof::RuntimeObserved;
 
     int64_t firstArgument = 0;
-    if (!checkedAdd(evidence.base_register, 1, firstArgument))
+    if (!checkedAdd(semantics.function_register, 1, firstArgument))
         return fail(RecognitionStatus::InvalidEvidence, "argument register arithmetic overflows");
     semantics.arguments.registers.begin = firstArgument;
 
