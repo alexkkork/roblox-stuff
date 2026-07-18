@@ -16,6 +16,9 @@ from typing import Any, Iterable, Sequence
 
 MARKER_RE = re.compile(r"@@LPH_[A-Z0-9_]+@@")
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+TABLE_OBJECT_ID_RE = re.compile(r"(?:^|[|=,\t])t:(?:0|[1-9][0-9]*)(?=$|[|,\t])")
+TRACE_RUN_MARKER = "@@LPH_TRACE_RUN_V1@@"
+TRACE_RUN_SCHEMA = "lph-trace-run-v1"
 STRUCTURE_MARKERS = {
     "@@LPH_PROTO_V1@@",
     "@@LPH_PROTO_OBJECT_V1@@",
@@ -121,6 +124,15 @@ class StructureShape:
     marker_records: int = 0
 
 
+@dataclass(frozen=True, order=True)
+class TraceWindow:
+    start: int
+    end: int
+
+    def contains(self, count: int) -> bool:
+        return self.start <= count <= self.end
+
+
 def _json_field(value: Any) -> str:
     if value is None:
         return ""
@@ -168,7 +180,9 @@ def parse_record(line: str, *, location: str) -> Record | None:
                 f"{location}: guard-path JSONL fields must contain only strings or integers"
             )
         record = Record(marker, tuple(_json_field(value) for value in fields))
-        if marker == GUARD_MARKER:
+        if marker == TRACE_RUN_MARKER:
+            parse_trace_run_record(record, location=location)
+        elif marker == GUARD_MARKER:
             parse_guard_record(record, location=location)
         elif marker == GUARD_PATH_MARKER:
             parse_guard_path_record(record, location=location)
@@ -183,11 +197,52 @@ def parse_record(line: str, *, location: str) -> Record | None:
     if not MARKER_RE.fullmatch(marker):
         raise CampaignError(f"{location}: malformed Luraph marker line")
     record = Record(marker, tuple(parts[1:]))
-    if marker == GUARD_MARKER:
+    if marker == TRACE_RUN_MARKER:
+        parse_trace_run_record(record, location=location)
+    elif marker == GUARD_MARKER:
         parse_guard_record(record, location=location)
     elif marker == GUARD_PATH_MARKER:
         parse_guard_path_record(record, location=location)
     return record
+
+
+def parse_trace_run_record(record: Record, *, location: str) -> str | None:
+    """Return the capture digest carried by a campaign-created trace bundle."""
+
+    if record.marker != TRACE_RUN_MARKER:
+        return None
+    if len(record.fields) != 1 or not SHA256_RE.fullmatch(record.fields[0]):
+        raise CampaignError(
+            f"{location}: trace-run marker needs exactly one 64-character SHA-256 capture id"
+        )
+    return record.fields[0].lower()
+
+
+def normalize_trace_windows(windows: Sequence[tuple[int, int]]) -> tuple[TraceWindow, ...]:
+    """Validate a disjoint set of inclusive, one-based VM-count windows."""
+
+    normalized: list[TraceWindow] = []
+    for ordinal, window in enumerate(windows, 1):
+        if len(window) != 2:
+            raise CampaignError(f"trace window {ordinal} must contain START and END")
+        start, end = window
+        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+            raise CampaignError(f"trace window {ordinal} bounds must be integers")
+        if start < 1 or end < start:
+            raise CampaignError(f"trace window {ordinal} requires START > 0 and END >= START")
+        normalized.append(TraceWindow(start, end))
+    normalized.sort()
+    for previous, current in zip(normalized, normalized[1:]):
+        if current.start <= previous.end:
+            raise CampaignError(
+                f"trace windows {previous.start}-{previous.end} and "
+                f"{current.start}-{current.end} overlap"
+            )
+    return tuple(normalized)
+
+
+def _has_table_object_identity(record: Record) -> bool:
+    return any(TABLE_OBJECT_ID_RE.search(field) is not None for field in record.fields)
 
 
 def _parse_int(value: str, *, location: str, label: str, minimum: int = 0) -> int:
