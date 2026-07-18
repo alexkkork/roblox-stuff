@@ -770,6 +770,7 @@ private:
     std::map<int64_t, std::string> rootArgumentExpressions;
     std::set<uint64_t> rootArgumentPrototypes;
     bool rootArgumentTableComplete = false;
+    bool rootArgumentDirectSpecializationSafe = true;
     bool rootCallFrameSpecialized = false;
     std::set<std::tuple<uint64_t, size_t, int64_t>> remappedCaptureSites;
     std::set<std::tuple<uint64_t, size_t, int64_t>> unresolvedCaptureSites;
@@ -981,6 +982,8 @@ private:
             std::none_of(callEdges.begin(), callEdges.end(), [&](const auto& edge) {
                 return edge.second == rootPrototype;
             });
+        size_t recoveredRootEntries = 0;
+        bool capturedRootDomainComplete = false;
         if (!payloadArguments.value("argument_table_conflict", false) &&
             payloadArguments.contains("argument_table_domains") &&
             payloadArguments["argument_table_domains"].is_array())
@@ -994,7 +997,8 @@ private:
                         payloadArguments["argument_table_entries"].end(), [](const json& entry) {
                             return entry.is_object() && entry.value("argument_index", size_t(0)) == 1;
                         }));
-                    rootArgumentTableComplete = observedEntries == recoveredEntries;
+                    recoveredRootEntries = recoveredEntries;
+                    capturedRootDomainComplete = observedEntries == recoveredEntries;
                     break;
                 }
         for (const json& entry : payloadArguments["argument_table_entries"])
@@ -1007,10 +1011,12 @@ private:
             if (key && *key >= 0 && value)
                 rootArgumentExpressions[*key] = *value;
         }
+        rootArgumentTableComplete = capturedRootDomainComplete &&
+            rootArgumentExpressions.size() == recoveredRootEntries;
         const auto prototype = instructions.find(rootPrototype);
         if (prototype == instructions.end())
         {
-            rootArgumentExpressions.clear();
+            rootArgumentDirectSpecializationSafe = false;
             return;
         }
         for (const auto& [pc, rows] : prototype->second)
@@ -1019,11 +1025,7 @@ private:
             for (const json& instruction : rows)
                 if (const json* semantic = semanticOperationForInstruction(instruction);
                     semantic && (writesRegister(*semantic, 1) || rootArgumentTableEscapes(*semantic)))
-                {
-                    rootArgumentExpressions.clear();
-                    rootArgumentTableComplete = false;
-                    return;
-                }
+                    rootArgumentDirectSpecializationSafe = false;
         }
         result.root_argument_table_complete = rootArgumentTableComplete;
         result.root_call_frame_specialized = rootCallFrameSpecialized;
@@ -2780,7 +2782,8 @@ private:
             const json index = value.value("index", json::object());
             if (table.is_object() && table.value("kind", "") == "upvalue_file")
                 return captureCellExpression(index, context, depth + 1);
-            if (rootArgumentPrototypes.contains(context.prototype) && table.is_object() &&
+            if (rootArgumentDirectSpecializationSafe && rootArgumentPrototypes.contains(context.prototype) &&
+                table.is_object() &&
                 table.value("kind", "") == "register_read")
             {
                 const std::optional<int64_t> tableRegister = integerValue(table.value("index", json::object()));
