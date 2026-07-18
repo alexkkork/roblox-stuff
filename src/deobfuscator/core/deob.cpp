@@ -13020,6 +13020,12 @@ LuraphExactLeafRecognition recognizeLuraphOpcode87HelperLoad(
     if (observations)
         for (const json& observation : *observations)
         {
+            if (!observation.is_object())
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-76 runtime evidence row is malformed";
+                return output;
+            }
             const json runtimeLanes = observation.value("runtime_lanes", json::object());
             const json writes = observation.value("register_writes", json(nullptr));
             const json guardPath = observation.value("guard_path", json(nullptr));
@@ -13479,6 +13485,304 @@ LuraphExactLeafRecognition recognizeLuraphV147Opcode61SingleResultCall(
         {"call_may_raise", true},
         {"destination_write_after_successful_call", true},
         {"fallthrough_after_successful_call", true},
+    };
+    return output;
+}
+
+bool luraphV147SplitMoveHandlerMatches(const json& handler, int64_t opcode)
+{
+    struct HandlerSpec
+    {
+        size_t begin;
+        size_t end;
+        std::string_view exactLeaf;
+    };
+    std::optional<HandlerSpec> spec;
+    if (opcode == 36)
+        spec = HandlerSpec{17341, 17779, "else if w~=37 then p=t;o=V[_];"};
+    else if (opcode == 96)
+        spec = HandlerSpec{650, 9556, "else if w~=97 then G=t;B=h[_];else G=G[B];end;"};
+    else if (opcode == 171)
+        spec = HandlerSpec{40572, 40917, "else if w==171 then G=G[B];(p)[o]=(G);else"};
+    if (!spec || handler.value("opcode", int64_t(-1)) != opcode)
+        return false;
+
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    return range.is_object() && range.value("begin", size_t(0)) == spec->begin &&
+        range.value("end", size_t(0)) == spec->end && normalized.is_object() &&
+        normalized.value("opcode", int64_t(-1)) == opcode &&
+        handler.value("candidate_source", "").find(spec->exactLeaf) != std::string::npos;
+}
+
+bool luraphV147SplitMoveGuardPathMatches(const json& observation, int64_t opcode)
+{
+    struct GuardDecision
+    {
+        size_t begin;
+        size_t end;
+        bool decision;
+    };
+    std::vector<GuardDecision> expected;
+    if (opcode == 36)
+        expected = {{17344, 17356, false}, {17383, 17394, false}};
+    else if (opcode == 96)
+        expected = {{653, 665, false}, {5011, 5023, false}, {5075, 5087, false}};
+    else if (opcode == 171)
+        expected = {{19910, 19922, true}, {40575, 40586, false}, {40660, 40671, false}};
+    else
+        return false;
+
+    const json guardPath = observation.value("guard_path", json(nullptr));
+    if (!guardPath.is_object() || !guardPath.value("complete", false) ||
+        guardPath.value("overflow", true))
+        return false;
+    const json decisions = guardPath.value("decisions", json(nullptr));
+    if (!decisions.is_array() || decisions.size() != expected.size())
+        return false;
+    for (size_t index = 0; index < expected.size(); ++index)
+    {
+        if (!decisions[index].is_object() ||
+            decisions[index].value("begin", size_t(0)) != expected[index].begin ||
+            decisions[index].value("end", size_t(0)) != expected[index].end ||
+            decisions[index].value("decision", !expected[index].decision) != expected[index].decision)
+            return false;
+    }
+    return true;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147SplitMoveInstruction(
+    uint64_t prototype,
+    size_t pc,
+    int64_t opcode,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphV147SplitMoveHandlerMatches(handler, opcode))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "handler does not match the locked v14.7 split-register-move state machine";
+        return output;
+    }
+
+    std::optional<int64_t> operand;
+    if (opcode == 36)
+        operand = luraphRuntimeLaneInteger(effectiveLanes, "V");
+    else if (opcode == 96)
+        operand = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    if ((opcode == 36 || opcode == 96) && (!operand || *operand < 0))
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "split-register-move source or destination register is invalid";
+        return output;
+    }
+
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object() || observation.value("opcode", int64_t(-1)) != opcode ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !luraphV147SplitMoveGuardPathMatches(observation, opcode))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "runtime evidence disagrees with the intact v14.7 split-move path";
+                return output;
+            }
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            if ((opcode == 36 && luraphRuntimeLaneInteger(runtimeLanes, "V") != operand) ||
+                (opcode == 96 && luraphRuntimeLaneInteger(runtimeLanes, "h") != operand))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "runtime split-move operand differs from the decoded operand";
+                return output;
+            }
+            const json writes = observation.value("register_writes", json(nullptr));
+            const bool writesAgree = writes.is_array() &&
+                ((opcode == 171 && writes.size() <= 1) || (opcode != 171 && writes.empty()));
+            if (!writesAgree)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "runtime split-move register writes disagree with the selected handler leaf";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto state = [](std::string_view name) {
+        return json{{"kind", "vm_state"}, {"name", name}};
+    };
+    if (opcode == 36)
+    {
+        output.operation = {
+            {"kind", "prepare_vm_state"},
+            {"semantic_family", "split_move_destination"},
+            {"bindings", json::array({
+                {{"slot", "p"}, {"value", {{"kind", "register_file"}}}},
+                {{"slot", "o"}, {"value", constant(*operand)}},
+            })},
+            {"protector_state", true},
+            {"source_semantic", false},
+        };
+    }
+    else if (opcode == 96)
+    {
+        output.operation = {
+            {"kind", "prepare_vm_state"},
+            {"semantic_family", "split_move_source"},
+            {"bindings", json::array({
+                {{"slot", "G"}, {"value", {{"kind", "register_file"}}}},
+                {{"slot", "B"}, {"value", constant(*operand)}},
+            })},
+            {"protector_state", true},
+            {"source_semantic", false},
+        };
+    }
+    else
+    {
+        output.operation = {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "split_move_commit"},
+            {"operations", json::array({
+                {
+                    {"kind", "assign"},
+                    {"targets", json::array({state("G")})},
+                    {"values", json::array({{
+                        {"kind", "index_read"},
+                        {"table", state("G")},
+                        {"index", state("B")},
+                    }})},
+                    {"evaluation_order", "values_before_writes"},
+                },
+                {
+                    {"kind", "table_write"},
+                    {"table", state("p")},
+                    {"index", state("o")},
+                    {"value", state("G")},
+                    {"effect_barrier", true},
+                },
+            })},
+            {"source_semantic", true},
+            {"protector_state", false},
+        };
+    }
+    output.status = "recognized";
+    output.diagnostic = opcode == 36
+        ? "opcode 36 prepares the split-move destination register"
+        : opcode == 96
+            ? "opcode 96 prepares the split-move source register"
+            : "opcode 171 commits the prepared register move";
+    output.operation["opcode"] = opcode;
+    output.operation["prototype"] = prototype;
+    output.operation["pc"] = pc;
+    output.operation["path_specific"] = false;
+    output.operation["static_semantic"] = true;
+    output.operation["source_claim"] = false;
+    output.operation["proof"] = "locked_v147_split_register_move_state_machine";
+    output.operation["integrity_precondition"] = "intact_locked_handler_state";
+    output.operation["protector_guards_elided"] = true;
+    output.operation["observation_count"] = output.validated_observations;
+    output.operation["fallthrough"] = true;
+    return output;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147Opcode76IndexedRead(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    constexpr std::string_view exactLeaf =
+        "elseif w~=76 then t[h[_]]=workspace;else t[Q[_]]=t[h[_]][C[_]];end;";
+    const bool handlerMatches = handler.value("opcode", int64_t(-1)) == 76 && range.is_object() &&
+        range.value("begin", size_t(0)) == 9892 && range.value("end", size_t(0)) == 10051 &&
+        normalized.is_object() && normalized.value("opcode", int64_t(-1)) == 76 &&
+        handler.value("candidate_source", "").find(exactLeaf) != std::string::npos;
+    if (!handlerMatches)
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-76 handler does not match the locked v14.7 indexed-read leaf";
+        return output;
+    }
+
+    const std::optional<int64_t> destination = luraphRuntimeLaneInteger(effectiveLanes, "Q");
+    const std::optional<int64_t> tableRegister = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    const std::optional<int64_t> key = luraphRuntimeLaneInteger(effectiveLanes, "C");
+    if (!destination || !tableRegister || !key || *destination < 0 || *tableRegister < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-76 destination, table register, or key operand is invalid";
+        return output;
+    }
+
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json decisions = guardPath.is_object()
+                ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
+            const bool intactPath = guardPath.is_object() && guardPath.value("complete", false) &&
+                !guardPath.value("overflow", true) && decisions.is_array() && decisions.size() == 2 &&
+                decisions[0].is_object() && decisions[0].value("begin", size_t(0)) == 9895 &&
+                decisions[0].value("end", size_t(0)) == 9907 &&
+                !decisions[0].value("decision", true) && decisions[1].is_object() &&
+                decisions[1].value("begin", size_t(0)) == 9932 &&
+                decisions[1].value("end", size_t(0)) == 9944 &&
+                !decisions[1].value("decision", true);
+            bool writesAgree = writes.is_array() && writes.size() <= 1;
+            if (writesAgree && !writes.empty())
+                writesAgree = writes.front().is_object() &&
+                    writes.front().value("register", int64_t(-1)) == *destination;
+            if (observation.value("opcode", int64_t(-1)) != 76 ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "Q") != destination ||
+                luraphRuntimeLaneInteger(runtimeLanes, "h") != tableRegister ||
+                luraphRuntimeLaneInteger(runtimeLanes, "C") != key || !writesAgree || !intactPath)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-76 runtime evidence disagrees with the intact indexed-read path";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    output.status = "recognized";
+    output.diagnostic = "the intact v14.7 opcode-76 leaf reads R[h][C] into R[Q]";
+    output.operation = {
+        {"kind", "register_write"},
+        {"semantic_family", "indexed_read"},
+        {"opcode", 76},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"register", constant(*destination)},
+        {"value", {
+            {"kind", "index_read"},
+            {"table", {{"kind", "register_read"}, {"index", constant(*tableRegister)}}},
+            {"index", constant(*key)},
+        }},
+        {"path_specific", false},
+        {"static_semantic", true},
+        {"source_claim", false},
+        {"proof", "locked_v147_opcode76_indexed_read"},
+        {"integrity_precondition", "intact_locked_handler_state"},
+        {"protector_guards_elided", true},
+        {"observation_count", output.validated_observations},
+        {"may_invoke_index_metamethod", true},
+        {"may_raise", true},
+        {"fallthrough_after_successful_read", true},
     };
     return output;
 }
@@ -14514,6 +14818,17 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode61V147SitesRejected = 0;
     size_t opcode61V147ObservationsValidated = 0;
     json opcode61V147RecognitionStatusCounts = json::object();
+    size_t splitMoveSitesTotal = 0;
+    size_t splitMoveSitesStatic = 0;
+    size_t splitMoveSitesRejected = 0;
+    size_t splitMoveObservationsValidated = 0;
+    json splitMoveRecognitionStatusCounts = json::object();
+    json splitMoveOpcodeSiteCounts = json::object();
+    size_t opcode76SitesTotal = 0;
+    size_t opcode76SitesStatic = 0;
+    size_t opcode76SitesRejected = 0;
+    size_t opcode76ObservationsValidated = 0;
+    json opcode76RecognitionStatusCounts = json::object();
     size_t opcode23SitesTotal = 0;
     size_t opcode23SitesStatic = 0;
     size_t opcode23SitesRejected = 0;
@@ -14759,6 +15074,62 @@ json luraphRuntimeSemanticDispatchArtifact(
                 }
                 else
                     ++opcode61V147SitesRejected;
+            }
+            if (!semanticAccepted && (opcode == 36 || opcode == 96 || opcode == 171) &&
+                handler != handlers.end())
+            {
+                ++splitMoveSitesTotal;
+                const std::string opcodeKey = std::to_string(opcode);
+                splitMoveOpcodeSiteCounts[opcodeKey] =
+                    splitMoveOpcodeSiteCounts.value(opcodeKey, size_t(0)) + 1;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphV147SplitMoveInstruction(
+                    id, pc, opcode, handler->second, effectiveLanes, siteObservations);
+                row["v147_split_move_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                splitMoveRecognitionStatusCounts[recognized.status] =
+                    splitMoveRecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                splitMoveObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++splitMoveSitesStatic;
+                }
+                else
+                    ++splitMoveSitesRejected;
+            }
+            if (!semanticAccepted && opcode == 76 && handler != handlers.end())
+            {
+                ++opcode76SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphV147Opcode76IndexedRead(
+                    id, pc, handler->second, effectiveLanes, siteObservations);
+                row["opcode76_v147_indexed_read_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode76RecognitionStatusCounts[recognized.status] =
+                    opcode76RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode76ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode76SitesStatic;
+                }
+                else
+                    ++opcode76SitesRejected;
             }
             if (!semanticAccepted && handler != handlers.end())
             {
@@ -15600,6 +15971,36 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"recognition_status_counts", std::move(opcode61V147RecognitionStatusCounts)},
             {"fixed_zero_arguments", true},
             {"fixed_single_result", true},
+            {"intact_handler_precondition", true},
+            {"protector_guards_elided", true},
+        }},
+        {"v147_split_move_coverage", {
+            {"available", splitMoveSitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-36-96-171-split-register-move"},
+            {"sites_total", splitMoveSitesTotal},
+            {"static_semantic_sites", splitMoveSitesStatic},
+            {"unresolved_sites", splitMoveSitesTotal - splitMoveSitesStatic},
+            {"rejected_sites", splitMoveSitesRejected},
+            {"validated_runtime_executions", splitMoveObservationsValidated},
+            {"recognition_status_counts", std::move(splitMoveRecognitionStatusCounts)},
+            {"opcode_site_counts", std::move(splitMoveOpcodeSiteCounts)},
+            {"destination_prepare_opcode", 36},
+            {"source_prepare_opcode", 96},
+            {"commit_opcode", 171},
+            {"vm_state_identity_preserved", true},
+            {"intact_handler_precondition", true},
+            {"protector_guards_elided", true},
+        }},
+        {"opcode76_v147_indexed_read_coverage", {
+            {"available", opcode76SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-76-indexed-read"},
+            {"sites_total", opcode76SitesTotal},
+            {"static_semantic_sites", opcode76SitesStatic},
+            {"unresolved_sites", opcode76SitesTotal - opcode76SitesStatic},
+            {"rejected_sites", opcode76SitesRejected},
+            {"validated_runtime_executions", opcode76ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode76RecognitionStatusCounts)},
+            {"index_metamethod_behavior_preserved", true},
             {"intact_handler_precondition", true},
             {"protector_guards_elided", true},
         }},
@@ -18747,6 +19148,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeOpcode151RangeClearCoverage = json{{"available", false}};
     json runtimeOpcode212V147SingleResultCallCoverage = json{{"available", false}};
     json runtimeOpcode61V147SingleResultCallCoverage = json{{"available", false}};
+    json runtimeV147SplitMoveCoverage = json{{"available", false}};
+    json runtimeOpcode76V147IndexedReadCoverage = json{{"available", false}};
     json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
@@ -18813,6 +19216,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode212_v147_single_result_call_coverage", json{{"available", false}});
                     runtimeOpcode61V147SingleResultCallCoverage = runtimeSemanticDocument->value(
                         "opcode61_v147_single_result_call_coverage", json{{"available", false}});
+                    runtimeV147SplitMoveCoverage = runtimeSemanticDocument->value(
+                        "v147_split_move_coverage", json{{"available", false}});
+                    runtimeOpcode76V147IndexedReadCoverage = runtimeSemanticDocument->value(
+                        "opcode76_v147_indexed_read_coverage", json{{"available", false}});
                     runtimeOpcode23ArgumentCopyCoverage = runtimeSemanticDocument->value(
                         "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
@@ -18878,6 +19285,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"opcode151_range_clear_coverage", runtimeOpcode151RangeClearCoverage},
                 {"opcode212_v147_single_result_call_coverage", runtimeOpcode212V147SingleResultCallCoverage},
                 {"opcode61_v147_single_result_call_coverage", runtimeOpcode61V147SingleResultCallCoverage},
+                {"v147_split_move_coverage", runtimeV147SplitMoveCoverage},
+                {"opcode76_v147_indexed_read_coverage", runtimeOpcode76V147IndexedReadCoverage},
                 {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
@@ -20570,6 +20979,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["opcode151_range_clears"] = runtimeOpcode151RangeClearCoverage;
     report["coverage"]["opcode212_v147_single_result_calls"] = runtimeOpcode212V147SingleResultCallCoverage;
     report["coverage"]["opcode61_v147_single_result_calls"] = runtimeOpcode61V147SingleResultCallCoverage;
+    report["coverage"]["v147_split_moves"] = runtimeV147SplitMoveCoverage;
+    report["coverage"]["opcode76_v147_indexed_reads"] = runtimeOpcode76V147IndexedReadCoverage;
     report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;

@@ -1588,6 +1588,108 @@ bool testExactHelperAndOperandTableLoadsPreserveSharedStorage()
             "exact helper or operand-table load was marked unsupported");
 }
 
+bool testV147SplitMoveStateSequencePreservesPreparedTransfer()
+{
+    const json prepareDestination = {
+        {"pc", 1},
+        {"opcode", 36},
+        {"semantic_operation", {
+            {"kind", "prepare_vm_state"},
+            {"semantic_family", "split_move_destination"},
+            {"static_semantic", true},
+            {"protector_state", true},
+            {"bindings", json::array({
+                {
+                    {"slot", "p"},
+                    {"value", {{"kind", "register_file"}}},
+                },
+                {
+                    {"slot", "o"},
+                    {"value", immediate("V", 12)},
+                },
+            })},
+        }},
+    };
+    const json prepareSource = {
+        {"pc", 2},
+        {"opcode", 96},
+        {"semantic_operation", {
+            {"kind", "prepare_vm_state"},
+            {"semantic_family", "split_move_source"},
+            {"static_semantic", true},
+            {"protector_state", true},
+            {"bindings", json::array({
+                {
+                    {"slot", "G"},
+                    {"value", {{"kind", "register_file"}}},
+                },
+                {
+                    {"slot", "B"},
+                    {"value", immediate("h", 5)},
+                },
+            })},
+        }},
+    };
+    const json commitMove = {
+        {"pc", 3},
+        {"opcode", 171},
+        {"semantic_operation", {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "split_move_commit"},
+            {"static_semantic", true},
+            {"operations", json::array({
+                {
+                    {"kind", "assign"},
+                    {"targets", json::array({{{"kind", "vm_state"}, {"name", "G"}}})},
+                    {"values", json::array({{
+                        {"kind", "index_read"},
+                        {"table", {{"kind", "vm_state"}, {"name", "G"}}},
+                        {"index", {{"kind", "vm_state"}, {"name", "B"}}},
+                    }})},
+                },
+                {
+                    {"kind", "table_write"},
+                    {"table", {{"kind", "vm_state"}, {"name", "p"}}},
+                    {"index", {{"kind", "vm_state"}, {"name", "o"}}},
+                    {"value", {{"kind", "vm_state"}, {"name", "G"}}},
+                },
+            })},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({prepareDestination, prepareSource, commitMove}), 0, 3);
+
+    const std::string destinationFile = "state[\"p\"] = registers;";
+    const std::string destinationIndex = "state[\"o\"] = 12;";
+    const std::string sourceFile = "state[\"G\"] = registers;";
+    const std::string sourceIndex = "state[\"B\"] = 5;";
+    const std::string sourceRead = "state[\"G\"] = (state[\"G\"])[state[\"B\"]];";
+    const std::string destinationWrite = "(state[\"p\"])[state[\"o\"]] = state[\"G\"];";
+    const size_t destinationFileOffset = candidate.source.find(destinationFile);
+    const size_t destinationIndexOffset = candidate.source.find(destinationIndex);
+    const size_t sourceFileOffset = candidate.source.find(sourceFile);
+    const size_t sourceIndexOffset = candidate.source.find(sourceIndex);
+    const size_t sourceReadOffset = candidate.source.find(sourceRead);
+    const size_t destinationWriteOffset = candidate.source.find(destinationWrite);
+
+    return require(destinationFileOffset != std::string::npos &&
+            destinationIndexOffset != std::string::npos &&
+            sourceFileOffset != std::string::npos && sourceIndexOffset != std::string::npos,
+        "v14.7 split move did not preserve its destination and source state setup") &&
+        require(sourceReadOffset != std::string::npos,
+            "v14.7 split move did not preserve the prepared source table read") &&
+        require(destinationWriteOffset != std::string::npos,
+            "v14.7 split move did not preserve the final prepared table write") &&
+        require(destinationFileOffset < destinationIndexOffset &&
+                destinationIndexOffset < sourceFileOffset && sourceFileOffset < sourceIndexOffset &&
+                sourceIndexOffset < sourceReadOffset && sourceReadOffset < destinationWriteOffset,
+            "v14.7 split move state operations were emitted out of order") &&
+        require(candidate.unsupported_expressions == 0 && candidate.unsupported_operations == 0,
+            "complete v14.7 split move state sequence was marked unsupported") &&
+        require(candidate.fully_rendered(),
+            "complete v14.7 split move state sequence did not produce compilable Luau");
+}
+
 bool testV147Opcode212PreservesFixedRangeAndSingleResult()
 {
     const json instruction = {
@@ -2672,6 +2774,7 @@ int main()
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testStaticRegisterTableWriteRendersEffectfully();
     ok &= testExactHelperAndOperandTableLoadsPreserveSharedStorage();
+    ok &= testV147SplitMoveStateSequencePreservesPreparedTransfer();
     ok &= testV147Opcode212PreservesFixedRangeAndSingleResult();
     ok &= testV147Opcode61PreservesZeroArgumentsAndSingleResult();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
