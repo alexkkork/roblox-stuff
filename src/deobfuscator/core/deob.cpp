@@ -7751,6 +7751,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
             instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
             instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
             instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+            instrumentation += R"LPH_OP_IDS(local __alex_lph_encode_operand_base=__alex_lph_encode_operand;local function __alex_lph_encode_operand(__alex_lph_value)if type(__alex_lph_value)=="table" then local __alex_lph_ids=_G.__alex_lph_object_ids;if type(__alex_lph_ids)~="table" then __alex_lph_ids=setmetatable({},{__mode="k"});_G.__alex_lph_object_ids=__alex_lph_ids;end;local __alex_lph_id=__alex_lph_ids[__alex_lph_value];if __alex_lph_id==nil then _G.__alex_lph_object_count=(_G.__alex_lph_object_count or 0)+1;__alex_lph_id=_G.__alex_lph_object_count;__alex_lph_ids[__alex_lph_value]=__alex_lph_id;end;return "t:"..tostring(__alex_lph_id);end;return __alex_lph_encode_operand_base(__alex_lph_value);end;)LPH_OP_IDS";
             if (!dynamicGuardConditions.empty())
                 instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
             for (const std::string& lane : laneNames)
@@ -7777,6 +7778,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         instrumentation += "local __alex_lph_step_enabled=_G.__vmc>=" + std::to_string(fullTraceStart) + " and _G.__vmc<=" + std::to_string(fullTraceEnd) + ";";
         instrumentation += "local __alex_lph_pre_pc=" + pcName + ";local __alex_lph_pre_op=" + opcodeName + ";local __alex_lph_pre_regs={};local __alex_lph_pre_lanes={};local __alex_lph_pre_guards={};";
         instrumentation += R"LURAPH_OPERANDS(local function __alex_lph_encode_operand(__alex_lph_value)local __alex_lph_kind=type(__alex_lph_value);if __alex_lph_kind=="string" then local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_value do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_value,__alex_lph_byte));end;return "s:"..table.concat(__alex_lph_bytes);elseif __alex_lph_kind=="number" then return "n:"..tostring(__alex_lph_value);elseif __alex_lph_kind=="boolean" then return __alex_lph_value and "b:1" or "b:0";elseif __alex_lph_kind=="nil" then return "z:";elseif __alex_lph_kind=="function" then local __alex_lph_name=debug.info(__alex_lph_value,"n") or "";local __alex_lph_bytes={};for __alex_lph_byte=1,#__alex_lph_name do __alex_lph_bytes[__alex_lph_byte]=string.format("%02x",string.byte(__alex_lph_name,__alex_lph_byte));end;return "f:"..table.concat(__alex_lph_bytes);else return "x:"..__alex_lph_kind;end;end;)LURAPH_OPERANDS";
+        instrumentation += R"LPH_OP_IDS(local __alex_lph_encode_operand_base=__alex_lph_encode_operand;local function __alex_lph_encode_operand(__alex_lph_value)if type(__alex_lph_value)=="table" then local __alex_lph_ids=_G.__alex_lph_object_ids;if type(__alex_lph_ids)~="table" then __alex_lph_ids=setmetatable({},{__mode="k"});_G.__alex_lph_object_ids=__alex_lph_ids;end;local __alex_lph_id=__alex_lph_ids[__alex_lph_value];if __alex_lph_id==nil then _G.__alex_lph_object_count=(_G.__alex_lph_object_count or 0)+1;__alex_lph_id=_G.__alex_lph_object_count;__alex_lph_ids[__alex_lph_value]=__alex_lph_id;end;return "t:"..tostring(__alex_lph_id);end;return __alex_lph_encode_operand_base(__alex_lph_value);end;)LPH_OP_IDS";
         if (!dynamicGuardConditions.empty())
             instrumentation += R"LURAPH_GUARDS(local __alex_lph_guard_path={};local __alex_lph_guard_overflow=false;local function __alex_lph_guard_eval(__alex_lph_begin,__alex_lph_end,__alex_lph_value)if __alex_lph_step_enabled then if #__alex_lph_guard_path<4096 then __alex_lph_guard_path[#__alex_lph_guard_path+1]=tostring(__alex_lph_begin)..":"..tostring(__alex_lph_end)..":"..(__alex_lph_value and "1" or "0");else __alex_lph_guard_overflow=true;end;end;return __alex_lph_value;end;)LURAPH_GUARDS";
         for (const std::string& lane : laneNames)
@@ -8414,6 +8416,8 @@ json luraphRuntimeLaneValue(std::string_view encoded)
             return provenance({{"type", "function"}, {"value", nullptr}, {"primitive", false}, {"callable", true},
                 {"name", printableAscii(*name) ? json(*name) : json(nullptr)}, {"name_hex", std::string(encoded.substr(2))}});
     }
+    if (const std::optional<uint64_t> objectId = luraphTraceObjectId(encoded))
+        return provenance({{"type", "table"}, {"value", nullptr}, {"primitive", false}, {"object_id", *objectId}});
     if (encoded.starts_with("c:"))
     {
         const size_t separator = encoded.find(':', 2);
@@ -10690,6 +10694,10 @@ bool luraphObservedValuesEqual(const json& left, const json& right)
         return left.value("value", "") == right.value("value", "");
     if (type == "global_reference")
         return left.value("path", "") == right.value("path", "") && !left.value("path", "").empty();
+    if ((type == "table" || type == "userdata" || type == "thread") &&
+        left.contains("object_id") && left["object_id"].is_number_unsigned() &&
+        right.contains("object_id") && right["object_id"].is_number_unsigned())
+        return left["object_id"] == right["object_id"];
     return false;
 }
 

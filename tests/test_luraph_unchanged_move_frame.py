@@ -150,7 +150,19 @@ def main() -> int:
             f"unchanged move proof drifted: {validation}",
         )
 
-        for name, frame in (("contradictory", "z:|n:1"), ("missing", None)):
+        table_accepted = run_case(
+            args.deobfuscator.resolve(), source, root, "table-accepted", "t:42|t:42"
+        )
+        require(
+            (table_accepted.get("observational_semantic_operation") or {}).get("kind") == "register_write",
+            f"same-object table operand frame did not recover the move: {table_accepted}",
+        )
+
+        for name, frame in (
+            ("contradictory", "z:|n:1"),
+            ("table-identity-mismatch", "t:42|t:43"),
+            ("missing", None),
+        ):
             rejected = run_case(args.deobfuscator.resolve(), source, root, name, frame)
             require(
                 rejected.get("observational_semantic_operation") is None
