@@ -11542,15 +11542,29 @@ json inferLuraphObservationalSiteOperation(
 std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
     uint64_t prototype,
     size_t pc,
+    const json& handler,
     const json& effectiveLanes,
     const std::vector<json>& observations,
     const std::vector<json>& childActivations)
 {
+    const json range = handler.value("range", json::object());
+    const std::string source = handler.value("candidate_source", "");
+    constexpr size_t kLockedBegin = 307936;
+    constexpr size_t kLockedEnd = 323136;
+    constexpr std::string_view kLockedBranch =
+        "if j==161 then i=(S[_]);";
+    constexpr std::string_view kLockedCall =
+        "(L)[i]=L[i](L[i+1],L[i+0B10]);q=(i);";
+    if (range.value("begin", size_t(0)) != kLockedBegin ||
+        range.value("end", size_t(0)) != kLockedEnd ||
+        source.find(kLockedBranch) == std::string::npos ||
+        source.find(kLockedCall) == std::string::npos)
+        return std::nullopt;
     const auto lane = effectiveLanes.find("S");
     const std::optional<int64_t> base = lane == effectiveLanes.end()
         ? std::nullopt : luraphObservedInteger(*lane);
     if (!base || *base < 0 || *base > std::numeric_limits<int64_t>::max() - 2 ||
-        observations.empty() || childActivations.size() != observations.size())
+        observations.empty() || (!childActivations.empty() && childActivations.size() != observations.size()))
         return std::nullopt;
     for (const json& observation : observations)
     {
@@ -11571,7 +11585,7 @@ std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
             return std::nullopt;
         callees.insert(callee);
     }
-    if (callees.size() != 1)
+    if (!childActivations.empty() && callees.size() != 1)
         return std::nullopt;
 
     const auto constant = [](int64_t value) {
@@ -11580,7 +11594,7 @@ std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
     const auto registerRead = [&](int64_t value) {
         return json{{"kind", "register_read"}, {"index", constant(value)}};
     };
-    return json{
+    json operation = {
         {"kind", "operation_sequence"},
         {"semantic_family", "call"},
         {"opcode", 161},
@@ -11589,9 +11603,8 @@ std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
         {"path_specific", true},
         {"static_semantic", false},
         {"source_claim", false},
-        {"proof", "handler_shape_and_child_call_frame_runtime_validated"},
+        {"proof", "locked_opcode161_two_argument_call_body_and_runtime_result_validated"},
         {"observation_count", observations.size()},
-        {"callee_prototype", *callees.begin()},
         {"operations", json::array({
             {
                 {"kind", "register_write"},
@@ -11607,13 +11620,19 @@ std::optional<json> recognizeLuraphOpcode161TwoArgumentCall(
         })},
         {"runtime_validation", {
             {"validated_fields", json::array({
-                "callee_prototype", "argument_count", "destination_register", "next_pc",
+                "handler_range", "handler_body", "argument_count", "destination_register", "next_pc",
             })},
             {"argument_count", 2},
             {"destination_register", *base},
             {"top_after", *base},
         }},
     };
+    if (!callees.empty())
+    {
+        operation["callee_prototype"] = *callees.begin();
+        operation["runtime_validation"]["validated_fields"].push_back("callee_prototype");
+    }
+    return operation;
 }
 
 std::optional<json> recognizeLuraphOpcode212ZeroArgumentCall(
@@ -13297,12 +13316,15 @@ json luraphRuntimeSemanticDispatchArtifact(
             const auto observedReturnsForSite = returnsBySite.find({id, pc});
             const auto childActivationsForSite = childActivationsBySite.find({id, pc});
             const auto closureDescriptor = trace.closure_descriptors.find({id, pc});
-            if (!semanticAccepted && opcode == 161 &&
-                observedSite != observationsBySite.end() &&
-                childActivationsForSite != childActivationsBySite.end())
+            if (!semanticAccepted && opcode == 161 && handler != handlers.end() &&
+                observedSite != observationsBySite.end())
             {
+                static const std::vector<json> noChildActivations;
+                const std::vector<json>& childActivations =
+                    childActivationsForSite == childActivationsBySite.end()
+                    ? noChildActivations : childActivationsForSite->second;
                 if (std::optional<json> recognized = recognizeLuraphOpcode161TwoArgumentCall(
-                        id, pc, effectiveLanes, observedSite->second, childActivationsForSite->second))
+                        id, pc, handler->second, effectiveLanes, observedSite->second, childActivations))
                 {
                     row["observational_semantic_operation"] = std::move(*recognized);
                     row["opcode161_two_argument_call_recognition"] = {
@@ -17454,6 +17476,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"fixed_register_calls", semanticCandidate->fixed_register_calls},
             {"open_register_calls", semanticCandidate->open_register_calls},
             {"observed_global_call_arguments", semanticCandidate->observed_global_call_arguments},
+            {"observed_prototype_arguments_specialized", semanticCandidate->observed_prototype_arguments_specialized},
             {"blocks_map", semanticCandidate->mapping},
         });
         report["passes"].push_back({
@@ -17582,6 +17605,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"fixed_register_calls", semanticCandidate->fixed_register_calls},
             {"open_register_calls", semanticCandidate->open_register_calls},
             {"observed_global_call_arguments", semanticCandidate->observed_global_call_arguments},
+            {"observed_prototype_arguments_specialized", semanticCandidate->observed_prototype_arguments_specialized},
             {"inferred_root_slots", semanticCandidate->inferred_root_slots},
             {"observed_argument_tables_hydrated", semanticCandidate->observed_argument_tables_hydrated},
             {"observed_argument_slots_hydrated", semanticCandidate->observed_argument_slots_hydrated},

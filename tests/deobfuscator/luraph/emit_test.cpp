@@ -1614,6 +1614,59 @@ bool testFixedArgumentLoadUsesProvenRegisterDestinations()
             "fixed argument load provenance was not retained in the candidate and block map");
 }
 
+bool testFixedArgumentLoadUsesStableIncomingCallIdentities()
+{
+    const json load = pathSpecificInstruction(1, {
+        {"kind", "load_arguments"},
+        {"semantic_family", "arguments"},
+        {"observation_count", 1},
+        {"observed_argument_arities", json::array({3})},
+        {"write_count", 3},
+        {"argument_bindings", json::array({
+            {{"argument_index", 1}, {"destination_register", 1}},
+            {{"argument_index", 2}, {"destination_register", 2}},
+            {{"argument_index", 3}, {"destination_register", 3}},
+        })},
+    });
+    const json ir = {
+        {"payload_root", {{"payload_prototype", 2}, {"closure_descriptor", rootDescriptor()}}},
+        {"prototype_call_edges", json::array({{
+            {"caller_prototype", 2}, {"caller_pc", 1}, {"callee_prototype", 3},
+            {"observed_activations", 1}, {"observed_argument_count_complete", true},
+            {"observed_argument_count", 3},
+            {"observed_argument_identities", json::array({
+                {{"argument_index", 1}, {"observed_activations", 1},
+                    {"identity", {{"type", "global_reference"}, {"path", "task.delay"}}}},
+                {{"argument_index", 2}, {"observed_activations", 1},
+                    {"identity", {{"type", "table"}, {"primitive", false}}}},
+                {{"argument_index", 3}, {"observed_activations", 1},
+                    {"identity", {{"type", "number"}, {"value", "7"}}}},
+            })},
+        }})},
+        {"observed_transition_sequences", json::array()},
+        {"observed_lane_sequences", json::array()},
+        {"observed_capture_domains", json::array()},
+        {"closure_descriptors", json::array()},
+        {"prototypes", json::array({
+            prototype(2, json::array({pathSpecificInstruction(1,
+                exactOpcode8Call(3, 4, 7, "fixed", 3, 3))})),
+            prototype(3, json::array({load})),
+        })},
+    };
+    const SemanticCandidate candidate = emitSemanticCandidate(
+        ir, {{"prototypes", json::array({cfgPrototype(2, 1), cfgPrototype(3, 1)})}});
+
+    return require(candidate.source.find("registers[1] = environment[\"task\"][\"delay\"];") !=
+                std::string::npos,
+            "stable global incoming argument was not specialized at load_arguments") &&
+        require(candidate.source.find("registers[2] = select_value(2, ...);") != std::string::npos,
+            "unrenderable incoming table argument was guessed") &&
+        require(candidate.source.find("registers[3] = 7;") != std::string::npos,
+            "stable primitive incoming argument was not specialized") &&
+        require(candidate.observed_prototype_arguments_specialized == 2,
+            "stable incoming argument specialization metric drifted");
+}
+
 bool testArgumentLoadSeparatesVariadicAndIncompleteShapes()
 {
     const SemanticCandidate varyingFixed = emitWithTarget(json::array({
@@ -2259,6 +2312,7 @@ int main()
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testObservedGlobalIdentitySpecializesCallArgument();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
+    ok &= testFixedArgumentLoadUsesStableIncomingCallIdentities();
     ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
     ok &= testProvenRegisterClearRangeEmitsInclusiveLuau();
     ok &= testDescendingRegisterClearRangeRemainsNoOp();

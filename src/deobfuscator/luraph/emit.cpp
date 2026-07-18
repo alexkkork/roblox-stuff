@@ -3826,8 +3826,12 @@ private:
                 std::to_string(shape->arity) + ", got \" .. tostring(argument_count))\n");
             append(prefix + "end\n");
             for (const ArgumentBinding& binding : shape->bindings)
-                append(prefix + "registers[" + std::to_string(binding.destination) + "] = select_value(" +
-                    std::to_string(binding.argument) + ", ...);\n");
+            {
+                const std::optional<std::string> observed = stableObservedPrototypeArgument(
+                    context.prototype, shape->arity, binding.argument);
+                append(prefix + "registers[" + std::to_string(binding.destination) + "] = " +
+                    (observed ? *observed : "select_value(" + std::to_string(binding.argument) + ", ...)") + ";\n");
+            }
             ++result.fixed_argument_loads;
             return;
         }

@@ -69,10 +69,11 @@ def build_trace() -> str:
         (5, 186, encoded_lanes(S=12, r=12, V=189)),
         (6, 186, encoded_lanes(S=14, r=14, V=190)),
         (7, 61, encoded_lanes(r=3)),
+        (8, 161, encoded_lanes(S=20)),
     )
     return "\n".join(
         (
-            "@@LPH_PROTO_V1@@\t1\t7\tS,V,Z,g,r,v",
+            "@@LPH_PROTO_V1@@\t1\t8\tS,V,Z,g,r,v",
             "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
             *(f"@@LPH_INSN_V1@@\t1\t{pc}\t{opcode}\t{lanes}" for pc, opcode, lanes in sites),
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t0",
@@ -98,6 +99,8 @@ def build_trace() -> str:
             guard_path(8, 6, 186),
             # Sparse observations still reject writes outside S and S+1.
             step(8, 6, 186, sites[5][2], "16=f:", 1),
+            guard_path(10, 8, 161),
+            step(10, 8, 161, sites[7][2], "20=x:thread", 1),
             "",
         )
     )
@@ -145,7 +148,10 @@ def instruction_rows(output: pathlib.Path) -> dict[int, dict]:
         if prototype.get("runtime_id") == 1
         for row in prototype.get("instructions") or []
     }
-    require(set(rows) == {1, 2, 3, 4, 5, 6, 7}, f"synthetic instruction rows drifted: {sorted(rows)}")
+    require(
+        set(rows) == {1, 2, 3, 4, 5, 6, 7, 8},
+        f"synthetic instruction rows drifted: {sorted(rows)}",
+    )
     return rows
 
 
@@ -293,12 +299,50 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
         f"opcode 61 call layout drifted: {discard_call}",
     )
 
+    two_argument_call = assert_runtime_validated(
+        rows[8], "opcode161_two_argument_call_recognition"
+    )
+    require(
+        two_argument_call.get("proof")
+        == "locked_opcode161_two_argument_call_body_and_runtime_result_validated",
+        f"opcode 161 proof drifted: {two_argument_call}",
+    )
+    require(
+        two_argument_call.get("operations")
+        == [
+            {
+                "kind": "register_write",
+                "register": {"kind": "constant", "value": 20},
+                "value": {
+                    "kind": "call",
+                    "method": False,
+                    "function": {
+                        "kind": "register_read",
+                        "index": {"kind": "constant", "value": 20},
+                    },
+                    "arguments": [
+                        {
+                            "kind": "register_read",
+                            "index": {"kind": "constant", "value": 21},
+                        },
+                        {
+                            "kind": "register_read",
+                            "index": {"kind": "constant", "value": 22},
+                        },
+                    ],
+                },
+            },
+            {"kind": "set_top", "value": {"kind": "constant", "value": 20}},
+        ],
+        f"opcode 161 call layout drifted: {two_argument_call}",
+    )
+
     partition = (report.get("coverage") or {}).get("semantic_coverage_partition") or {}
     require(
-        partition.get("runtime_validated_observational_semantic") == 2
+        partition.get("runtime_validated_observational_semantic") == 3
         and partition.get("trace_evidence_only") == 4
         and partition.get("static_semantic") == 1
-        and partition.get("total") == 7,
+        and partition.get("total") == 8,
         f"capture opcode coverage partition drifted: {partition}",
     )
 
@@ -327,12 +371,20 @@ def audit_locked_handler_ranges(output: pathlib.Path) -> None:
             "call",
             "locked_opcode61_body_and_vm_state_independence_validated",
         ),
+        (
+            8,
+            161,
+            "opcode161_two_argument_call_recognition",
+            "call",
+            "locked_opcode161_two_argument_call_body_and_runtime_result_validated",
+        ),
     ):
         handler_range = rows[pc].get("handler_range") or {}
         locked_range = {
             136: (326066, 326084),
             186: (307936, 323136),
             61: (351789, 351819),
+            161: (307936, 323136),
         }[opcode]
         require(
             (handler_range.get("begin"), handler_range.get("end")) != locked_range,
