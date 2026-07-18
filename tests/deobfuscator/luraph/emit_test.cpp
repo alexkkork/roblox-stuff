@@ -1696,6 +1696,16 @@ bool testArgumentLoadSeparatesVariadicAndIncompleteShapes()
             {"count_slot", "incoming_count"},
         }),
     }), 0);
+    const SemanticCandidate variadicBindings = emitWithTarget(json::array({
+        pathSpecificInstruction(1, {
+            {"kind", "capture_varargs"},
+            {"observed_argument_arities", json::array({1, 2})},
+            {"argument_bindings", json::array({{
+                {"argument_index", 1},
+                {"destination_register", 4},
+            }})},
+        }),
+    }), 0);
     const SemanticCandidate incompleteVariadic = emitWithTarget(json::array({
         pathSpecificInstruction(1, {
             {"kind", "capture_varargs"},
@@ -1719,6 +1729,11 @@ bool testArgumentLoadSeparatesVariadicAndIncompleteShapes()
                 variadic.variadic_argument_captures == 1 && variadic.fixed_argument_loads == 0 &&
                 variadic.unsupported_operations == 0,
             "variadic argument capture was conflated with fixed-arity loading") &&
+        require(variadicBindings.source.find("registers[4] = select_value(1, ...);") !=
+                    std::string::npos &&
+                variadicBindings.variadic_argument_captures == 1 &&
+                variadicBindings.unsupported_operations == 0,
+            "runtime-proven variadic argument bindings were not emitted") &&
         require(incompleteVariadic.source.find(
                     "variadic capture state destinations are incomplete or conflicting") != std::string::npos &&
                 incompleteVariadic.unsupported_path_specific_operations == 1 &&

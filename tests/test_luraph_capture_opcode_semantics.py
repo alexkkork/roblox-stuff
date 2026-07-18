@@ -70,13 +70,25 @@ def build_trace() -> str:
         (6, 186, encoded_lanes(S=14, r=14, V=190)),
         (7, 61, encoded_lanes(r=3)),
         (8, 161, encoded_lanes(S=20)),
+        (9, 59, encoded_lanes(Z=56, r=11)),
+        (10, 59, encoded_lanes(Z=56, r=11)),
     )
     return "\n".join(
         (
-            "@@LPH_PROTO_V1@@\t1\t8\tS,V,Z,g,r,v",
+            "@@LPH_PROTO_V1@@\t1\t10\tS,V,Z,g,r,v",
             "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
+            "@@LPH_PROTO_V1@@\t98\t0\tS,V,Z,g,r,v",
+            "@@LPH_PROTO_OBJECT_V1@@\t98\t1098",
             *(f"@@LPH_INSN_V1@@\t1\t{pc}\t{opcode}\t{lanes}" for pc, opcode, lanes in sites),
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t0",
+            # The call frame is proven by child entry even though the parent did not return.
+            "@@LPH_ACT_PROTO_V1@@\t2\t98\t1\t9\t59\t10\t1\t"
+            + "|".join(["n:1"] * 10)
+            + "\t10",
+            # A child activation with the wrong arity must not validate the same handler candidate.
+            "@@LPH_ACT_PROTO_V1@@\t3\t98\t1\t10\t59\t9\t1\t"
+            + "|".join(["n:1"] * 9)
+            + "\t11",
             # Enter opcode 61 but end capture before its yielding call completes.
             "@@LPH_VM@@\t9\t1\tnil\tnil\tnil\t7\t61",
             guard_path(1, 1, 136),
@@ -149,7 +161,7 @@ def instruction_rows(output: pathlib.Path) -> dict[int, dict]:
         for row in prototype.get("instructions") or []
     }
     require(
-        set(rows) == {1, 2, 3, 4, 5, 6, 7, 8},
+        set(rows) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
         f"synthetic instruction rows drifted: {sorted(rows)}",
     )
     return rows
@@ -337,12 +349,48 @@ def audit_exact_capture_semantics(output: pathlib.Path, report: dict) -> None:
         f"opcode 161 call layout drifted: {two_argument_call}",
     )
 
+    entered_call = rows[9].get("observational_semantic_operation")
+    require(
+        isinstance(entered_call, dict)
+        and entered_call.get("kind") == "operation_sequence"
+        and entered_call.get("proof") == "runtime_validated_incomplete_call_handler_candidate",
+        f"entered child call was not promoted from the exact handler: {rows[9]}",
+    )
+    validation = entered_call.get("runtime_validation") or {}
+    require(
+        validation.get("proof") == "observed_child_call_entry_without_parent_return"
+        and validation.get("parent_return_observed") is False
+        and validation.get("callee_prototype") == 98
+        and validation.get("argument_count") == 10
+        and validation.get("function_register") == 56
+        and validation.get("argument_register_range") == {"from": 57, "to": 66}
+        and validation.get("result_register") is None,
+        f"entered child call proof overclaimed or lost its frame: {validation}",
+    )
+    require(
+        validation.get("validated_fields")
+        == ["callee_prototype", "argument_count", "function_register", "argument_register_range"],
+        f"entered child call claimed unobserved parent effects: {validation}",
+    )
+
+    wrong_arity = rows[10]
+    require(
+        wrong_arity.get("incomplete_call_candidate_validated") is not True
+        and not isinstance(wrong_arity.get("guarded_candidate_validation"), dict),
+        f"wrong-arity child call incorrectly validated the handler: {wrong_arity}",
+    )
+    weak_call = wrong_arity.get("observational_semantic_operation") or {}
+    require(
+        weak_call.get("kind") == "call" and "function" not in weak_call,
+        f"wrong-arity child call was not kept as evidence-only call telemetry: {weak_call}",
+    )
+
     partition = (report.get("coverage") or {}).get("semantic_coverage_partition") or {}
     require(
-        partition.get("runtime_validated_observational_semantic") == 3
+        partition.get("runtime_validated_observational_semantic") == 5
         and partition.get("trace_evidence_only") == 4
         and partition.get("static_semantic") == 1
-        and partition.get("total") == 8,
+        and partition.get("total") == 10,
         f"capture opcode coverage partition drifted: {partition}",
     )
 

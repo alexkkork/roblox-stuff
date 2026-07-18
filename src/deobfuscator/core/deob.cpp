@@ -10864,7 +10864,8 @@ std::optional<json> validateLuraphObservedIncompleteCallCandidate(
 {
     if (!operation.is_object() || operation.value("kind", "") != "operation_sequence" ||
         operation.value("protector_state", false) || luraphSemanticContainsUnknownState(operation) ||
-        observations.empty() || childActivations.size() != observations.size())
+        childActivations.empty() ||
+        (!observations.empty() && childActivations.size() != observations.size()))
         return std::nullopt;
     const json& operations = operation.value("operations", json::array());
     if (!operations.is_array() || operations.empty())
@@ -10872,6 +10873,9 @@ std::optional<json> validateLuraphObservedIncompleteCallCandidate(
 
     const json* call = nullptr;
     std::optional<int64_t> resultRegister;
+    std::optional<size_t> functionRegister;
+    std::optional<size_t> argumentBegin;
+    std::optional<size_t> argumentEnd;
     std::optional<size_t> currentTop;
     std::optional<size_t> callTop;
     size_t topAssignments = 0;
@@ -10908,8 +10912,11 @@ std::optional<json> validateLuraphObservedIncompleteCallCandidate(
     }
     if (!call || call->value("method", false) || !call->contains("function") ||
         !(*call)["function"].is_object() || (*call)["function"].value("kind", "") != "register_read" ||
-        !luraphMaterializedNonnegativeSize((*call)["function"].value("index", json(nullptr))) ||
         !call->contains("arguments") || !(*call)["arguments"].is_array())
+        return std::nullopt;
+    functionRegister = luraphMaterializedNonnegativeSize(
+        (*call)["function"].value("index", json(nullptr)));
+    if (!functionRegister)
         return std::nullopt;
 
     size_t argumentCount = 0;
@@ -10928,6 +10935,8 @@ std::optional<json> validateLuraphObservedIncompleteCallCandidate(
             end = luraphMaterializedNonnegativeSize(endExpression);
         if (!begin || !end)
             return std::nullopt;
+        argumentBegin = *begin;
+        argumentEnd = *end;
         argumentCount = *end < *begin ? 0 : *end - *begin + 1;
     }
     else
@@ -10970,15 +10979,30 @@ std::optional<json> validateLuraphObservedIncompleteCallCandidate(
             return std::nullopt;
     }
 
+    const bool parentReturnObserved = !observations.empty();
+    json validatedFields = json::array({
+        "callee_prototype", "argument_count", "function_register", "argument_register_range",
+    });
+    if (parentReturnObserved)
+        for (const char* field : {"result_register", "register_writes", "next_pc"})
+            validatedFields.push_back(field);
+
     return json{
-        {"proof", "observed_child_call_frame_and_parent_result"},
-        {"validated_fields", json::array({
-            "callee_prototype", "argument_count", "result_register", "register_writes", "next_pc",
-        })},
+        {"proof", parentReturnObserved
+            ? "observed_child_call_frame_and_parent_result"
+            : "observed_child_call_entry_without_parent_return"},
+        {"validated_fields", std::move(validatedFields)},
         {"observation_count", observations.size()},
+        {"child_activation_count", childActivations.size()},
         {"callee_prototype", *callees.begin()},
         {"argument_count", argumentCount},
-        {"result_register", resultRegister ? json(*resultRegister) : json(nullptr)},
+        {"function_register", *functionRegister},
+        {"argument_register_range", argumentBegin && argumentEnd
+            ? json{{"from", *argumentBegin}, {"to", *argumentEnd}}
+            : json(nullptr)},
+        {"result_register", parentReturnObserved && resultRegister
+            ? json(*resultRegister) : json(nullptr)},
+        {"parent_return_observed", parentReturnObserved},
         {"top_assignments", topAssignments},
         {"incomplete_handler_path", true},
         {"source_claim", false},
@@ -13730,7 +13754,8 @@ json luraphRuntimeSemanticDispatchArtifact(
                     }
                 }
             }
-            if (!semanticAccepted && observedSite != observationsBySite.end() &&
+            if (!semanticAccepted && (observedSite != observationsBySite.end() ||
+                childActivationsForSite != childActivationsBySite.end()) &&
                 row["observational_semantic_operation"].is_null() &&
                 handler != handlers.end() &&
                 handler->second.value("selection_status", "") == "ambiguous" &&
@@ -13741,19 +13766,22 @@ json luraphRuntimeSemanticDispatchArtifact(
                 json candidate = materializeLuraphSemanticOperation(
                     handler->second["candidate_semantic_operation"], effectiveLanes);
                 std::optional<json> validation;
+                static const std::vector<json> noObservations;
+                const std::vector<json>& candidateObservations =
+                    observedSite != observationsBySite.end() ? observedSite->second : noObservations;
                 const bool completePath = handler->second.value("executed_path_complete", false) &&
                     handler->second.value("full_effect_normalization", false);
                 bool incompleteCallCandidate = false;
                 bool incompleteMoveCandidate = false;
                 if (completePath)
                     validation = validateLuraphObservedCandidate(
-                        candidate, observedSite->second, pc,
+                        candidate, candidateObservations, pc,
                         observedReturnsForSite != returnsBySite.end()
                             ? &observedReturnsForSite->second : nullptr);
                 else if (luraphIncompleteCandidateIsPureRegisterMove(candidate, handler->second))
                 {
                     validation = validateLuraphObservedCandidate(
-                        candidate, observedSite->second, pc,
+                        candidate, candidateObservations, pc,
                         observedReturnsForSite != returnsBySite.end()
                             ? &observedReturnsForSite->second : nullptr);
                     incompleteMoveCandidate = validation.has_value();
@@ -13761,7 +13789,8 @@ json luraphRuntimeSemanticDispatchArtifact(
                 else if (childActivationsForSite != childActivationsBySite.end())
                 {
                     validation = validateLuraphObservedIncompleteCallCandidate(
-                        candidate, observedSite->second, childActivationsForSite->second, pc);
+                        candidate, candidateObservations,
+                        childActivationsForSite->second, pc);
                     incompleteCallCandidate = validation.has_value();
                 }
                 if (validation)
