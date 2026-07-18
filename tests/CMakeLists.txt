@@ -189,6 +189,14 @@ if(TARGET alex_deobfuscator)
         --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
     )
 
+    rbx_add_python_test(
+        deobfuscator_luraph_application_global_handoff
+        "conformance;integration;security;subject;deobfuscator"
+        30
+        test_luraph_application_global_handoff.py
+        --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+    )
+
     foreach(truth_case IN ITEMS handlers runtime payload-root)
         string(REPLACE "-" "_" truth_case_name "${truth_case}")
         rbx_add_python_test(
