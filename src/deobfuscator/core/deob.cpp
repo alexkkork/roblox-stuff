@@ -7790,6 +7790,19 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
 
     if (dynamicEvidence && fullTraceEnabled)
     {
+        instrumentation += "if __alex_lph_step_enabled then local __alex_lph_operand_frame_parts={};";
+        for (const std::string& lane : laneNames)
+        {
+            instrumentation += "do local __alex_lph_operand_index=type(" + lane + ")==\"table\" and rawget(" +
+                lane + ",__alex_lph_pre_pc) or nil;";
+            instrumentation += "if type(__alex_lph_operand_index)==\"number\" and __alex_lph_operand_index%1==0 and "
+                "__alex_lph_operand_index>=-200000 and __alex_lph_operand_index<=200000 then ";
+            instrumentation += "__alex_lph_operand_frame_parts[#__alex_lph_operand_frame_parts+1]=" +
+                quoteLuau(lane + "@") + "..tostring(__alex_lph_operand_index)..\"=\".."
+                "__alex_lph_encode_operand(rawget(__alex_lph_pre_regs,__alex_lph_operand_index));end;end;";
+        }
+        instrumentation += "print(\"@@LPH_OPERAND_FRAME_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,"
+            "#__alex_lph_operand_frame_parts,table.concat(__alex_lph_operand_frame_parts,\"|\"));end;";
         instrumentation += "if __alex_lph_step_enabled and __alex_lph_pre_op==8 then local __alex_lph_frame_keys={};";
         instrumentation += "for __alex_lph_key in __alex_lph_pre_regs do if #__alex_lph_frame_keys>=512 then break end;__alex_lph_frame_keys[#__alex_lph_frame_keys+1]=__alex_lph_key;end;";
         instrumentation += "table.sort(__alex_lph_frame_keys);local __alex_lph_frame_parts={};";
@@ -8485,6 +8498,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
     std::map<GuardSite, json> guardStates;
     std::map<GuardSite, json> guardPaths;
     std::map<GuardSite, json> callFrames;
+    std::map<GuardSite, json> operandFrames;
     std::set<GuardSite> completedStepSites;
     std::set<std::pair<size_t, size_t>> guardManifest;
     if (catalog.available && catalog.document.contains("dynamic_guard_conditions") &&
@@ -9048,6 +9062,68 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             callFrames[site] = std::move(frame);
             continue;
         }
+        if (line.starts_with("@@LPH_OPERAND_FRAME_V1@@\t"))
+        {
+            const std::vector<std::string> fields = splitTraceFields(line);
+            const std::optional<uint64_t> vmCount = fields.size() == 7
+                ? parseTraceInteger<uint64_t>(fields[1]) : std::nullopt;
+            const std::optional<uint64_t> activation = fields.size() == 7
+                ? parseTraceInteger<uint64_t>(fields[2]) : std::nullopt;
+            const std::optional<int64_t> pc = fields.size() == 7
+                ? parseTraceInteger<int64_t>(fields[3]) : std::nullopt;
+            const std::optional<int64_t> opcode = fields.size() == 7
+                ? parseTraceInteger<int64_t>(fields[4]) : std::nullopt;
+            const std::optional<size_t> declared = fields.size() == 7
+                ? parseTraceInteger<size_t>(fields[5]) : std::nullopt;
+            bool valid = vmCount && activation && pc && opcode && declared && *vmCount > 0 &&
+                *activation > 0 && *pc > 0 && *declared <= 64 &&
+                ((*declared == 0 && fields[6].empty()) || (*declared > 0 && !fields[6].empty()));
+            json frame = json::object();
+            size_t begin = 0;
+            while (valid && begin < fields[6].size())
+            {
+                const size_t end = fields[6].find('|', begin);
+                const std::string_view item(fields[6].data() + begin,
+                    (end == std::string::npos ? fields[6].size() : end) - begin);
+                const size_t at = item.find('@');
+                const size_t equal = at == std::string_view::npos
+                    ? std::string_view::npos : item.find('=', at + 1);
+                const std::string lane = at == std::string_view::npos
+                    ? std::string{} : std::string(item.substr(0, at));
+                const std::optional<int64_t> reg = equal == std::string_view::npos
+                    ? std::nullopt : parseTraceInteger<int64_t>(item.substr(at + 1, equal - at - 1));
+                if (lane.empty() || !reg || *reg < -200000 || *reg > 200000 ||
+                    equal + 1 >= item.size() || frame.contains(lane))
+                {
+                    valid = false;
+                    break;
+                }
+                const json value = luraphRuntimeLaneValue(item.substr(equal + 1));
+                if (!value.is_object() || value.value("type", "invalid") == "invalid")
+                {
+                    valid = false;
+                    break;
+                }
+                frame[lane] = {{"register", *reg}, {"value", value}};
+                if (end == std::string::npos)
+                    break;
+                begin = end + 1;
+            }
+            if (!valid || frame.size() != *declared)
+            {
+                markMalformed();
+                continue;
+            }
+            const GuardSite site{*vmCount, *activation, *pc, *opcode};
+            if (auto existing = operandFrames.find(site); existing != operandFrames.end() &&
+                existing->second != frame)
+            {
+                markMalformed();
+                continue;
+            }
+            operandFrames[site] = std::move(frame);
+            continue;
+        }
         if (line.starts_with("@@LPH_GUARD_V1@@\t"))
         {
             const std::vector<std::string> fields = splitTraceFields(line);
@@ -9354,6 +9430,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
             const auto guardState = guardStates.find(guardSite);
             const auto guardPath = guardPaths.find(guardSite);
             const auto callFrame = callFrames.find(guardSite);
+            const auto operandFrame = operandFrames.find(guardSite);
             trace.steps.push_back({
                 {"vm_count", *vmCount},
                 {"activation", *activation},
@@ -9366,6 +9443,7 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
                 {"guard_state", guardState != guardStates.end() ? guardState->second : json::object()},
                 {"guard_path", guardPath != guardPaths.end() ? guardPath->second : json(nullptr)},
                 {"call_frame", callFrame != callFrames.end() ? callFrame->second : json::object()},
+                {"operand_frame", operandFrame != operandFrames.end() ? operandFrame->second : json::object()},
             });
             completedStepSites.insert(guardSite);
             continue;
@@ -9586,12 +9664,14 @@ LuraphRuntimeStructureTrace parseLuraphRuntimeStructureTrace(
         const size_t evidenceFields = size_t(!step.value("runtime_lanes", json::object()).empty()) +
             size_t(!step.value("guard_state", json::object()).empty()) +
             size_t(!step.value("write_origins", json::object()).empty()) +
-            size_t(!step.value("call_frame", json::object()).empty());
+            size_t(!step.value("call_frame", json::object()).empty()) +
+            size_t(!step.value("operand_frame", json::object()).empty());
         const size_t existingEvidenceFields = existing != uniqueSteps.end() && existing->second.is_object()
             ? size_t(!existing->second.value("runtime_lanes", json::object()).empty()) +
                 size_t(!existing->second.value("guard_state", json::object()).empty()) +
                 size_t(!existing->second.value("write_origins", json::object()).empty()) +
-                size_t(!existing->second.value("call_frame", json::object()).empty())
+                size_t(!existing->second.value("call_frame", json::object()).empty()) +
+                size_t(!existing->second.value("operand_frame", json::object()).empty())
             : 0;
         if (existing == uniqueSteps.end() || evidenceFields > existingEvidenceFields)
             uniqueSteps[key] = std::move(step);
@@ -10820,6 +10900,8 @@ std::optional<json> validateLuraphObservedCandidate(
 
         size_t matchedWrites = 0;
         size_t unchangedWrites = 0;
+        size_t operandFrameValidatedUnchangedWrites = 0;
+        size_t unframedUnchangedWrites = 0;
         for (const json& observation : observations)
         {
             const json writes = observation.value("register_writes", json::array());
@@ -10830,6 +10912,39 @@ std::optional<json> validateLuraphObservedCandidate(
                 if (observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
                     static_cast<int64_t>(pc + 1))
                     return std::nullopt;
+                const json operandFrame = observation.value("operand_frame", json::object());
+                std::optional<json> destinationBefore;
+                std::optional<json> sourceBefore;
+                if (operandFrame.is_object() && !operandFrame.empty())
+                {
+                    for (auto lane = operandFrame.begin(); lane != operandFrame.end(); ++lane)
+                    {
+                        if (!lane.value().is_object() ||
+                            !lane.value().contains("register") ||
+                            !lane.value()["register"].is_number_integer() ||
+                            !lane.value().contains("value") ||
+                            !lane.value()["value"].is_object())
+                            return std::nullopt;
+                        const int64_t reg = lane.value()["register"].get<int64_t>();
+                        const json& observedValue = lane.value()["value"];
+                        auto retainConsistentValue = [&](std::optional<json>& retained) {
+                            if (retained && !luraphObservedValuesEqual(*retained, observedValue))
+                                return false;
+                            retained = observedValue;
+                            return true;
+                        };
+                        if (reg == *destination && !retainConsistentValue(destinationBefore))
+                            return std::nullopt;
+                        if (reg == *expectedRegisterOrigin && !retainConsistentValue(sourceBefore))
+                            return std::nullopt;
+                    }
+                    if (!destinationBefore || !sourceBefore ||
+                        !luraphObservedValuesEqual(*destinationBefore, *sourceBefore))
+                        return std::nullopt;
+                    ++operandFrameValidatedUnchangedWrites;
+                }
+                else
+                    ++unframedUnchangedWrites;
                 ++unchangedWrites;
                 continue;
             }
@@ -10873,18 +10988,27 @@ std::optional<json> validateLuraphObservedCandidate(
             }
             ++matchedWrites;
         }
-        if (matchedWrites == 0)
+        if ((matchedWrites == 0 && unchangedWrites == 0) ||
+            (matchedWrites == 0 && unframedUnchangedWrites > 0))
             return std::nullopt;
 
-        return json{
-            {"proof", expectedValue ? "observed_destination_and_value" : "observed_destination_and_register_origin"},
+        json validation = {
+            {"proof", expectedValue ? "observed_destination_and_value" :
+                (matchedWrites > 0 ? "observed_destination_and_register_origin" :
+                    "observed_unchanged_destination_and_source_operand_frame")},
             {"validated_fields", expectedValue
                 ? json::array({"destination_register", "written_value"})
-                : json::array({"destination_register", "source_register"})},
+                : matchedWrites > 0
+                    ? json::array({"destination_register", "source_register"})
+                    : json::array({"destination_register", "source_register", "operand_frame"})},
             {"observation_count", matchedWrites + unchangedWrites},
             {"changed_write_observations", matchedWrites},
             {"unchanged_write_observations", unchangedWrites},
         };
+        if (operandFrameValidatedUnchangedWrites > 0)
+            validation["operand_frame_validated_unchanged_observations"] =
+                operandFrameValidatedUnchangedWrites;
+        return validation;
     }
 
     if (kind == "jump")
