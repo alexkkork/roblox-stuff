@@ -76,6 +76,8 @@ def build_trace() -> str:
             "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
             *(f"@@LPH_INSN_V1@@\t1\t{pc}\t{opcode}\t{lanes}" for pc, opcode, lanes in sites),
             "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t0",
+            # Enter opcode 61 but end capture before its yielding call completes.
+            "@@LPH_VM@@\t9\t1\tnil\tnil\tnil\t7\t61",
             guard_path(1, 1, 136),
             step(1, 1, 136, sites[0][2], "4=s:6361707475726564", 1),
             # Missing guard-path evidence must reject an otherwise matching capture load.

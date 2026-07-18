@@ -399,6 +399,12 @@ struct RegisterClearRangeShape
     int64_t last_register = 0;
 };
 
+struct ArgumentTableHydration
+{
+    std::map<int64_t, std::string> entries;
+    size_t observed_activations = 0;
+};
+
 class Emitter
 {
 public:
@@ -411,6 +417,7 @@ public:
         initialize("runtime-lane parsing", [&] { parseLaneReplaySequences(); });
         initialize("instruction parsing", [&] { parseInstructions(); });
         initialize("root-argument parsing", [&] { parseRootArguments(); });
+        initialize("activation-argument table parsing", [&] { parseActivationArgumentTables(); });
         initialize("capture-provenance parsing", [&] { parseCaptureProvenance(); });
     }
 
@@ -464,6 +471,11 @@ public:
         append("local function call_recovered(value, fallback, fallback_captures, ...)\n");
         append("  if type(value) == \"function\" then return value(...) end\n");
         append("  return fallback(fallback_captures, ...)\n");
+        append("end\n");
+        append("local function hydrate_observed_table(value, entries)\n");
+        append("  if type(value) ~= \"table\" then value = {} end\n");
+        append("  for key, entry in entries do if value[key] == nil then value[key] = entry end end\n");
+        append("  return value\n");
         append("end\n");
         append("local legacy_transition_positions = {}\n");
         append("local transition_activation_positions = {}\n");
@@ -766,6 +778,7 @@ private:
     std::map<std::tuple<uint64_t, int64_t, int64_t>, json> callArgumentIdentityEvidence;
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> closureRegisterTargets;
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> captureClosureTargets;
+    std::map<uint64_t, std::map<size_t, ArgumentTableHydration>> argumentTableHydrations;
     uint64_t rootPrototype = 0;
     std::map<int64_t, std::string> rootArgumentExpressions;
     std::set<uint64_t> rootArgumentPrototypes;
@@ -1029,6 +1042,90 @@ private:
         }
         result.root_argument_table_complete = rootArgumentTableComplete;
         result.root_call_frame_specialized = rootCallFrameSpecialized;
+    }
+
+    void parseActivationArgumentTables()
+    {
+        const json rows = reachableIr.value("observed_activation_argument_tables", json::array());
+        if (!rows.is_array())
+            return;
+        struct WorkingHydration
+        {
+            size_t expected_activations = 0;
+            size_t observed_activations = 0;
+            bool initialized = false;
+            bool valid = true;
+            std::set<uint64_t> activation_ids;
+            std::map<int64_t, std::string> entries;
+        };
+        std::map<std::pair<uint64_t, size_t>, WorkingHydration> working;
+        for (const json& row : rows)
+        {
+            const uint64_t prototype = row.value("prototype", uint64_t(0));
+            const uint64_t activation = row.value("activation", uint64_t(0));
+            const size_t argumentIndex = row.value("argument_index", size_t(0));
+            const size_t expectedActivations = row.value("prototype_activation_count", size_t(0));
+            const size_t observedEntries = row.value("observed_entries", size_t(0));
+            const size_t recoveredEntries = row.value("recovered_entries", size_t(0));
+            const json entries = row.value("entries", json::array());
+            if (prototype == 0 || activation == 0 || argumentIndex == 0 || argumentIndex > 16 ||
+                expectedActivations == 0 || !row.value("complete", false) || row.value("conflict", true) ||
+                observedEntries != recoveredEntries || !entries.is_array())
+                continue;
+
+            WorkingHydration& state = working[{prototype, argumentIndex}];
+            if (!state.activation_ids.insert(activation).second)
+            {
+                state.valid = false;
+                continue;
+            }
+            if (state.expected_activations == 0)
+                state.expected_activations = expectedActivations;
+            else if (state.expected_activations != expectedActivations)
+                state.valid = false;
+            ++state.observed_activations;
+
+            std::map<int64_t, std::string> snapshot;
+            for (const json& entry : entries)
+            {
+                if (!entry.is_object() || !entry.contains("key") || !entry.contains("value"))
+                {
+                    state.valid = false;
+                    continue;
+                }
+                const std::optional<int64_t> key = primitiveIntegerValue(entry["key"]);
+                const std::optional<std::string> value = observedBootstrapExpression(entry["value"]);
+                if (!key || *key < 0 || !value)
+                    continue;
+                if (!snapshot.emplace(*key, *value).second)
+                    state.valid = false;
+            }
+            if (!state.initialized)
+            {
+                state.entries = std::move(snapshot);
+                state.initialized = true;
+            }
+            else
+            {
+                for (auto candidate = state.entries.begin(); candidate != state.entries.end();)
+                {
+                    const auto observed = snapshot.find(candidate->first);
+                    if (observed == snapshot.end() || observed->second != candidate->second)
+                        candidate = state.entries.erase(candidate);
+                    else
+                        ++candidate;
+                }
+            }
+        }
+        for (auto& [key, state] : working)
+        {
+            if (!state.valid || !state.initialized || state.entries.empty() ||
+                state.observed_activations != state.expected_activations)
+                continue;
+            argumentTableHydrations[key.first][key.second] = {
+                std::move(state.entries), state.observed_activations,
+            };
+        }
     }
 
     void parseTransitionSequences()
@@ -4095,6 +4192,20 @@ private:
             append("  for argument_index = 1, argument_count do registers[argument_index] = select_value(argument_index, ...) end\n");
             append("  local top = argument_count\n");
         }
+        if (const auto prototypeHydrations = argumentTableHydrations.find(id);
+            prototypeHydrations != argumentTableHydrations.end())
+            for (const auto& [argumentIndex, hydration] : prototypeHydrations->second)
+            {
+                if (specializedRootCall && argumentIndex == 1)
+                    continue;
+                append("  registers[" + std::to_string(argumentIndex) +
+                    "] = hydrate_observed_table(registers[" + std::to_string(argumentIndex) + "], {\n");
+                for (const auto& [key, value] : hydration.entries)
+                    append("    [" + std::to_string(key) + "] = " + value + ",\n");
+                append("  })\n");
+                ++result.observed_argument_tables_hydrated;
+                result.observed_argument_slots_hydrated += hydration.entries.size();
+            }
         append("  local pc = " + std::to_string(cfg->second.entry) + "\n");
         append("  while pc ~= nil do\n");
         append("    semantic_step(" + std::to_string(id) + ", pc)\n");

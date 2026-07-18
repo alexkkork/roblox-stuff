@@ -13372,7 +13372,8 @@ json luraphRuntimeSemanticDispatchArtifact(
                     };
             }
             if (!semanticAccepted && opcode == 61 && handler != handlers.end() &&
-                row["observational_semantic_operation"].is_null())
+                row["observational_semantic_operation"].is_null() &&
+                row.value("runtime_opcode_observed", false))
             {
                 static const std::vector<json> noObservations;
                 const std::vector<json>& siteObservations = observedSite != observationsBySite.end()
@@ -15636,6 +15637,51 @@ json luraphReachablePayloadIrArtifact(
         }
     }
 
+    json activationArgumentTables = json::array();
+    std::map<uint64_t, size_t> activationCountsByPrototype;
+    if (payloadClosure.contains("activations") && payloadClosure["activations"].is_array())
+    {
+        for (const json& activation : payloadClosure["activations"])
+        {
+            const uint64_t prototype = activation.value("prototype", uint64_t(0));
+            if (prototype > 0)
+                ++activationCountsByPrototype[prototype];
+        }
+        for (const json& activation : payloadClosure["activations"])
+        {
+            const uint64_t prototype = activation.value("prototype", uint64_t(0));
+            const uint64_t activationId = activation.value("activation", uint64_t(0));
+            const json domains = activation.value("argument_table_domains", json::array());
+            const json entries = activation.value("argument_table_entries", json::array());
+            if (prototype == 0 || activationId == 0 || !domains.is_array() || !entries.is_array())
+                continue;
+            for (const json& domain : domains)
+            {
+                if (!domain.is_object())
+                    continue;
+                const size_t argumentIndex = domain.value("argument_index", size_t(0));
+                if (argumentIndex == 0)
+                    continue;
+                json tableEntries = json::array();
+                for (const json& entry : entries)
+                    if (entry.is_object() && entry.value("argument_index", size_t(0)) == argumentIndex &&
+                        entry.contains("key") && entry.contains("value"))
+                        tableEntries.push_back({{"key", entry["key"]}, {"value", entry["value"]}});
+                activationArgumentTables.push_back({
+                    {"activation", activationId},
+                    {"prototype", prototype},
+                    {"argument_index", argumentIndex},
+                    {"complete", domain.value("complete", false)},
+                    {"observed_entries", domain.value("observed_entries", size_t(0))},
+                    {"recovered_entries", tableEntries.size()},
+                    {"prototype_activation_count", activationCountsByPrototype[prototype]},
+                    {"conflict", activation.value("argument_table_conflict", false)},
+                    {"entries", std::move(tableEntries)},
+                });
+            }
+        }
+    }
+
     return {
         {"version", 1},
         {"kind", "luraph-reachable-payload-semantic-ir"},
@@ -15651,6 +15697,7 @@ json luraphReachablePayloadIrArtifact(
         {"observed_return_count", payloadClosure.value("observed_return_count", size_t(0))},
         {"observed_returns", payloadClosure.value("observed_returns", json::array())},
         {"prototype_call_edges", std::move(callEdges)},
+        {"observed_activation_argument_tables", std::move(activationArgumentTables)},
         {"observed_transition_sequences", std::move(transitionRows)},
         {"observed_lane_sequences", std::move(laneReplayRows)},
         {"observed_capture_domains", payloadClosure.value("observed_capture_domains", json::array())},
