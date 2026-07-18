@@ -516,6 +516,14 @@ if(TARGET rbx_luau_runtime)
             --runtime "$<TARGET_FILE:rbx_luau_runtime>"
         )
         rbx_add_python_test(
+            deobfuscator_luraph_repeat_dispatch_refinement
+            "conformance;integration;security;deobfuscator"
+            90
+            test_luraph_repeat_dispatch_refinement.py
+            --deobfuscator "$<TARGET_FILE:alex_deobfuscator>"
+            --runtime "$<TARGET_FILE:rbx_luau_runtime>"
+        )
+        rbx_add_python_test(
             deobfuscator_luraph_runtime_structure_pipeline
             "conformance;integration;security;subject;deobfuscator"
             90
