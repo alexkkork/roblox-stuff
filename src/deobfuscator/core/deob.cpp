@@ -13237,6 +13237,94 @@ LuraphExactLeafRecognition recognizeLuraphOpcode89RangeClear(
     return output;
 }
 
+bool luraphStraightLineRegisterExpression(const json& value, size_t depth = 0)
+{
+    if (depth > 24 || !value.is_object())
+        return false;
+    const std::string kind = value.value("kind", "");
+    if (kind == "constant" || kind == "operand" || kind == "immediate" ||
+        kind == "vm_state" || kind == "top_register")
+        return true;
+    if (kind == "register_read")
+        return luraphStraightLineRegisterExpression(value.value("index", json::object()), depth + 1);
+    if (kind == "index_read")
+        return luraphStraightLineRegisterExpression(value.value("table", json::object()), depth + 1) &&
+            luraphStraightLineRegisterExpression(value.value("index", json::object()), depth + 1);
+    if (kind == "unary")
+        return luraphStraightLineRegisterExpression(value.value("value", json::object()), depth + 1);
+    if (kind == "binary")
+        return luraphStraightLineRegisterExpression(value.value("left", json::object()), depth + 1) &&
+            luraphStraightLineRegisterExpression(value.value("right", json::object()), depth + 1);
+    return false;
+}
+
+std::optional<json> recognizeLuraphStraightLineRegisterHandler(const json& handler)
+{
+    if (!handler.is_object() || handler.value("opcode_local_reused", true) ||
+        !handler.value("normalization_complete", false) ||
+        handler.value("continuation_statement_count", size_t(0)) != 0 ||
+        handler.value("dispatcher_statement_count", size_t(0)) == 0 ||
+        handler.value("dispatcher_statement_count", size_t(0)) !=
+            handler.value("executed_statement_count", size_t(0)))
+        return std::nullopt;
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    const json effects = handler.value("effects", json(nullptr));
+    if (!normalized.is_object() || normalized.value("kind", "") != "handler_sequence" ||
+        !normalized.value("vm_state_independent", false) ||
+        !normalized.contains("operations") || !normalized["operations"].is_array() ||
+        normalized["operations"].empty() || !effects.is_object() ||
+        effects.value("calls", size_t(0)) != 0 || effects.value("closures", size_t(0)) != 0 ||
+        effects.value("conditionals", size_t(0)) != 0 || effects.value("pc_writes", size_t(0)) != 0 ||
+        effects.value("returns", size_t(0)) != 0 || effects.value("vararg_reads", size_t(0)) != 0)
+        return std::nullopt;
+    const json candidates = effects.value("operation_candidates", json::array());
+    if (!candidates.is_array() || candidates.size() != 1 || candidates.front() != "register_write")
+        return std::nullopt;
+
+    size_t registerWrites = 0;
+    for (const json& operation : normalized["operations"])
+    {
+        if (!operation.is_object())
+            return std::nullopt;
+        const std::string kind = operation.value("kind", "");
+        if (kind == "assign")
+        {
+            const json targets = operation.value("targets", json::array());
+            const json values = operation.value("values", json::array());
+            if (!targets.is_array() || !values.is_array() || targets.size() != values.size() || targets.empty())
+                return std::nullopt;
+            for (const json& target : targets)
+                if (!target.is_object() || target.value("kind", "") != "vm_state")
+                    return std::nullopt;
+            for (const json& value : values)
+                if (!luraphStraightLineRegisterExpression(value))
+                    return std::nullopt;
+            continue;
+        }
+        if (kind != "register_write" ||
+            !luraphStraightLineRegisterExpression(operation.value("register", json::object())) ||
+            !luraphStraightLineRegisterExpression(operation.value("value", json::object())))
+            return std::nullopt;
+        ++registerWrites;
+    }
+    if (registerWrites == 0 || registerWrites != effects.value("register_writes", size_t(0)) ||
+        registerWrites != effects.value("table_writes", size_t(0)))
+        return std::nullopt;
+
+    json result = {
+        {"kind", "operation_sequence"},
+        {"operations", normalized["operations"]},
+        {"semantic_family", registerWrites == 1 ? "move_or_register_write" : "register_write_sequence"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "complete_straight_line_handler_normalization"},
+        {"validated_statement_count", handler.value("executed_statement_count", size_t(0))},
+        {"validated_register_writes", registerWrites},
+    };
+    return result;
+}
+
 json luraphRuntimeSemanticDispatchArtifact(
     const LuraphRuntimeStructureTrace& trace,
     const LuraphOpcodeCatalog& catalog,
@@ -13617,7 +13705,35 @@ json luraphRuntimeSemanticDispatchArtifact(
             row["trace_specialized_operation"] = nullptr;
             row["guarded_candidate_validation"] = nullptr;
             bool semanticAccepted = false;
-            if (handler != handlers.end() && handler->second.contains("semantic_operation") &&
+            if (handler != handlers.end())
+            {
+                if (std::optional<json> recognized =
+                        recognizeLuraphStraightLineRegisterHandler(handler->second))
+                {
+                    row["semantic_operation"] = materializeLuraphSemanticOperation(
+                        *recognized, effectiveLanes);
+                    if (observedSite != observationsBySite.end() && luraphObservedSemanticContradicts(
+                            row["semantic_operation"], observedSite->second))
+                    {
+                        row["rejected_semantic_operation"] = row["semantic_operation"];
+                        row["semantic_operation"] = nullptr;
+                        row["semantic_observation_contradiction"] = true;
+                        row["straight_line_handler_recognition"] = {
+                            {"status", "observation_contradiction"},
+                        };
+                    }
+                    else
+                    {
+                        semanticAccepted = true;
+                        ++semanticLifted;
+                        row["straight_line_handler_recognition"] = {
+                            {"status", "static_validated"},
+                            {"proof", "complete_straight_line_handler_normalization"},
+                        };
+                    }
+                }
+            }
+            if (!semanticAccepted && handler != handlers.end() && handler->second.contains("semantic_operation") &&
                 !handler->second["semantic_operation"].is_null())
             {
                 classified = true;
