@@ -14479,6 +14479,7 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             completedBootstrapReturn->value("vm_count", uint64_t(0)),
             entryVmCount,
             "sequential_top_level_handoff",
+            {},
         };
     }
 
@@ -14521,6 +14522,7 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             0,
             activation.value("entry_vm_count", uint64_t(0)),
             "bootstrap_terminal_return_call",
+            {},
         };
     }
     if (selected)
@@ -14537,6 +14539,24 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
         "CFrame", "Color3", "UDim", "UDim2", "Ray", "Rect", "Region3", "BrickColor",
         "TweenInfo", "RaycastParams", "PhysicalProperties", "task",
     };
+    const auto hasBoundedTopLevelAncestor = [&](uint64_t activationId) {
+        std::set<uint64_t> visited;
+        for (size_t depth = 0; depth < 16; ++depth)
+        {
+            if (!visited.insert(activationId).second)
+                return false;
+            auto row = runtime.activations.find(activationId);
+            if (row == runtime.activations.end())
+                return false;
+            const json caller = row->second.value("caller_activation", json(nullptr));
+            if (caller.is_null())
+                return true;
+            if (!caller.is_number_integer() || caller.get<int64_t>() <= 0)
+                return false;
+            activationId = static_cast<uint64_t>(caller.get<int64_t>());
+        }
+        return false;
+    };
     size_t selectedScore = 0;
     for (const auto& [activationId, activation] : runtime.activations)
     {
@@ -14549,7 +14569,7 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             continue;
         const uint64_t callerActivation = static_cast<uint64_t>(callerActivationValue);
         auto parent = runtime.activations.find(callerActivation);
-        if (parent == runtime.activations.end() || !parent->second.value("caller_activation", json(nullptr)).is_null())
+        if (parent == runtime.activations.end() || !hasBoundedTopLevelAncestor(callerActivation))
             continue;
 
         std::set<std::string> roots;
@@ -15104,6 +15124,7 @@ json luraphPayloadClosureArtifact(
             {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
                 ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
             {"evidence", payloadRoot->evidence},
+            {"application_globals", payloadRoot->application_globals},
             {"closure_descriptor", nullptr},
         };
         if (auto descriptor = runtime.closure_descriptors.find({
@@ -17626,6 +17647,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                     ? json(payloadRoot->bootstrap_return_vm_count) : json(nullptr)},
                 {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
                     ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
+                {"application_globals", payloadRoot->application_globals},
             });
         }
     }
@@ -19212,6 +19234,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             ? json(payloadRoot->bootstrap_return_vm_count) : json(nullptr)},
         {"payload_entry_vm_count", payloadRoot->payload_entry_vm_count > 0
             ? json(payloadRoot->payload_entry_vm_count) : json(nullptr)},
+        {"application_globals", payloadRoot->application_globals},
     }) : json({{"available", false}});
     report["coverage"]["payload_cfg"] = payloadCfgDocument ? json({
         {"available", true},
