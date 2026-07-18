@@ -2323,6 +2323,29 @@ bool testUnobservedInstructionStopsAtRecoveryBoundary()
             "candidate with an unobserved instruction claimed complete rendering");
 }
 
+bool testNullableUnenteredCfgMetadataDoesNotAbortEmission()
+{
+    json nullableCfg = {
+        {"runtime_id", 2},
+        {"entry_pc", nullptr},
+        {"blocks", json::array({
+            {{"id", "p2_unentered"}, {"start_pc", nullptr}, {"end_pc", nullptr},
+                {"reachable", true}, {"successors", json::array()}, {"terminator", "unresolved"}},
+            {{"id", "p2_b1"}, {"start_pc", 1}, {"end_pc", 1},
+                {"reachable", true}, {"successors", json::array()}, {"terminator", "return"}},
+        })},
+    };
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({pathSpecificInstruction(1, {{"kind", "return"}, {"values", json::array()}})}),
+        0, 1, json::array(), json::array(), json::array(), std::move(nullableCfg));
+    return require(candidate.source.find("local pc = 1") != std::string::npos,
+               "nullable CFG entry did not use the bounded default") &&
+        require(candidate.source.find("if pc == 1 then") != std::string::npos,
+            "valid CFG block was lost beside nullable unentered metadata") &&
+        require(candidate.source.find("p2_unentered") == std::string::npos,
+            "nullable unentered CFG metadata leaked into emitted Luau");
+}
+
 } // namespace
 
 int main()
@@ -2381,6 +2404,7 @@ int main()
     ok &= testSmallHelperLookupDoesNotHydrateRootCapture();
     ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
     ok &= testUnobservedInstructionStopsAtRecoveryBoundary();
+    ok &= testNullableUnenteredCfgMetadataDoesNotAbortEmission();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
     return ok ? 0 : 1;

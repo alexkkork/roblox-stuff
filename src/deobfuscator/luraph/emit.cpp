@@ -822,15 +822,35 @@ private:
     {
         if (!cfg.contains("prototypes") || !cfg["prototypes"].is_array())
             return;
+        const auto nonnegativeSizeField = [](const json& object, std::string_view key,
+                                              size_t fallback) {
+            if (!object.is_object() || !object.contains(std::string(key)))
+                return fallback;
+            const json& value = object[std::string(key)];
+            if (value.is_number_unsigned())
+                return value.get<size_t>();
+            if (value.is_number_integer())
+            {
+                const int64_t number = value.get<int64_t>();
+                if (number >= 0)
+                    return static_cast<size_t>(number);
+            }
+            return fallback;
+        };
         for (const json& row : cfg["prototypes"])
         {
             PrototypeCfg prototype;
-            prototype.id = row.value("runtime_id", uint64_t(0));
-            prototype.entry = row.value("entry_pc", size_t(1));
+            prototype.id = static_cast<uint64_t>(nonnegativeSizeField(row, "runtime_id", 0));
+            prototype.entry = nonnegativeSizeField(row, "entry_pc", 1);
             std::map<std::string, size_t> starts;
             if (row.contains("blocks") && row["blocks"].is_array())
                 for (const json& block : row["blocks"])
-                    starts[block.value("id", "")] = block.value("start_pc", size_t(0));
+                {
+                    const std::string id = block.value("id", "");
+                    const size_t start = nonnegativeSizeField(block, "start_pc", 0);
+                    if (!id.empty() && start > 0)
+                        starts[id] = start;
+                }
             if (row.contains("blocks") && row["blocks"].is_array())
             {
                 for (const json& blockRow : row["blocks"])
@@ -839,8 +859,10 @@ private:
                         continue;
                     Block block;
                     block.id = blockRow.value("id", "");
-                    block.start = blockRow.value("start_pc", size_t(0));
-                    block.end = blockRow.value("end_pc", size_t(0));
+                    block.start = nonnegativeSizeField(blockRow, "start_pc", 0);
+                    block.end = nonnegativeSizeField(blockRow, "end_pc", 0);
+                    if (block.id.empty() || block.start == 0 || block.end < block.start)
+                        continue;
                     block.terminator = blockRow.value("terminator", "fallthrough");
                     for (const json& successor : blockRow.value("successors", json::array()))
                         if (successor.is_string() && starts.contains(successor.get<std::string>()))
