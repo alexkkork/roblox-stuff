@@ -1635,6 +1635,47 @@ bool testV147Opcode212PreservesFixedRangeAndSingleResult()
             "complete v14.7 opcode-212 call was marked unsupported");
 }
 
+bool testV147Opcode61PreservesZeroArgumentsAndSingleResult()
+{
+    const json instruction = {
+        {"pc", 1},
+        {"opcode", 61},
+        {"semantic_operation", {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "call"},
+            {"static_semantic", true},
+            {"integrity_precondition", "intact_locked_handler_state"},
+            {"protector_guards_elided", true},
+            {"operations", json::array({
+                {{"kind", "set_top"}, {"value", {{"kind", "constant"}, {"value", 7}}}},
+                {
+                    {"kind", "register_write"},
+                    {"register", {{"kind", "constant"}, {"value", 7}}},
+                    {"value", {
+                        {"kind", "call"},
+                        {"method", false},
+                        {"result_arity", {{"kind", "fixed"}, {"count", 1}}},
+                        {"function", {
+                            {"kind", "register_read"},
+                            {"index", {{"kind", "constant"}, {"value", 7}}},
+                        }},
+                        {"arguments", json::array()},
+                    }},
+                },
+            })},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({instruction}), 0);
+    const size_t top = candidate.source.find("top = 7");
+    const size_t call = candidate.source.find("registers[7] = registers[7]();");
+    return require(top != std::string::npos && call != std::string::npos && top < call,
+        "v14.7 opcode-61 call did not preserve top, zero arguments, and result ordering") &&
+        require(candidate.source.find("unpack_values(") == std::string::npos,
+            "v14.7 opcode-61 zero-argument call invented an argument range") &&
+        require(candidate.unsupported_operations == 0,
+            "complete v14.7 opcode-61 call was marked unsupported");
+}
+
 json exactOpcode8Call(int functionRegister, int argumentBegin, int argumentEnd,
     std::string resultMode, int resultBase, int resultEnd = -1)
 {
@@ -2628,6 +2669,7 @@ int main()
     ok &= testStaticRegisterTableWriteRendersEffectfully();
     ok &= testExactHelperAndOperandTableLoadsPreserveSharedStorage();
     ok &= testV147Opcode212PreservesFixedRangeAndSingleResult();
+    ok &= testV147Opcode61PreservesZeroArgumentsAndSingleResult();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits();
     ok &= testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits();

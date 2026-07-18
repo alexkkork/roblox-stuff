@@ -13363,13 +13363,14 @@ LuraphExactLeafRecognition recognizeLuraphV147Opcode212SingleResultCall(
 bool luraphV147Opcode61SingleResultCallHandlerMatches(const json& handler)
 {
     const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
     constexpr std::string_view exactLeaf =
         "else D=Q[_];(t)[D]=t[D]();end;end;end;end;end;";
     return handler.value("opcode", int64_t(-1)) == 61 && range.is_object() &&
         range.value("begin", size_t(0)) == 12301 && range.value("end", size_t(0)) == 13062 &&
         handler.value("candidate_source", "").find(exactLeaf) != std::string::npos &&
-        handler.value("vm_state_independent", false) &&
-        handler.value("normalized_handler_ir", json(nullptr)).value("opcode", int64_t(-1)) == 61;
+        handler.value("vm_state_independent", false) && normalized.is_object() &&
+        normalized.value("opcode", int64_t(-1)) == 61;
 }
 
 LuraphExactLeafRecognition recognizeLuraphV147Opcode61SingleResultCall(
@@ -13396,10 +13397,17 @@ LuraphExactLeafRecognition recognizeLuraphV147Opcode61SingleResultCall(
     if (observations)
         for (const json& observation : *observations)
         {
+            if (!observation.is_object())
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-61 runtime evidence row is malformed";
+                return output;
+            }
             const json runtimeLanes = observation.value("runtime_lanes", json::object());
             const json writes = observation.value("register_writes", json(nullptr));
             const json guardPath = observation.value("guard_path", json(nullptr));
-            const json decisions = guardPath.value("decisions", json(nullptr));
+            const json decisions = guardPath.is_object()
+                ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
             bool intactPath = decisions.is_array() && decisions.size() == 2;
             if (intactPath)
                 intactPath = decisions[0].value("begin", size_t(0)) == 12304 &&
@@ -14501,6 +14509,11 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode212V147SitesRejected = 0;
     size_t opcode212V147ObservationsValidated = 0;
     json opcode212V147RecognitionStatusCounts = json::object();
+    size_t opcode61V147SitesTotal = 0;
+    size_t opcode61V147SitesStatic = 0;
+    size_t opcode61V147SitesRejected = 0;
+    size_t opcode61V147ObservationsValidated = 0;
+    json opcode61V147RecognitionStatusCounts = json::object();
     size_t opcode23SitesTotal = 0;
     size_t opcode23SitesStatic = 0;
     size_t opcode23SitesRejected = 0;
@@ -14720,6 +14733,32 @@ json luraphRuntimeSemanticDispatchArtifact(
                 }
                 else
                     ++opcode212V147SitesRejected;
+            }
+            if (!semanticAccepted && opcode == 61 && handler != handlers.end())
+            {
+                ++opcode61V147SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphV147Opcode61SingleResultCall(
+                    id, pc, handler->second, effectiveLanes, siteObservations);
+                row["opcode61_v147_single_result_call_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode61V147RecognitionStatusCounts[recognized.status] =
+                    opcode61V147RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode61V147ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode61V147SitesStatic;
+                }
+                else
+                    ++opcode61V147SitesRejected;
             }
             if (!semanticAccepted && handler != handlers.end())
             {
@@ -15549,6 +15588,20 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"fixed_single_result", true},
             {"explicit_argument_range", true},
             {"trailing_nil_arguments_preserved", true},
+        }},
+        {"opcode61_v147_single_result_call_coverage", {
+            {"available", opcode61V147SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-61-zero-argument-single-result-call"},
+            {"sites_total", opcode61V147SitesTotal},
+            {"static_semantic_sites", opcode61V147SitesStatic},
+            {"unresolved_sites", opcode61V147SitesTotal - opcode61V147SitesStatic},
+            {"rejected_sites", opcode61V147SitesRejected},
+            {"validated_runtime_executions", opcode61V147ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode61V147RecognitionStatusCounts)},
+            {"fixed_zero_arguments", true},
+            {"fixed_single_result", true},
+            {"intact_handler_precondition", true},
+            {"protector_guards_elided", true},
         }},
         {"opcode23_argument_copy_coverage", {
             {"available", opcode23SitesTotal > 0},
@@ -18693,6 +18746,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeOpcode142OperandTableCoverage = json{{"available", false}};
     json runtimeOpcode151RangeClearCoverage = json{{"available", false}};
     json runtimeOpcode212V147SingleResultCallCoverage = json{{"available", false}};
+    json runtimeOpcode61V147SingleResultCallCoverage = json{{"available", false}};
     json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
@@ -18757,6 +18811,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode151_range_clear_coverage", json{{"available", false}});
                     runtimeOpcode212V147SingleResultCallCoverage = runtimeSemanticDocument->value(
                         "opcode212_v147_single_result_call_coverage", json{{"available", false}});
+                    runtimeOpcode61V147SingleResultCallCoverage = runtimeSemanticDocument->value(
+                        "opcode61_v147_single_result_call_coverage", json{{"available", false}});
                     runtimeOpcode23ArgumentCopyCoverage = runtimeSemanticDocument->value(
                         "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
@@ -18821,6 +18877,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"opcode142_operand_table_coverage", runtimeOpcode142OperandTableCoverage},
                 {"opcode151_range_clear_coverage", runtimeOpcode151RangeClearCoverage},
                 {"opcode212_v147_single_result_call_coverage", runtimeOpcode212V147SingleResultCallCoverage},
+                {"opcode61_v147_single_result_call_coverage", runtimeOpcode61V147SingleResultCallCoverage},
                 {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
@@ -20512,6 +20569,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["opcode142_operand_table_loads"] = runtimeOpcode142OperandTableCoverage;
     report["coverage"]["opcode151_range_clears"] = runtimeOpcode151RangeClearCoverage;
     report["coverage"]["opcode212_v147_single_result_calls"] = runtimeOpcode212V147SingleResultCallCoverage;
+    report["coverage"]["opcode61_v147_single_result_calls"] = runtimeOpcode61V147SingleResultCallCoverage;
     report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;
