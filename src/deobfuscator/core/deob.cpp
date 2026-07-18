@@ -13360,6 +13360,121 @@ LuraphExactLeafRecognition recognizeLuraphV147Opcode212SingleResultCall(
     return output;
 }
 
+bool luraphV147Opcode61SingleResultCallHandlerMatches(const json& handler)
+{
+    const json range = handler.value("range", json::object());
+    constexpr std::string_view exactLeaf =
+        "else D=Q[_];(t)[D]=t[D]();end;end;end;end;end;";
+    return handler.value("opcode", int64_t(-1)) == 61 && range.is_object() &&
+        range.value("begin", size_t(0)) == 12301 && range.value("end", size_t(0)) == 13062 &&
+        handler.value("candidate_source", "").find(exactLeaf) != std::string::npos &&
+        handler.value("vm_state_independent", false) &&
+        handler.value("normalized_handler_ir", json(nullptr)).value("opcode", int64_t(-1)) == 61;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147Opcode61SingleResultCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphV147Opcode61SingleResultCallHandlerMatches(handler))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-61 handler does not contain the v14.7 zero-argument single-result leaf";
+        return output;
+    }
+    const std::optional<int64_t> base = luraphRuntimeLaneInteger(effectiveLanes, "Q");
+    if (!base || *base < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-61 callable register Q is invalid";
+        return output;
+    }
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json decisions = guardPath.value("decisions", json(nullptr));
+            bool intactPath = decisions.is_array() && decisions.size() == 2;
+            if (intactPath)
+                intactPath = decisions[0].value("begin", size_t(0)) == 12304 &&
+                    decisions[0].value("end", size_t(0)) == 12315 &&
+                    !decisions[0].value("decision", true) &&
+                    decisions[1].value("begin", size_t(0)) == 12373 &&
+                    decisions[1].value("end", size_t(0)) == 12384 &&
+                    !decisions[1].value("decision", true);
+            bool writesAgree = writes.is_array() && writes.size() <= 1;
+            if (writesAgree && !writes.empty())
+                writesAgree = writes.front().is_object() &&
+                    writes.front().value("register", int64_t(-1)) == *base;
+            if (observation.value("opcode", int64_t(-1)) != 61 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "Q") != base ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !writesAgree || !guardPath.is_object() || !guardPath.value("complete", false) ||
+                guardPath.value("overflow", true) || !intactPath)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-61 runtime evidence disagrees with the intact-handler call path";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    output.status = "recognized";
+    output.diagnostic = "the intact v14.7 opcode-61 leaf calls R[Q] with zero arguments and stores its first result";
+    output.operation = {
+        {"kind", "operation_sequence"},
+        {"semantic_family", "call"},
+        {"opcode", 61},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"path_specific", false},
+        {"static_semantic", true},
+        {"source_claim", false},
+        {"proof", "locked_v147_opcode61_intact_path_zero_argument_single_result_call"},
+        {"integrity_precondition", "intact_locked_handler_state"},
+        {"protector_guards_elided", true},
+        {"observation_count", output.validated_observations},
+        {"operations", json::array({
+            {{"kind", "set_top"}, {"value", constant(*base)}},
+            {
+                {"kind", "register_write"},
+                {"register", constant(*base)},
+                {"value", {
+                    {"kind", "call"},
+                    {"method", false},
+                    {"result_arity", {{"kind", "fixed"}, {"count", 1}}},
+                    {"function", registerRead(*base)},
+                    {"arguments", json::array()},
+                }},
+            },
+        })},
+        {"runtime_validation", {
+            {"argument_count", 0},
+            {"result_count", 1},
+            {"function_register", *base},
+            {"result_register", *base},
+            {"top_after", *base},
+        }},
+        {"call_may_yield", true},
+        {"call_may_raise", true},
+        {"destination_write_after_successful_call", true},
+        {"fallthrough_after_successful_call", true},
+    };
+    return output;
+}
+
 bool luraphOpcode23ArgumentCopyHandlerMatches(const json& handler)
 {
     if (handler.value("opcode", int64_t(-1)) != 23 ||
