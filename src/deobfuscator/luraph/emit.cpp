@@ -419,6 +419,7 @@ public:
         initialize("root-argument parsing", [&] { parseRootArguments(); });
         initialize("activation-argument table parsing", [&] { parseActivationArgumentTables(); });
         initialize("capture-provenance parsing", [&] { parseCaptureProvenance(); });
+        initialize("root-capture hydration parsing", [&] { parseRootCaptureHydrations(); });
     }
 
     SemanticCandidate emit()
@@ -596,6 +597,7 @@ public:
             result.inferred_root_slots = rootArgumentExpressions.size();
         }
         append("end\n");
+        append("local shared_root_arguments = build_root_arguments()\n");
         append("local function build_root_captures()\n");
         append("  local root_registers, inherited_registers, captures = {}, {}, {}\n");
         const json payloadRoot = reachableIr.value("payload_root", json(nullptr));
@@ -650,7 +652,7 @@ public:
             append("return nil\n");
         }
         else
-            append("return " + prototypeName(root) + "(build_root_captures(), build_root_arguments())\n");
+            append("return " + prototypeName(root) + "(build_root_captures(), shared_root_arguments)\n");
         result.source = output.str();
         result.prototypes = prototypeIds.size();
         return result;
@@ -779,9 +781,12 @@ private:
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> closureRegisterTargets;
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> captureClosureTargets;
     std::map<uint64_t, std::map<size_t, ArgumentTableHydration>> argumentTableHydrations;
+    std::map<uint64_t, std::set<int64_t>> rootArgumentCaptureHydrations;
     uint64_t rootPrototype = 0;
     std::map<int64_t, std::string> rootArgumentExpressions;
+    std::set<int64_t> rootArgumentObservedKeys;
     std::set<uint64_t> rootArgumentPrototypes;
+    bool rootArgumentObservedDomainComplete = false;
     bool rootArgumentTableComplete = false;
     bool rootArgumentDirectSpecializationSafe = true;
     bool rootCallFrameSpecialized = false;
@@ -1021,9 +1026,14 @@ private:
                 continue;
             const std::optional<int64_t> key = primitiveIntegerValue(entry["key"]);
             const std::optional<std::string> value = observedBootstrapExpression(entry["value"]);
-            if (key && *key >= 0 && value)
-                rootArgumentExpressions[*key] = *value;
+            if (key && *key >= 0)
+            {
+                rootArgumentObservedKeys.insert(*key);
+                if (value)
+                    rootArgumentExpressions[*key] = *value;
+            }
         }
+        rootArgumentObservedDomainComplete = capturedRootDomainComplete;
         rootArgumentTableComplete = capturedRootDomainComplete &&
             rootArgumentExpressions.size() == recoveredRootEntries;
         const auto prototype = instructions.find(rootPrototype);
@@ -2586,6 +2596,72 @@ private:
             changed = addCallArgumentIdentityEvidence() || changed;
             if (!changed)
                 break;
+        }
+    }
+
+    bool captureObservedAsTable(uint64_t prototype, int64_t captureIndex) const
+    {
+        const auto prototypeValues = captureValueIdentities.find(prototype);
+        if (prototypeValues == captureValueIdentities.end())
+            return false;
+        const auto captureValues = prototypeValues->second.find(captureIndex);
+        return captureValues != prototypeValues->second.end() && captureValues->second.size() == 1 &&
+            captureValues->second.begin()->second.value("type", "") == "table";
+    }
+
+    void parseRootCaptureHydrations()
+    {
+        // This v14.7 path inherits the large bootstrap helper table through closures. A high
+        // indexed lookup separates it from the small per-call helper packs in the same trace.
+        constexpr int64_t kLargeBootstrapIndex = 128;
+        if (!rootArgumentObservedDomainComplete || rootArgumentObservedKeys.empty())
+            return;
+
+        for (const auto& [prototype, rows] : instructions)
+        {
+            const auto domain = captureDomains.find(prototype);
+            if (domain == captureDomains.end() || !domain->second.seen || !domain->second.complete)
+                continue;
+
+            std::set<int64_t> candidates;
+            std::set<int64_t> rejected;
+            for (const auto& [pc, instructionRows] : rows)
+            {
+                const auto following = rows.find(pc + 1);
+                if (following == rows.end())
+                    continue;
+                for (const json& instruction : instructionRows)
+                {
+                    const json* load = semanticOperationForInstruction(instruction);
+                    if (!load || load->value("semantic_family", "") != "capture_load")
+                        continue;
+                    const json validation = load->value("runtime_validation", json::object());
+                    const int64_t captureIndex = integerField(validation, "capture_index").value_or(-1);
+                    const int64_t destination = integerField(validation, "destination_register").value_or(-1);
+                    if (captureIndex < 0 || destination < 0 || !domain->second.indices.contains(captureIndex) ||
+                        !captureObservedAsTable(prototype, captureIndex))
+                        continue;
+
+                    for (const json& nextInstruction : following->second)
+                    {
+                        const json* lookup = semanticOperationForInstruction(nextInstruction);
+                        if (!lookup || lookup->value("semantic_family", "") != "lookup_and_preserve")
+                            continue;
+                        const json lookupValidation = lookup->value("runtime_validation", json::object());
+                        const int64_t source = integerField(lookupValidation, "source_register").value_or(-1);
+                        if (source != destination)
+                            continue;
+                        const int64_t lookupIndex = integerField(lookupValidation, "lookup_index").value_or(-1);
+                        if (lookupIndex >= kLargeBootstrapIndex && rootArgumentObservedKeys.contains(lookupIndex))
+                            candidates.insert(captureIndex);
+                        else
+                            rejected.insert(captureIndex);
+                    }
+                }
+            }
+            for (int64_t captureIndex : candidates)
+                if (!rejected.contains(captureIndex))
+                    rootArgumentCaptureHydrations[prototype].insert(captureIndex);
         }
     }
 
@@ -4175,6 +4251,18 @@ private:
         const bool specializedRootCall = id == rootPrototype && rootCallFrameSpecialized;
         append(prototypeName(id) + " = function(captured_values, ...)\n");
         append("  captured_values = captured_values or {}\n");
+        if (const auto hydrations = rootArgumentCaptureHydrations.find(id);
+            hydrations != rootArgumentCaptureHydrations.end())
+        {
+            for (int64_t captureIndex : hydrations->second)
+            {
+                append("  if captured_values[" + std::to_string(captureIndex) +
+                    "] == nil then captured_values[" + std::to_string(captureIndex) +
+                    "] = shared_root_arguments end\n");
+                ++result.root_argument_capture_slots_hydrated;
+            }
+            ++result.root_argument_capture_prototypes_hydrated;
+        }
         append("  local registers = {}\n");
         append("  local open_cells = {}\n");
         append("  local replay_positions = {}\n");

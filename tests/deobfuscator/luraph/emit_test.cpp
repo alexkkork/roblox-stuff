@@ -2085,6 +2085,99 @@ bool testObservedActivationTableHydrationKeepsOnlyStableSlots()
             "activation table hydration metrics drifted");
 }
 
+bool testRootArgumentTableHydratesProvenInheritedCapture()
+{
+    const json captureLoad = pathSpecificInstruction(1, {
+        {"kind", "register_write"},
+        {"semantic_family", "capture_load"},
+        {"register", immediate("D", 7)},
+        {"value", {{"kind", "index_read"}, {"table", {{"kind", "upvalue_file"}}},
+            {"index", immediate("G", 0)}}},
+        {"runtime_validation", {{"capture_index", 0}, {"destination_register", 7}}},
+    });
+    const json lookup = pathSpecificInstruction(2, {
+        {"kind", "operation_sequence"},
+        {"semantic_family", "lookup_and_preserve"},
+        {"operations", json::array({
+            {{"kind", "register_write"}, {"register", immediate("D", 8)},
+                {"value", {{"kind", "register_read"}, {"index", immediate("D", 7)}}}},
+            {{"kind", "register_write"}, {"register", immediate("D", 7)},
+                {"value", {{"kind", "index_read"},
+                    {"table", {{"kind", "register_read"}, {"index", immediate("D", 8)}}},
+                    {"index", immediate("G", 234)}}}},
+        })},
+        {"runtime_validation", {{"source_register", 7}, {"destination_register", 7},
+            {"preserved_register", 8}, {"lookup_index", 234}}},
+    });
+    json rootArguments = {
+        {"argument_count", 1},
+        {"argument_table_entries", json::array({{
+            {"argument_index", 1}, {"key", number(234)},
+            {"value", {{"type", "function"}, {"callable", true}, {"name", ""}}},
+        }})},
+        {"argument_table_domains", json::array({{
+            {"argument_index", 1}, {"complete", true}, {"observed_entries", 1},
+        }})},
+    };
+    const json captureDomains = json::array({{
+        {"prototype", 2}, {"complete", true}, {"indices", json::array({0})},
+        {"values", {{"0", {{"capture_index", 0},
+            {"resolved_value", {{"type", "table"}, {"primitive", false}}}}}}},
+    }});
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({captureLoad, lookup}), 1, 2, json::array(), json::array(), json::array(),
+        json(nullptr), captureDomains, json::array(), rootArguments, 1);
+
+    return require(candidate.source.find("local shared_root_arguments = build_root_arguments()") !=
+                std::string::npos,
+            "root argument table was rebuilt separately instead of shared") &&
+        require(candidate.source.find(
+                    "if captured_values[0] == nil then captured_values[0] = shared_root_arguments end") !=
+                std::string::npos,
+            "proven inherited root-table capture was not hydrated") &&
+        require(candidate.source.find("build_root_captures(), shared_root_arguments") != std::string::npos,
+            "root invocation did not reuse the shared argument table") &&
+        require(candidate.root_argument_capture_prototypes_hydrated == 1 &&
+                candidate.root_argument_capture_slots_hydrated == 1,
+            "root capture hydration metrics drifted");
+}
+
+bool testSmallHelperLookupDoesNotHydrateRootCapture()
+{
+    const json captureLoad = pathSpecificInstruction(1, {
+        {"kind", "register_write"}, {"semantic_family", "capture_load"},
+        {"runtime_validation", {{"capture_index", 0}, {"destination_register", 7}}},
+    });
+    const json lookup = pathSpecificInstruction(2, {
+        {"kind", "operation_sequence"}, {"semantic_family", "lookup_and_preserve"},
+        {"runtime_validation", {{"source_register", 7}, {"lookup_index", 37}}},
+    });
+    json rootArguments = {
+        {"argument_count", 1},
+        {"argument_table_entries", json::array({{
+            {"argument_index", 1}, {"key", number(37)}, {"value", number(1)},
+        }})},
+        {"argument_table_domains", json::array({{
+            {"argument_index", 1}, {"complete", true}, {"observed_entries", 1},
+        }})},
+    };
+    const json captureDomains = json::array({{
+        {"prototype", 2}, {"complete", true}, {"indices", json::array({0})},
+        {"values", {{"0", {{"capture_index", 0},
+            {"resolved_value", {{"type", "table"}, {"primitive", false}}}}}}},
+    }});
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({captureLoad, lookup}), 1, 2, json::array(), json::array(), json::array(),
+        json(nullptr), captureDomains, json::array(), rootArguments, 1);
+
+    return require(candidate.source.find(
+               "if captured_values[0] == nil then captured_values[0] = shared_root_arguments end") ==
+               std::string::npos,
+           "small helper-table lookup was misclassified as a root-table capture") &&
+        require(candidate.root_argument_capture_slots_hydrated == 0,
+            "rejected helper capture changed root hydration metrics");
+}
+
 bool testUnknownPathSpecificOperationPreservesIrAndProvenance()
 {
     const json opaqueMetadata = {
@@ -2181,6 +2274,8 @@ int main()
     ok &= testUnsupportedPathSpecificExpressionFailsClosed();
     ok &= testOverloadedClosureOpcodeRespectsRecoveredScalarWrite();
     ok &= testObservedActivationTableHydrationKeepsOnlyStableSlots();
+    ok &= testRootArgumentTableHydratesProvenInheritedCapture();
+    ok &= testSmallHelperLookupDoesNotHydrateRootCapture();
     ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";

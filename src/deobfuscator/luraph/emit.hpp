@@ -33,6 +33,8 @@ struct SemanticCandidate
     size_t inferred_root_slots = 0;
     size_t observed_argument_tables_hydrated = 0;
     size_t observed_argument_slots_hydrated = 0;
+    size_t root_argument_capture_prototypes_hydrated = 0;
+    size_t root_argument_capture_slots_hydrated = 0;
     size_t root_argument_shared_prototypes = 0;
     size_t root_argument_references_specialized = 0;
     size_t absent_root_argument_references_specialized = 0;
