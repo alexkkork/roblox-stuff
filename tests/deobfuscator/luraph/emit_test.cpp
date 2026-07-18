@@ -1545,12 +1545,15 @@ bool testObservedGlobalIdentitySpecializesCallArgument()
             {"callee_prototype", 3},
             {"observed_activations", 1},
             {"observed_argument_count_complete", true},
-            {"observed_argument_count", 2},
+            {"observed_argument_count", 3},
             {"observed_argument_identities", json::array({
                 {{"argument_index", 1},
                     {"identity", {{"type", "global_reference"}, {"path", "string"}}},
                     {"observed_activations", 1}},
                 {{"argument_index", 2},
+                    {"identity", {{"type", "function"}, {"name", "assert"}}},
+                    {"observed_activations", 1}},
+                {{"argument_index", 3},
                     {"identity", {{"type", "nil"}, {"value", nullptr}}},
                     {"observed_activations", 1}},
             })},
@@ -1561,7 +1564,7 @@ bool testObservedGlobalIdentitySpecializesCallArgument()
         {"closure_descriptors", json::array()},
         {"prototypes", json::array({
             prototype(2, json::array({
-                pathSpecificInstruction(1, exactOpcode8Call(3, 4, 6, "fixed", 3, 4)),
+                pathSpecificInstruction(1, exactOpcode8Call(3, 4, 7, "fixed", 3, 4)),
             })),
             prototype(3, json::array({registerAliasInstruction(1, 1, 1)})),
         })},
@@ -1569,11 +1572,13 @@ bool testObservedGlobalIdentitySpecializesCallArgument()
     const json cfg = {{"prototypes", json::array({cfgPrototype(2, 1), cfgPrototype(3, 1)})}};
     const SemanticCandidate candidate = emitSemanticCandidate(ir, cfg);
     return require(candidate.source.find(
-            "call_recovered(registers[3], recovered_routine_3, captured_values, environment[\"string\"], registers[5])") !=
+            "call_recovered(registers[3], recovered_routine_3, captured_values, environment[\"string\"], resolve_named_function(\"assert\"), nil)") !=
             std::string::npos,
-            "stable observed global identity did not replace an unresolved call argument") &&
+            "stable observed global, named-function, and primitive identities did not replace unresolved call arguments") &&
         require(candidate.observed_global_call_arguments == 1,
-            "observed global call-argument specialization was not counted exactly once");
+            "observed global call-argument specialization was not counted exactly once") &&
+        require(candidate.observed_call_arguments_specialized == 3,
+            "general observed call-argument specialization count drifted");
 }
 
 bool testFixedArgumentLoadUsesProvenRegisterDestinations()

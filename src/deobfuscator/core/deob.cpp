@@ -10693,6 +10693,23 @@ bool luraphObservedValuesEqual(const json& left, const json& right)
     return false;
 }
 
+bool luraphObservedValuesIdentityCompatible(const json& left, const json& right)
+{
+    if (!left.is_object() || !right.is_object() || left.value("type", "") != right.value("type", ""))
+        return false;
+    if (luraphObservedValuesEqual(left, right))
+        return true;
+
+    const std::string type = left.value("type", "");
+    if (type == "function")
+    {
+        const std::string leftName = left.value("name", "");
+        const std::string rightName = right.value("name", "");
+        return leftName.empty() || rightName.empty() || leftName == rightName;
+    }
+    return type == "table" || type == "userdata" || type == "thread";
+}
+
 std::optional<double> luraphObservedExpressionNumber(const json& expression)
 {
     if (!expression.is_object())
@@ -10774,7 +10791,8 @@ std::optional<json> validateLuraphObservedCandidate(
     const json& operation,
     const std::vector<json>& observations,
     size_t pc,
-    const std::vector<json>* observedReturns)
+    const std::vector<json>* observedReturns,
+    bool allowImpreciseObjectOrigins = false)
 {
     if (!operation.is_object() ||
         operation.value("protector_state", false) ||
@@ -10822,7 +10840,7 @@ std::optional<json> validateLuraphObservedCandidate(
             return std::nullopt;
 
         std::optional<json> principalValidation = validateLuraphObservedCandidate(
-            *principal, observations, pc, observedReturns);
+            *principal, observations, pc, observedReturns, allowImpreciseObjectOrigins);
         if (!principalValidation)
             return std::nullopt;
         const std::string principalKind = principal->value("kind", "");
@@ -10974,18 +10992,46 @@ std::optional<json> validateLuraphObservedCandidate(
                     const std::string sourceKind = source.value("kind", "");
                     if (sourceKind == "register")
                     {
-                        if (source.value("index", std::numeric_limits<int64_t>::min()) !=
+                        if (source.value("index", std::numeric_limits<int64_t>::min()) ==
                             *expectedRegisterOrigin)
+                            matchedRegisterOrigin = true;
+                        else if (!allowImpreciseObjectOrigins)
                             return std::nullopt;
-                        matchedRegisterOrigin = true;
                     }
-                    else if (sourceKind != "argument" ||
-                        source.value("index", std::numeric_limits<int64_t>::min()) !=
+                    else if (sourceKind == "argument")
+                    {
+                        if (source.value("index", std::numeric_limits<int64_t>::min()) ==
                             *expectedRegisterOrigin)
+                            matchedRegisterOrigin = true;
+                        else if (!allowImpreciseObjectOrigins)
+                            return std::nullopt;
+                    }
+                    else
                         return std::nullopt;
                 }
                 if (!matchedRegisterOrigin)
                     return std::nullopt;
+
+                if (allowImpreciseObjectOrigins && origin->size() > 1)
+                {
+                    const json operandFrame = observation.value("operand_frame", json::object());
+                    std::optional<json> sourceBefore;
+                    if (operandFrame.is_object())
+                        for (auto lane = operandFrame.begin(); lane != operandFrame.end(); ++lane)
+                            if (lane.value().is_object() &&
+                                lane.value().value("register", std::numeric_limits<int64_t>::min()) ==
+                                    *expectedRegisterOrigin &&
+                                lane.value().contains("value") && lane.value()["value"].is_object())
+                            {
+                                if (sourceBefore &&
+                                    !luraphObservedValuesIdentityCompatible(*sourceBefore, lane.value()["value"]))
+                                    return std::nullopt;
+                                sourceBefore = lane.value()["value"];
+                            }
+                    if (!sourceBefore ||
+                        !luraphObservedValuesIdentityCompatible(*sourceBefore, writes[0]["value"]))
+                        return std::nullopt;
+                }
             }
             ++matchedWrites;
         }
@@ -14023,7 +14069,8 @@ json luraphRuntimeSemanticDispatchArtifact(
                     validation = validateLuraphObservedCandidate(
                         candidate, candidateObservations, pc,
                         observedReturnsForSite != returnsBySite.end()
-                            ? &observedReturnsForSite->second : nullptr);
+                            ? &observedReturnsForSite->second : nullptr,
+                        true);
                     incompleteMoveCandidate = validation.has_value();
                 }
                 else if (childActivationsForSite != childActivationsBySite.end())
@@ -17769,6 +17816,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"fixed_register_calls", semanticCandidate->fixed_register_calls},
             {"open_register_calls", semanticCandidate->open_register_calls},
             {"observed_global_call_arguments", semanticCandidate->observed_global_call_arguments},
+            {"observed_call_arguments_specialized", semanticCandidate->observed_call_arguments_specialized},
             {"observed_prototype_arguments_specialized", semanticCandidate->observed_prototype_arguments_specialized},
             {"blocks_map", semanticCandidate->mapping},
         });
@@ -17899,6 +17947,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"fixed_register_calls", semanticCandidate->fixed_register_calls},
             {"open_register_calls", semanticCandidate->open_register_calls},
             {"observed_global_call_arguments", semanticCandidate->observed_global_call_arguments},
+            {"observed_call_arguments_specialized", semanticCandidate->observed_call_arguments_specialized},
             {"observed_prototype_arguments_specialized", semanticCandidate->observed_prototype_arguments_specialized},
             {"inferred_root_slots", semanticCandidate->inferred_root_slots},
             {"observed_argument_tables_hydrated", semanticCandidate->observed_argument_tables_hydrated},

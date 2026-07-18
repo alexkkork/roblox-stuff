@@ -46,6 +46,29 @@ def trace(operand_frame: str | None) -> str:
     return "\n".join(rows)
 
 
+def ambiguous_object_trace(include_frame: bool) -> str:
+    rows = [
+        "@@LPH_PROTO_V1@@\t1\t1\tS,V,Z,g,r,v",
+        "@@LPH_PROTO_OBJECT_V1@@\t1\t1001",
+        "@@LPH_INSN_V1@@\t1\t1\t72\tS=n:19|V=z:|Z=n:0|g=z:|r=n:12|v=z:",
+        "@@LPH_ACT_PROTO_V1@@\t1\t1\tnil\tnil\tnil\t0\t1\t\t1",
+    ]
+    if include_frame:
+        rows.append(
+            "@@LPH_OPERAND_FRAME_V1@@\t1\t1\t1\t72\t3\t"
+            "S@19=f:73656c656374|Z@0=z:|r@12=x:table"
+        )
+    rows.extend(
+        (
+            "@@LPH_GUARD_PATH_V1@@\t1\t1\t1\t72\t0\t0\t",
+            "@@LPH_STEP_V1@@\t1\t1\t1\t72\t2\t1\t19=x:table\t"
+            "S=n:19|V=z:|Z=n:0|g=z:|r=n:12|v=z:\t19=r:12,r:55",
+            "",
+        )
+    )
+    return "\n".join(rows)
+
+
 def run_case(
     deobfuscator: pathlib.Path,
     source: pathlib.Path,
@@ -53,10 +76,20 @@ def run_case(
     name: str,
     operand_frame: str | None,
 ) -> dict:
+    return run_trace_case(deobfuscator, source, root, name, trace(operand_frame))
+
+
+def run_trace_case(
+    deobfuscator: pathlib.Path,
+    source: pathlib.Path,
+    root: pathlib.Path,
+    name: str,
+    trace_text: str,
+) -> dict:
     case = root / name
     case.mkdir()
     trace_path = case / "trace.log"
-    trace_path.write_text(trace(operand_frame), encoding="utf-8")
+    trace_path.write_text(trace_text, encoding="utf-8")
     output = case / "output"
     report = case / "report.json"
     completed = subprocess.run(
@@ -124,6 +157,24 @@ def main() -> int:
                 and rejected.get("semantic_coverage_class") == "trace_evidence_only",
                 f"{name} unchanged move evidence was incorrectly accepted: {rejected}",
             )
+
+        ambiguous = run_trace_case(
+            args.deobfuscator.resolve(), source, root, "ambiguous-object", ambiguous_object_trace(True)
+        )
+        ambiguous_operation = ambiguous.get("observational_semantic_operation") or {}
+        require(
+            ambiguous_operation.get("kind") == "register_write"
+            and ambiguous_operation.get("proof") == "runtime_validated_incomplete_register_move_candidate",
+            f"operand-framed ambiguous object move was not recovered: {ambiguous}",
+        )
+
+        ambiguous_unframed = run_trace_case(
+            args.deobfuscator.resolve(), source, root, "ambiguous-object-unframed", ambiguous_object_trace(False)
+        )
+        require(
+            ambiguous_unframed.get("observational_semantic_operation") is None,
+            f"unframed ambiguous object move was incorrectly accepted: {ambiguous_unframed}",
+        )
 
     print("Luraph unchanged move operand-frame regression OK")
     return 0

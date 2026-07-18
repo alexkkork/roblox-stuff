@@ -2956,7 +2956,7 @@ private:
             std::to_string(context.pc) + ", " + quoteLuau(kind) + ", " + quoteLuau(reason) + ")";
     }
 
-    std::optional<std::string> observedGlobalCallArgument(
+    std::optional<std::string> observedCallArgument(
         const Context& context, size_t argumentIndex)
     {
         if (!context.callee || argumentIndex == 0)
@@ -2966,13 +2966,16 @@ private:
         if (frame == observedCallFrames.end())
             return std::nullopt;
         const auto identity = frame->second.argument_identities.find(argumentIndex);
-        if (identity == frame->second.argument_identities.end() ||
-            identity->second.identity.value.value("type", "") != "global_reference")
+        if (identity == frame->second.argument_identities.end())
             return std::nullopt;
         const std::optional<std::string> source = observedBootstrapExpression(
             identity->second.identity.value);
         if (source)
-            ++result.observed_global_call_arguments;
+        {
+            ++result.observed_call_arguments_specialized;
+            if (identity->second.identity.value.value("type", "") == "global_reference")
+                ++result.observed_global_call_arguments;
+        }
         return source;
     }
 
@@ -3163,7 +3166,7 @@ private:
             {
                 ++argumentIndex;
                 if (const std::optional<std::string> observed =
-                        observedGlobalCallArgument(context, argumentIndex))
+                        observedCallArgument(context, argumentIndex))
                     arguments.push_back(*observed);
                 else
                     arguments.push_back(expression(argument, context, depth + 1));
