@@ -13883,6 +13883,548 @@ LuraphExactLeafRecognition recognizeLuraphV147Opcode39StatePrepare(
     return output;
 }
 
+bool luraphV147NestedReadHandlerMatches(const json& handler, int64_t opcode)
+{
+    struct HandlerSpec
+    {
+        size_t begin;
+        size_t end;
+        std::string_view exactLeaf;
+    };
+    std::optional<HandlerSpec> spec;
+    if (opcode == 172)
+        spec = HandlerSpec{40572, 40917, "if w>=172 then if w~=173 then B=(h[_]);G=(G[B]);B=(C[_]);"};
+    else if (opcode == 97)
+        spec = HandlerSpec{650, 9556, "else if w~=97 then G=t;B=h[_];else G=G[B];end;"};
+    else if (opcode == 221)
+        spec = HandlerSpec{20133, 20142, "p[o]=(G);"};
+    if (!spec || handler.value("opcode", int64_t(-1)) != opcode)
+        return false;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    return range.is_object() && range.value("begin", size_t(0)) == spec->begin &&
+        range.value("end", size_t(0)) == spec->end && normalized.is_object() &&
+        normalized.value("opcode", int64_t(-1)) == opcode &&
+        handler.value("candidate_source", "").find(spec->exactLeaf) != std::string::npos;
+}
+
+bool luraphV147NestedReadGuardPathMatches(const json& observation, int64_t opcode)
+{
+    const json guardPath = observation.value("guard_path", json(nullptr));
+    const json decisions = guardPath.is_object()
+        ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
+    if (!guardPath.is_object() || !guardPath.value("complete", false) ||
+        guardPath.value("overflow", true) || !decisions.is_array())
+        return false;
+    if (opcode == 221)
+        return decisions.size() == 1 && decisions[0].is_object() &&
+            decisions[0].value("begin", size_t(0)) == 19910 &&
+            decisions[0].value("end", size_t(0)) == 19922 &&
+            decisions[0].value("decision", false);
+    if (decisions.size() != 3)
+        return false;
+    if (opcode == 172)
+        return decisions[0].is_object() && decisions[0].value("begin", size_t(0)) == 19910 &&
+            decisions[0].value("end", size_t(0)) == 19922 && decisions[0].value("decision", false) &&
+            decisions[1].is_object() && decisions[1].value("begin", size_t(0)) == 40575 &&
+            decisions[1].value("end", size_t(0)) == 40586 && !decisions[1].value("decision", true) &&
+            decisions[2].is_object() && decisions[2].value("begin", size_t(0)) == 40660 &&
+            decisions[2].value("end", size_t(0)) == 40671 && !decisions[2].value("decision", true);
+    if (opcode == 97)
+        return decisions[0].is_object() && decisions[0].value("begin", size_t(0)) == 653 &&
+            decisions[0].value("end", size_t(0)) == 665 && !decisions[0].value("decision", true) &&
+            decisions[1].is_object() && decisions[1].value("begin", size_t(0)) == 5011 &&
+            decisions[1].value("end", size_t(0)) == 5023 && !decisions[1].value("decision", true) &&
+            decisions[2].is_object() && decisions[2].value("begin", size_t(0)) == 5075 &&
+            decisions[2].value("end", size_t(0)) == 5087 && !decisions[2].value("decision", true);
+    return false;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147NestedReadInstruction(
+    uint64_t prototype,
+    size_t pc,
+    int64_t opcode,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphV147NestedReadHandlerMatches(handler, opcode))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "handler does not match the locked v14.7 prepared nested-read state machine";
+        return output;
+    }
+    std::optional<int64_t> tableRegister;
+    json key = nullptr;
+    if (opcode == 172)
+    {
+        tableRegister = luraphRuntimeLaneInteger(effectiveLanes, "h");
+        key = effectiveLanes.value("C", json(nullptr));
+        const std::string keyType = key.is_object() ? key.value("type", "") : "";
+        const bool keyMaterializable = key.is_object() && key.value("primitive", false) &&
+            (keyType == "nil" || keyType == "boolean" || keyType == "number" || keyType == "string");
+        if (!tableRegister || *tableRegister < 0 || !keyMaterializable)
+        {
+            output.status = "operand_mismatch";
+            output.diagnostic = "opcode-172 table register or nested key is not materializable";
+            return output;
+        }
+    }
+
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object() || observation.value("opcode", int64_t(-1)) != opcode ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !luraphV147NestedReadGuardPathMatches(observation, opcode))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "runtime evidence disagrees with the intact prepared nested-read path";
+                return output;
+            }
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            if (opcode == 172)
+            {
+                const json runtimeKey = runtimeLanes.value("C", json(nullptr));
+                if (luraphRuntimeLaneInteger(runtimeLanes, "h") != tableRegister ||
+                    !runtimeKey.is_object() || runtimeKey.value("type", "") != key.value("type", "") ||
+                    runtimeKey.value("value", json(nullptr)) != key.value("value", json(nullptr)))
+                {
+                    output.status = "evidence_mismatch";
+                    output.diagnostic = "runtime opcode-172 operands differ from the decoded operands";
+                    return output;
+                }
+            }
+            const json writes = observation.value("register_writes", json(nullptr));
+            const bool writesAgree = writes.is_array() &&
+                ((opcode == 221 && writes.size() <= 1) || (opcode != 221 && writes.empty()));
+            if (!writesAgree)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "runtime nested-read writes disagree with the selected handler leaf";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto state = [](std::string_view name) {
+        return json{{"kind", "vm_state"}, {"name", name}};
+    };
+    const auto assignState = [&](std::string_view name, json value) {
+        return json{
+            {"kind", "assign"},
+            {"targets", json::array({state(name)})},
+            {"values", json::array({std::move(value)})},
+            {"evaluation_order", "values_before_writes"},
+        };
+    };
+    if (opcode == 172)
+    {
+        const json tableIndex = {{"kind", "constant"}, {"value", *tableRegister}};
+        const json nestedKey = {{"kind", "immediate"}, {"lane", "C"}, {"value", key}};
+        output.operation = {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "prepared_nested_read"},
+            {"operations", json::array({
+                assignState("B", tableIndex),
+                assignState("G", {{"kind", "index_read"}, {"table", state("G")}, {"index", state("B")}}),
+                assignState("B", nestedKey),
+            })},
+            {"protector_state", true},
+            {"source_semantic", false},
+        };
+    }
+    else if (opcode == 97)
+    {
+        output.operation = {
+            {"kind", "operation_sequence"},
+            {"semantic_family", "prepared_nested_read"},
+            {"operations", json::array({
+                assignState("G", {{"kind", "index_read"}, {"table", state("G")}, {"index", state("B")}}),
+            })},
+            {"protector_state", true},
+            {"source_semantic", false},
+        };
+    }
+    else
+    {
+        output.operation = {
+            {"kind", "table_write"},
+            {"semantic_family", "prepared_nested_read_commit"},
+            {"table", state("p")},
+            {"index", state("o")},
+            {"value", state("G")},
+            {"effect_barrier", true},
+            {"source_semantic", true},
+            {"protector_state", false},
+        };
+    }
+    output.status = "recognized";
+    output.diagnostic = opcode == 172
+        ? "opcode 172 reads the prepared table and saves the nested key"
+        : opcode == 97
+            ? "opcode 97 applies the saved nested key"
+            : "opcode 221 commits the prepared nested read";
+    output.operation["opcode"] = opcode;
+    output.operation["prototype"] = prototype;
+    output.operation["pc"] = pc;
+    output.operation["path_specific"] = false;
+    output.operation["static_semantic"] = true;
+    output.operation["source_claim"] = false;
+    output.operation["proof"] = "locked_v147_prepared_nested_read_state_machine";
+    output.operation["integrity_precondition"] = "intact_locked_handler_state";
+    output.operation["protector_guards_elided"] = true;
+    output.operation["observation_count"] = output.validated_observations;
+    output.operation["fallthrough_after_successful_effect"] = true;
+    return output;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147Opcode209GuardedDiscardCall(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    constexpr std::string_view exactLeaf =
+        "if x[34]==x[47]then elseif w==210 then G=(C[_]);p[o]=(G);else p=Q[_];(t[p])(t[p+1.0],t[p+2.0]);D=(p-1.0);end;";
+    if (handler.value("opcode", int64_t(-1)) != 209 || !range.is_object() ||
+        range.value("begin", size_t(0)) != 29988 || range.value("end", size_t(0)) != 30097 ||
+        !normalized.is_object() || normalized.value("opcode", int64_t(-1)) != 209 ||
+        handler.value("candidate_source", "").find(exactLeaf) == std::string::npos)
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-209 handler does not match the locked v14.7 guarded fixed-call leaf";
+        return output;
+    }
+    const std::optional<int64_t> base = luraphRuntimeLaneInteger(effectiveLanes, "Q");
+    if (!base || *base < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-209 function register Q is invalid";
+        return output;
+    }
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object())
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-209 runtime evidence row is malformed";
+                return output;
+            }
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json decisions = guardPath.is_object()
+                ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
+            const bool intactObservedPath = guardPath.is_object() && guardPath.value("complete", false) &&
+                !guardPath.value("overflow", true) && decisions.is_array() && decisions.size() == 3 &&
+                decisions[0].is_object() && decisions[0].value("begin", size_t(0)) == 19910 &&
+                decisions[0].value("end", size_t(0)) == 19922 && decisions[0].value("decision", false) &&
+                decisions[1].is_object() && decisions[1].value("begin", size_t(0)) == 29813 &&
+                decisions[1].value("end", size_t(0)) == 29824 && decisions[1].value("decision", false) &&
+                decisions[2].is_object() && decisions[2].value("begin", size_t(0)) == 29991 &&
+                decisions[2].value("end", size_t(0)) == 30003 && !decisions[2].value("decision", true);
+            if (observation.value("opcode", int64_t(-1)) != 209 ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "Q") != base || !writes.is_array() ||
+                !writes.empty() || !intactObservedPath)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-209 runtime evidence disagrees with the guarded fixed-call path";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const auto registerRead = [&](int64_t value) {
+        return json{{"kind", "register_read"}, {"index", constant(value)}};
+    };
+    const auto helperRead = [&](int64_t value) {
+        return json{
+            {"kind", "index_read"},
+            {"table", {{"kind", "helper_table"}}},
+            {"index", constant(value)},
+        };
+    };
+    const json call = {
+        {"kind", "call"},
+        {"method", false},
+        {"result_arity", {{"kind", "fixed"}, {"count", 0}}},
+        {"function", registerRead(*base)},
+        {"arguments", json::array({registerRead(*base + 1), registerRead(*base + 2)})},
+    };
+    output.status = "recognized";
+    output.diagnostic = "the v14.7 opcode-209 leaf conditionally performs a two-argument call and discards its results";
+    output.operation = {
+        {"kind", "branch"},
+        {"semantic_family", "guarded_fixed_call"},
+        {"opcode", 209},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"condition", {
+            {"kind", "binary"},
+            {"left", helperRead(34)},
+            {"operator", "~="},
+            {"right", helperRead(47)},
+        }},
+        {"then", json::array({
+            call,
+            {{"kind", "set_top"}, {"value", constant(*base - 1)}},
+        })},
+        {"else", json::array()},
+        {"path_specific", false},
+        {"static_semantic", true},
+        {"source_semantic", true},
+        {"source_claim", false},
+        {"proof", "locked_v147_opcode209_guarded_fixed2_discard_call"},
+        {"observation_count", output.validated_observations},
+        {"call_may_yield", true},
+        {"call_may_raise", true},
+        {"results_discarded", true},
+        {"guard_preserved", true},
+        {"fallthrough_after_successful_or_skipped_call", true},
+    };
+    return output;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147Opcode50RangeClear(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    constexpr std::string_view exactLeaf =
+        "if x[40]~=x[10]then p=V[_];o=h[_];for l=p,o do if x[28]~=x[44]then G=t;B=l;end;l=nil;(G)[B]=l;end;end;";
+    if (handler.value("opcode", int64_t(-1)) != 50 || !range.is_object() ||
+        range.value("begin", size_t(0)) != 11972 || range.value("end", size_t(0)) != 12074 ||
+        !normalized.is_object() || normalized.value("opcode", int64_t(-1)) != 50 ||
+        handler.value("candidate_source", "").find(exactLeaf) == std::string::npos)
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-50 handler does not match the locked v14.7 inclusive nil-clear loop";
+        return output;
+    }
+    const std::optional<int64_t> first = luraphRuntimeLaneInteger(effectiveLanes, "V");
+    const std::optional<int64_t> last = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    if (!first || !last || *first < 0 || *last < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-50 range operands are not nonnegative integer registers";
+        return output;
+    }
+    const size_t assignmentCount = *first > *last
+        ? 0 : static_cast<size_t>(*last - *first) + 1;
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object())
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-50 runtime evidence row is malformed";
+                return output;
+            }
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json decisions = guardPath.is_object()
+                ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
+            bool intactPath = guardPath.is_object() && guardPath.value("complete", false) &&
+                !guardPath.value("overflow", true) && decisions.is_array() &&
+                decisions.size() == assignmentCount + 1 && decisions[0].is_object() &&
+                decisions[0].value("begin", size_t(0)) == 11975 &&
+                decisions[0].value("end", size_t(0)) == 11987 &&
+                decisions[0].value("decision", false);
+            for (size_t index = 1; intactPath && index < decisions.size(); ++index)
+                intactPath = decisions[index].is_object() &&
+                    decisions[index].value("begin", size_t(0)) == 12022 &&
+                    decisions[index].value("end", size_t(0)) == 12034 &&
+                    decisions[index].value("decision", false);
+            if (observation.value("opcode", int64_t(-1)) != 50 ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "V") != first ||
+                luraphRuntimeLaneInteger(runtimeLanes, "h") != last || !writes.is_array() || !intactPath)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-50 runtime evidence disagrees with the intact inclusive nil-clear path";
+                return output;
+            }
+            std::set<int64_t> destinations;
+            for (const json& write : writes)
+            {
+                const int64_t destination = write.value("register", int64_t(-1));
+                const json value = write.value("value", json(nullptr));
+                if (destination < *first || destination > *last ||
+                    !destinations.insert(destination).second || !value.is_object() ||
+                    value.value("type", "") != "nil")
+                {
+                    output.status = "evidence_mismatch";
+                    output.diagnostic = "opcode-50 changed-write evidence is outside the inclusive nil-clear range";
+                    return output;
+                }
+            }
+            ++output.validated_observations;
+        }
+    output.status = "recognized";
+    output.diagnostic = "the intact v14.7 opcode-50 loop clears the inclusive V-through-h register range";
+    output.operation = {
+        {"kind", "register_clear_range"},
+        {"semantic_family", "register_clear_range"},
+        {"opcode", 50},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "locked_v147_opcode50_inclusive_range_clear"},
+        {"integrity_precondition", "intact_locked_handler_state"},
+        {"protector_guards_elided", true},
+        {"observation_count", output.validated_observations},
+        {"first_register_lane", "V"},
+        {"last_register_lane", "h"},
+        {"first_register", *first},
+        {"last_register", *last},
+        {"step", 1},
+        {"inclusive_last_register", true},
+        {"writes_nil", true},
+        {"empty", assignmentCount == 0},
+        {"assignment_count", assignmentCount},
+        {"assignment_count_overflow", false},
+        {"unchanged_nil_writes_may_be_unobserved", true},
+    };
+    return output;
+}
+
+LuraphExactLeafRecognition recognizeLuraphV147Opcode38CaptureRead(
+    uint64_t prototype,
+    size_t pc,
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    constexpr std::string_view exactLeaf =
+        "elseif w~=39 then p=u[V[_]];t[h[_]]=(p[1][p[3]]);else p=t;o=Q[_];G=t;end;";
+    if (handler.value("opcode", int64_t(-1)) != 38 || !range.is_object() ||
+        range.value("begin", size_t(0)) != 17076 || range.value("end", size_t(0)) != 17267 ||
+        !normalized.is_object() || normalized.value("opcode", int64_t(-1)) != 38 ||
+        handler.value("candidate_source", "").find(exactLeaf) == std::string::npos)
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-38 handler does not match the locked v14.7 capture-cell read leaf";
+        return output;
+    }
+    const std::optional<int64_t> capture = luraphRuntimeLaneInteger(effectiveLanes, "V");
+    const std::optional<int64_t> destination = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    if (!capture || !destination || *capture < 0 || *destination < 0)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-38 capture or destination operand is invalid";
+        return output;
+    }
+    if (observations)
+        for (const json& observation : *observations)
+        {
+            if (!observation.is_object())
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-38 runtime evidence row is malformed";
+                return output;
+            }
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            const json decisions = guardPath.is_object()
+                ? guardPath.value("decisions", json(nullptr)) : json(nullptr);
+            const bool intactPath = guardPath.is_object() && guardPath.value("complete", false) &&
+                !guardPath.value("overflow", true) && decisions.is_array() && decisions.size() == 2 &&
+                decisions[0].is_object() && decisions[0].value("begin", size_t(0)) == 17079 &&
+                decisions[0].value("end", size_t(0)) == 17090 &&
+                !decisions[0].value("decision", true) && decisions[1].is_object() &&
+                decisions[1].value("begin", size_t(0)) == 17149 &&
+                decisions[1].value("end", size_t(0)) == 17157 &&
+                !decisions[1].value("decision", true);
+            bool writesAgree = writes.is_array() && writes.size() <= 1;
+            if (writesAgree && !writes.empty())
+                writesAgree = writes.front().is_object() &&
+                    writes.front().value("register", int64_t(-1)) == *destination;
+            if (observation.value("opcode", int64_t(-1)) != 38 ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                luraphRuntimeLaneInteger(runtimeLanes, "V") != capture ||
+                luraphRuntimeLaneInteger(runtimeLanes, "h") != destination ||
+                !writesAgree || !intactPath)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-38 runtime evidence disagrees with the intact capture-read path";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+
+    const auto constant = [](int64_t value) {
+        return json{{"kind", "constant"}, {"value", value}};
+    };
+    const json captureDescriptor = {{"kind", "vm_state"}, {"name", "p"}};
+    const json captureCell = {
+        {"kind", "index_read"},
+        {"table", captureDescriptor},
+        {"index", constant(1)},
+    };
+    const json captureKey = {
+        {"kind", "index_read"},
+        {"table", captureDescriptor},
+        {"index", constant(3)},
+    };
+    output.status = "recognized";
+    output.diagnostic = "the intact v14.7 opcode-38 leaf reads a dynamic shared capture cell into R[h]";
+    output.operation = {
+        {"kind", "operation_sequence"},
+        {"semantic_family", "capture_read"},
+        {"opcode", 38},
+        {"prototype", prototype},
+        {"pc", pc},
+        {"operations", json::array({
+            {
+                {"kind", "assign"},
+                {"targets", json::array({captureDescriptor})},
+                {"values", json::array({{
+                    {"kind", "index_read"},
+                    {"table", {{"kind", "upvalue_file"}}},
+                    {"index", constant(*capture)},
+                }})},
+                {"evaluation_order", "values_before_writes"},
+            },
+            {
+                {"kind", "register_write"},
+                {"register", constant(*destination)},
+                {"value", {{"kind", "index_read"}, {"table", captureCell}, {"index", captureKey}}},
+            },
+        })},
+        {"path_specific", false},
+        {"static_semantic", true},
+        {"source_semantic", true},
+        {"source_claim", false},
+        {"proof", "locked_v147_opcode38_dynamic_capture_read"},
+        {"integrity_precondition", "intact_locked_handler_state"},
+        {"protector_guards_elided", true},
+        {"observation_count", output.validated_observations},
+        {"descriptor_evaluated_once", true},
+        {"metamethod_and_error_behavior_preserved", true},
+        {"fallthrough_after_successful_read", true},
+    };
+    return output;
+}
+
 bool luraphOpcode23ArgumentCopyHandlerMatches(const json& handler)
 {
     if (handler.value("opcode", int64_t(-1)) != 23 ||
@@ -14930,6 +15472,17 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode39SitesRejected = 0;
     size_t opcode39ObservationsValidated = 0;
     json opcode39RecognitionStatusCounts = json::object();
+    size_t nestedReadSitesTotal = 0;
+    size_t nestedReadSitesStatic = 0;
+    size_t nestedReadSitesRejected = 0;
+    size_t nestedReadObservationsValidated = 0;
+    json nestedReadRecognitionStatusCounts = json::object();
+    json nestedReadOpcodeSiteCounts = json::object();
+    size_t opcode209SitesTotal = 0;
+    size_t opcode209SitesStatic = 0;
+    size_t opcode209SitesRejected = 0;
+    size_t opcode209ObservationsValidated = 0;
+    json opcode209RecognitionStatusCounts = json::object();
     size_t opcode23SitesTotal = 0;
     size_t opcode23SitesStatic = 0;
     size_t opcode23SitesRejected = 0;
@@ -15257,6 +15810,62 @@ json luraphRuntimeSemanticDispatchArtifact(
                 }
                 else
                     ++opcode39SitesRejected;
+            }
+            if (!semanticAccepted && (opcode == 172 || opcode == 97 || opcode == 221) &&
+                handler != handlers.end())
+            {
+                ++nestedReadSitesTotal;
+                const std::string opcodeKey = std::to_string(opcode);
+                nestedReadOpcodeSiteCounts[opcodeKey] =
+                    nestedReadOpcodeSiteCounts.value(opcodeKey, size_t(0)) + 1;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphV147NestedReadInstruction(
+                    id, pc, opcode, handler->second, effectiveLanes, siteObservations);
+                row["v147_prepared_nested_read_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                nestedReadRecognitionStatusCounts[recognized.status] =
+                    nestedReadRecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                nestedReadObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++nestedReadSitesStatic;
+                }
+                else
+                    ++nestedReadSitesRejected;
+            }
+            if (!semanticAccepted && opcode == 209 && handler != handlers.end())
+            {
+                ++opcode209SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphV147Opcode209GuardedDiscardCall(
+                    id, pc, handler->second, effectiveLanes, siteObservations);
+                row["opcode209_v147_guarded_call_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode209RecognitionStatusCounts[recognized.status] =
+                    opcode209RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode209ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode209SitesStatic;
+                }
+                else
+                    ++opcode209SitesRejected;
             }
             if (!semanticAccepted && handler != handlers.end())
             {
@@ -16143,6 +16752,38 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"vm_state_identity_preserved", true},
             {"intact_handler_precondition", true},
             {"protector_guards_elided", true},
+        }},
+        {"v147_prepared_nested_read_coverage", {
+            {"available", nestedReadSitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-172-97-221-prepared-nested-read"},
+            {"sites_total", nestedReadSitesTotal},
+            {"static_semantic_sites", nestedReadSitesStatic},
+            {"unresolved_sites", nestedReadSitesTotal - nestedReadSitesStatic},
+            {"rejected_sites", nestedReadSitesRejected},
+            {"validated_runtime_executions", nestedReadObservationsValidated},
+            {"recognition_status_counts", std::move(nestedReadRecognitionStatusCounts)},
+            {"opcode_site_counts", std::move(nestedReadOpcodeSiteCounts)},
+            {"table_prepare_opcode", 172},
+            {"nested_index_opcode", 97},
+            {"commit_opcode", 221},
+            {"vm_state_identity_preserved", true},
+            {"metamethod_and_error_behavior_preserved", true},
+            {"intact_handler_precondition", true},
+            {"protector_guards_elided", true},
+        }},
+        {"opcode209_v147_guarded_call_coverage", {
+            {"available", opcode209SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-209-guarded-fixed2-discard-call"},
+            {"sites_total", opcode209SitesTotal},
+            {"static_semantic_sites", opcode209SitesStatic},
+            {"unresolved_sites", opcode209SitesTotal - opcode209SitesStatic},
+            {"rejected_sites", opcode209SitesRejected},
+            {"validated_runtime_executions", opcode209ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode209RecognitionStatusCounts)},
+            {"fixed_argument_count", 2},
+            {"results_discarded", true},
+            {"helper_guard_preserved", true},
+            {"yield_and_error_behavior_preserved", true},
         }},
         {"opcode23_argument_copy_coverage", {
             {"available", opcode23SitesTotal > 0},
@@ -19291,6 +19932,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeV147SplitMoveCoverage = json{{"available", false}};
     json runtimeOpcode76V147IndexedReadCoverage = json{{"available", false}};
     json runtimeOpcode39V147StatePrepareCoverage = json{{"available", false}};
+    json runtimeV147PreparedNestedReadCoverage = json{{"available", false}};
+    json runtimeOpcode209V147GuardedCallCoverage = json{{"available", false}};
     json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
@@ -19363,6 +20006,10 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode76_v147_indexed_read_coverage", json{{"available", false}});
                     runtimeOpcode39V147StatePrepareCoverage = runtimeSemanticDocument->value(
                         "opcode39_v147_state_prepare_coverage", json{{"available", false}});
+                    runtimeV147PreparedNestedReadCoverage = runtimeSemanticDocument->value(
+                        "v147_prepared_nested_read_coverage", json{{"available", false}});
+                    runtimeOpcode209V147GuardedCallCoverage = runtimeSemanticDocument->value(
+                        "opcode209_v147_guarded_call_coverage", json{{"available", false}});
                     runtimeOpcode23ArgumentCopyCoverage = runtimeSemanticDocument->value(
                         "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
@@ -19431,6 +20078,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"v147_split_move_coverage", runtimeV147SplitMoveCoverage},
                 {"opcode76_v147_indexed_read_coverage", runtimeOpcode76V147IndexedReadCoverage},
                 {"opcode39_v147_state_prepare_coverage", runtimeOpcode39V147StatePrepareCoverage},
+                {"v147_prepared_nested_read_coverage", runtimeV147PreparedNestedReadCoverage},
+                {"opcode209_v147_guarded_call_coverage", runtimeOpcode209V147GuardedCallCoverage},
                 {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
@@ -21126,6 +21775,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["v147_split_moves"] = runtimeV147SplitMoveCoverage;
     report["coverage"]["opcode76_v147_indexed_reads"] = runtimeOpcode76V147IndexedReadCoverage;
     report["coverage"]["opcode39_v147_state_prepares"] = runtimeOpcode39V147StatePrepareCoverage;
+    report["coverage"]["v147_prepared_nested_reads"] = runtimeV147PreparedNestedReadCoverage;
+    report["coverage"]["opcode209_v147_guarded_calls"] = runtimeOpcode209V147GuardedCallCoverage;
     report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;
