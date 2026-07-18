@@ -11886,6 +11886,7 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
         observations.empty())
         return std::nullopt;
 
+    bool sawPreservedWrite = false;
     for (const json& observation : observations)
     {
         const json guardPath = observation.value("guard_path", json(nullptr));
@@ -11896,7 +11897,7 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
             laneInteger(lanes, "r") != sourceRegister || laneInteger(lanes, "V") != lookupIndex ||
             !guardPath.is_object() || !guardPath.value("complete", false) || guardPath.value("overflow", true) ||
             observation.value("next_pc", std::numeric_limits<int64_t>::min()) !=
-                static_cast<int64_t>(pc + 1) || !writes.is_array() || writes.size() != 2)
+                static_cast<int64_t>(pc + 1) || !writes.is_array() || writes.empty() || writes.size() > 2)
             return std::nullopt;
 
         const json* destinationWrite = nullptr;
@@ -11913,9 +11914,17 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
             else
                 return std::nullopt;
         }
-        if (!destinationWrite || !preservedWrite ||
-            destinationWrite->value("value", json::object()).value("type", "") != "function" ||
-            preservedWrite->value("value", json::object()).value("type", "") != "table")
+        if (!destinationWrite ||
+            destinationWrite->value("value", json::object()).value("type", "") != "function")
+            return std::nullopt;
+
+        // The tracer records changed register values. On repeated loop visits the
+        // preserved source table can already occupy base + 1, so that idempotent
+        // write is absent even though the handler executes it. A complete write
+        // from another visit must still prove the table type and exact origin.
+        if (!preservedWrite)
+            continue;
+        if (preservedWrite->value("value", json::object()).value("type", "") != "table")
             return std::nullopt;
 
         const std::string preservedKey = std::to_string(*base + 1);
@@ -11935,7 +11944,10 @@ std::optional<json> recognizeLuraphOpcode186LookupAndPreserve(
         }
         if (!registerOrigin)
             return std::nullopt;
+        sawPreservedWrite = true;
     }
+    if (!sawPreservedWrite)
+        return std::nullopt;
 
     const auto constant = [](int64_t value) {
         return json{{"kind", "constant"}, {"value", value}};
