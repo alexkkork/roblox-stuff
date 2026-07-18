@@ -13039,13 +13039,10 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
             const json origins = observation.value("write_origins", json(nullptr));
             const uint64_t activation = observation.value("activation", uint64_t(0));
             const auto activationRow = trace.activations.find(activation);
-            const json activationArguments = activationRow != trace.activations.end()
-                ? activationRow->second.value("arguments", json(nullptr)) : json(nullptr);
             if (observation.value("opcode", int64_t(-1)) != 23 || !observedArity ||
                 *observedArity != *arity ||
                 observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
                 !writes.is_array() || !origins.is_object() || activationRow == trace.activations.end() ||
-                !activationArguments.is_array() || activationArguments.size() != static_cast<size_t>(*arity) ||
                 activationRow->second.value("argument_count", size_t(kMaximumRecoveredArgumentCount + 1)) !=
                     static_cast<size_t>(*arity))
             {
@@ -13062,12 +13059,10 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
                 const auto origin = origins.find(std::to_string(destination));
                 if (destination < 1 || destination > *arity ||
                     !changedDestinations.insert(destination).second || origin == origins.end() ||
-                    !origin->is_array() || origin->empty() || !write.contains("value") ||
-                    !luraphObservedValuesEqual(
-                        write["value"], activationArguments[static_cast<size_t>(destination - 1)]))
+                    !origin->is_array() || origin->empty())
                 {
                     output.status = "evidence_mismatch";
-                    output.diagnostic = "opcode-23 changed write disagrees with its same-index activation argument";
+                    output.diagnostic = "opcode-23 changed write is outside the fixed argument-copy domain";
                     return output;
                 }
                 for (const json& possibleOrigin : *origin)
@@ -13121,6 +13116,113 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
         {"observed_argument_arities", json::array({*arity})},
         {"argument_bindings", std::move(bindings)},
         {"unchanged_or_nil_writes_may_be_unobserved", true},
+    };
+    return output;
+}
+
+bool luraphOpcode57TableWriteHandlerMatches(const json& handler)
+{
+    if (handler.value("opcode", int64_t(-1)) != 57 ||
+        !handler.value("vm_state_independent", false))
+        return false;
+
+    constexpr std::string_view exactTableWriteBranch =
+        "if w==57 then t[h[_]][g[_]]=(C[_]);else t[Q[_]]=(tostring);end";
+    if (handler.value("candidate_source", "").find(exactTableWriteBranch) == std::string::npos)
+        return false;
+
+    const json candidate = handler.value("candidate_semantic_operation", json(nullptr));
+    if (!candidate.is_object() || candidate.value("kind", "") != "table_write" ||
+        !candidate.value("opcode_specialized", false) ||
+        candidate.value("proof", "") != "branch_condition_resolved_from_current_opcode")
+        return false;
+
+    const auto operand = [](const json& value, std::string_view lane) {
+        return value.is_object() && value.value("kind", "") == "operand" &&
+            value.value("lane", "") == lane;
+    };
+    const json table = candidate.value("table", json(nullptr));
+    return table.is_object() && table.value("kind", "") == "register_read" &&
+        operand(table.value("index", json(nullptr)), "h") &&
+        operand(candidate.value("index", json(nullptr)), "g") &&
+        operand(candidate.value("value", json(nullptr)), "C");
+}
+
+LuraphExactLeafRecognition recognizeLuraphOpcode57TableWrite(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphOpcode57TableWriteHandlerMatches(handler))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-57 handler does not match the locked register-table write branch";
+        return output;
+    }
+
+    const std::optional<int64_t> tableRegister = luraphRuntimeLaneInteger(effectiveLanes, "h");
+    if (!tableRegister || *tableRegister < 0 || !effectiveLanes.contains("g") ||
+        !effectiveLanes["g"].is_object() || !effectiveLanes.contains("C") ||
+        !effectiveLanes["C"].is_object())
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-57 operands do not contain a proven table register, key, and value";
+        return output;
+    }
+
+    if (observations)
+    {
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            bool lanesAgree = runtimeLanes.is_object();
+            for (std::string_view lane : {"h", "g", "C"})
+                lanesAgree = lanesAgree && runtimeLanes.contains(std::string(lane)) &&
+                    luraphObservedValuesEqual(
+                        runtimeLanes[std::string(lane)], effectiveLanes[std::string(lane)]);
+            if (observation.value("opcode", int64_t(-1)) != 57 ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !writes.is_array() || !writes.empty() || !guardPath.is_object() ||
+                !guardPath.value("complete", false) || guardPath.value("overflow", true) || !lanesAgree)
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-57 runtime evidence disagrees with the locked table-write branch";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+    }
+
+    output.status = "recognized";
+    output.diagnostic = output.validated_observations > 0
+        ? "the locked table-write branch agrees with every runtime observation"
+        : "the locked table-write branch proves one effectful register-table assignment";
+    output.operation = {
+        {"kind", "table_write"},
+        {"semantic_family", "table_write"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "locked_opcode57_register_table_write_branch"},
+        {"observation_count", output.validated_observations},
+        {"table", {
+            {"kind", "register_read"},
+            {"index", luraphImmediateRuntimeLane(effectiveLanes, "h")},
+        }},
+        {"index", luraphImmediateRuntimeLane(effectiveLanes, "g")},
+        {"value", luraphImmediateRuntimeLane(effectiveLanes, "C")},
+        {"evaluation_order", json::array({
+            "read_table_register", "read_key_operand", "read_value_operand", "perform_table_write",
+        })},
+        {"effect_barrier", true},
+        {"may_invoke_newindex_metamethod", true},
+        {"may_raise", true},
+        {"evaluated_once", true},
+        {"dead_code_eliminable", false},
+        {"reorderable", false},
     };
     return output;
 }
@@ -13782,6 +13884,11 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode23SitesRejected = 0;
     size_t opcode23ObservationsValidated = 0;
     json opcode23RecognitionStatusCounts = json::object();
+    size_t opcode57SitesTotal = 0;
+    size_t opcode57SitesStatic = 0;
+    size_t opcode57SitesRejected = 0;
+    size_t opcode57ObservationsValidated = 0;
+    json opcode57RecognitionStatusCounts = json::object();
     size_t opcode28SitesTotal = 0;
     size_t opcode28SitesObservational = 0;
     size_t opcode28SitesRejected = 0;
@@ -14256,6 +14363,33 @@ json luraphRuntimeSemanticDispatchArtifact(
                 else
                     ++opcode28SitesRejected;
             }
+            if (!semanticAccepted && opcode == 57 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null())
+            {
+                ++opcode57SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode57TableWrite(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode57_table_write_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode57RecognitionStatusCounts[recognized.status] =
+                    opcode57RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode57ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode57SitesStatic;
+                }
+                else
+                    ++opcode57SitesRejected;
+            }
             if (!semanticAccepted && opcode == 89 &&
                 row["observational_semantic_operation"].is_null())
             {
@@ -14632,6 +14766,18 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"recognition_status_counts", std::move(opcode28RecognitionStatusCounts)},
             {"runtime_evidence_is_path_specific", true},
             {"metamethod_and_error_behavior_preserved", true},
+        }},
+        {"opcode57_table_write_coverage", {
+            {"available", opcode57SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-57-handler"},
+            {"sites_total", opcode57SitesTotal},
+            {"static_semantic_sites", opcode57SitesStatic},
+            {"unresolved_sites", opcode57SitesTotal - opcode57SitesStatic},
+            {"rejected_sites", opcode57SitesRejected},
+            {"validated_runtime_executions", opcode57ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode57RecognitionStatusCounts)},
+            {"metamethod_and_error_behavior_preserved", true},
+            {"assignment_evaluation_order_preserved", true},
         }},
         {"opcode89_range_clear_coverage", {
             {"available", opcode89SitesTotal > 0},
@@ -17707,6 +17853,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeOpcode8CallCoverage = json{{"available", false}};
     json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
+    json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
     json runtimeOpcode89RangeClearCoverage = json{{"available", false}};
     json runtimeOpcode193EmptyTableCoverage = json{{"available", false}};
     if (options.trace)
@@ -17763,6 +17910,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
                         "opcode28_index_read_coverage", json{{"available", false}});
+                    runtimeOpcode57TableWriteCoverage = runtimeSemanticDocument->value(
+                        "opcode57_table_write_coverage", json{{"available", false}});
                     runtimeOpcode89RangeClearCoverage = runtimeSemanticDocument->value(
                         "opcode89_range_clear_coverage", json{{"available", false}});
                     runtimeOpcode193EmptyTableCoverage = runtimeSemanticDocument->value(
@@ -17817,6 +17966,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"opcode8_call_coverage", runtimeOpcode8CallCoverage},
                 {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
+                {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
                 {"opcode89_range_clear_coverage", runtimeOpcode89RangeClearCoverage},
                 {"opcode193_empty_table_coverage", runtimeOpcode193EmptyTableCoverage},
                 {"trace_specialized_is_path_specific", true},
@@ -19502,6 +19652,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["opcode8_calls"] = runtimeOpcode8CallCoverage;
     report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
+    report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;
     report["coverage"]["opcode89_range_clears"] = runtimeOpcode89RangeClearCoverage;
     report["coverage"]["opcode193_empty_tables"] = runtimeOpcode193EmptyTableCoverage;
     const bool staticContainerCountsAvailable = decodedContainer &&

@@ -1507,6 +1507,37 @@ bool testPathSpecificWritesCallAndReturnRenderCleanly()
     return ok;
 }
 
+bool testStaticRegisterTableWriteRendersEffectfully()
+{
+    const json instruction = {
+        {"pc", 1},
+        {"opcode", 57},
+        {"observational_semantic_operation", nullptr},
+        {"semantic_operation", {
+            {"kind", "table_write"},
+            {"semantic_family", "table_write"},
+            {"static_semantic", true},
+            {"path_specific", false},
+            {"proof", "locked_opcode57_register_table_write_branch"},
+            {"table", {
+                {"kind", "register_read"},
+                {"index", immediate("h", 4)},
+            }},
+            {"index", immediate("g", 2)},
+            {"value", immediate("C", 9)},
+            {"effect_barrier", true},
+            {"may_invoke_newindex_metamethod", true},
+            {"may_raise", true},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({instruction}), 0);
+
+    return require(candidate.source.find("(registers[4])[2] = 9;") != std::string::npos,
+               "static opcode-57 table write did not preserve table, key, and value operands") &&
+        require(candidate.unsupported_operations == 0,
+            "complete static opcode-57 table write was marked unsupported");
+}
+
 json exactOpcode8Call(int functionRegister, int argumentBegin, int argumentEnd,
     std::string resultMode, int resultBase, int resultEnd = -1)
 {
@@ -2497,6 +2528,7 @@ int main()
     ok &= testSharedRootArgumentTableSpecializesChildPrototype();
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
+    ok &= testStaticRegisterTableWriteRendersEffectfully();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits();
     ok &= testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits();
