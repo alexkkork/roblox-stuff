@@ -13227,6 +13227,83 @@ LuraphExactLeafRecognition recognizeLuraphOpcode57TableWrite(
     return output;
 }
 
+LuraphExactLeafRecognition recognizeLuraphOpcode201DirectJump(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations)
+{
+    LuraphExactLeafRecognition output;
+    const json range = handler.value("range", json::object());
+    const json normalized = handler.value("normalized_handler_ir", json(nullptr));
+    constexpr std::string_view exactJumpBranch =
+        "else if w~=202 then _=Q[_];else b,I=x[49](...);end;";
+    if (handler.value("opcode", int64_t(-1)) != 201 ||
+        !handler.value("vm_state_independent", false) || !range.is_object() ||
+        range.value("begin", size_t(0)) != 25322 || range.value("end", size_t(0)) != 29805 ||
+        handler.value("candidate_source", "").find(exactJumpBranch) == std::string::npos ||
+        !normalized.is_object() || normalized.value("kind", "") != "opcode_specialized_handler" ||
+        normalized.value("opcode", int64_t(-1)) != 201 ||
+        !normalized.value("vm_state_independent", false))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-201 handler does not match the locked direct-jump branch";
+        return output;
+    }
+
+    const std::optional<int64_t> encodedTarget = luraphRuntimeLaneInteger(effectiveLanes, "Q");
+    if (!encodedTarget || *encodedTarget < 0 || *encodedTarget == std::numeric_limits<int64_t>::max())
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-201 operand Q is not a bounded direct-jump target";
+        return output;
+    }
+
+    if (observations)
+    {
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const std::optional<int64_t> observedTarget = luraphRuntimeLaneInteger(runtimeLanes, "Q");
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json guardPath = observation.value("guard_path", json(nullptr));
+            if (observation.value("opcode", int64_t(-1)) != 201 || !observedTarget ||
+                *observedTarget != *encodedTarget ||
+                observation.value("next_pc", int64_t(-1)) != *encodedTarget + 1 ||
+                !writes.is_array() || !writes.empty() || !guardPath.is_object() ||
+                !guardPath.value("complete", false) || guardPath.value("overflow", true))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-201 runtime evidence disagrees with direct Q-plus-one control flow";
+                return output;
+            }
+            ++output.validated_observations;
+        }
+    }
+
+    output.status = "recognized";
+    output.diagnostic = output.validated_observations > 0
+        ? "the locked direct-jump branch agrees with every runtime target"
+        : "the locked direct-jump branch proves target Q followed by the dispatcher increment";
+    output.operation = {
+        {"kind", "jump"},
+        {"semantic_family", "control_flow"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "locked_opcode201_direct_jump_branch"},
+        {"observation_count", output.validated_observations},
+        {"target", {
+            {"kind", "immediate"},
+            {"lane", "Q"},
+            {"value", effectiveLanes["Q"]},
+            {"adjustment", 1},
+        }},
+        {"encoded_target", *encodedTarget},
+        {"resolved_target", *encodedTarget + 1},
+    };
+    return output;
+}
+
 LuraphExactLeafRecognition recognizeLuraphOpcode28IndexRead(
     const json& effectiveLanes,
     const std::vector<json>* observations)
@@ -13889,6 +13966,11 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode57SitesRejected = 0;
     size_t opcode57ObservationsValidated = 0;
     json opcode57RecognitionStatusCounts = json::object();
+    size_t opcode201JumpSitesTotal = 0;
+    size_t opcode201JumpSitesStatic = 0;
+    size_t opcode201JumpSitesRejected = 0;
+    size_t opcode201JumpObservationsValidated = 0;
+    json opcode201JumpRecognitionStatusCounts = json::object();
     size_t opcode28SitesTotal = 0;
     size_t opcode28SitesObservational = 0;
     size_t opcode28SitesRejected = 0;
@@ -14224,6 +14306,33 @@ json luraphRuntimeSemanticDispatchArtifact(
                         {"status", "evidence_mismatch"},
                         {"validated_observations", 0},
                     };
+            }
+            if (!semanticAccepted && opcode == 201 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null())
+            {
+                ++opcode201JumpSitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode201DirectJump(
+                    handler->second, effectiveLanes, siteObservations);
+                row["opcode201_direct_jump_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode201JumpRecognitionStatusCounts[recognized.status] =
+                    opcode201JumpRecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode201JumpObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode201JumpSitesStatic;
+                }
+                else
+                    ++opcode201JumpSitesRejected;
             }
             if (!semanticAccepted && opcode == 201 && handler != handlers.end() &&
                 row["observational_semantic_operation"].is_null() &&
@@ -14802,6 +14911,17 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"recognition_status_counts", std::move(opcode193RecognitionStatusCounts)},
             {"runtime_evidence_is_path_specific", true},
             {"fresh_empty_table_semantics_preserved", true},
+        }},
+        {"opcode201_direct_jump_coverage", {
+            {"available", opcode201JumpSitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-201-handler"},
+            {"sites_total", opcode201JumpSitesTotal},
+            {"static_semantic_sites", opcode201JumpSitesStatic},
+            {"unresolved_sites", opcode201JumpSitesTotal - opcode201JumpSitesStatic},
+            {"rejected_sites", opcode201JumpSitesRejected},
+            {"validated_runtime_executions", opcode201JumpObservationsValidated},
+            {"recognition_status_counts", std::move(opcode201JumpRecognitionStatusCounts)},
+            {"dispatcher_increment_preserved", true},
         }},
         {"unobserved_instructions", declaredInstructionCount > observationalSites.size()
             ? declaredInstructionCount - observationalSites.size() : size_t(0)},
@@ -17856,6 +17976,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeOpcode57TableWriteCoverage = json{{"available", false}};
     json runtimeOpcode89RangeClearCoverage = json{{"available", false}};
     json runtimeOpcode193EmptyTableCoverage = json{{"available", false}};
+    json runtimeOpcode201DirectJumpCoverage = json{{"available", false}};
     if (options.trace)
     {
         LuraphRuntimeStructureTrace parsedStructure;
@@ -17916,6 +18037,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "opcode89_range_clear_coverage", json{{"available", false}});
                     runtimeOpcode193EmptyTableCoverage = runtimeSemanticDocument->value(
                         "opcode193_empty_table_coverage", json{{"available", false}});
+                    runtimeOpcode201DirectJumpCoverage = runtimeSemanticDocument->value(
+                        "opcode201_direct_jump_coverage", json{{"available", false}});
                 }
                 catch (const std::exception& error)
                 {
@@ -17969,6 +18092,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"opcode57_table_write_coverage", runtimeOpcode57TableWriteCoverage},
                 {"opcode89_range_clear_coverage", runtimeOpcode89RangeClearCoverage},
                 {"opcode193_empty_table_coverage", runtimeOpcode193EmptyTableCoverage},
+                {"opcode201_direct_jump_coverage", runtimeOpcode201DirectJumpCoverage},
                 {"trace_specialized_is_path_specific", true},
                 {"write_origin_evidence", runtimeWriteOriginEvidence},
                 {"unresolved_instructions", runtimeUnresolved},
@@ -19655,6 +19779,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     report["coverage"]["opcode57_table_writes"] = runtimeOpcode57TableWriteCoverage;
     report["coverage"]["opcode89_range_clears"] = runtimeOpcode89RangeClearCoverage;
     report["coverage"]["opcode193_empty_tables"] = runtimeOpcode193EmptyTableCoverage;
+    report["coverage"]["opcode201_direct_jumps"] = runtimeOpcode201DirectJumpCoverage;
     const bool staticContainerCountsAvailable = decodedContainer &&
         (analysis.container_metrics.prototype_count > 0 || analysis.container_metrics.instruction_count > 0 ||
             analysis.container_metrics.constant_count > 0 || analysis.container_metrics.descriptor_count > 0);
