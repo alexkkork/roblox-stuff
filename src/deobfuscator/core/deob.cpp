@@ -14402,6 +14402,7 @@ struct LuraphPayloadRootEvidence
     uint64_t bootstrap_return_vm_count = 0;
     uint64_t payload_entry_vm_count = 0;
     std::string evidence;
+    std::vector<std::string> application_globals;
 };
 
 bool luraphSemanticIsTerminalCall(const json& operation)
@@ -14520,6 +14521,80 @@ std::optional<LuraphPayloadRootEvidence> findLuraphPayloadRoot(
             0,
             activation.value("entry_vm_count", uint64_t(0)),
             "bootstrap_terminal_return_call",
+        };
+    }
+    if (selected)
+        return selected;
+
+    // A randomized terminal-call opcode may remain unresolved even though its
+    // runtime arguments prove that it hands the Roblox application environment
+    // to a child prototype. Keep this fallback deliberately narrow: debug and
+    // standard-library values alone are protector evidence, while multiple
+    // independent engine roots identify an application entry point.
+    const std::set<std::string> engineAnchors = {"game", "workspace", "Instance"};
+    const std::set<std::string> applicationRoots = {
+        "game", "workspace", "Instance", "Enum", "Random", "Vector2", "Vector3",
+        "CFrame", "Color3", "UDim", "UDim2", "Ray", "Rect", "Region3", "BrickColor",
+        "TweenInfo", "RaycastParams", "PhysicalProperties", "task",
+    };
+    size_t selectedScore = 0;
+    for (const auto& [activationId, activation] : runtime.activations)
+    {
+        if (!activation.contains("caller_activation") || !activation["caller_activation"].is_number_integer() ||
+            !activation.contains("caller_pc") || !activation["caller_pc"].is_number_integer() ||
+            !activation.contains("arguments") || !activation["arguments"].is_array())
+            continue;
+        const int64_t callerActivationValue = activation["caller_activation"].get<int64_t>();
+        if (callerActivationValue <= 0)
+            continue;
+        const uint64_t callerActivation = static_cast<uint64_t>(callerActivationValue);
+        auto parent = runtime.activations.find(callerActivation);
+        if (parent == runtime.activations.end() || !parent->second.value("caller_activation", json(nullptr)).is_null())
+            continue;
+
+        std::set<std::string> roots;
+        std::set<std::string> paths;
+        for (const json& argument : activation["arguments"])
+        {
+            if (!argument.is_object() || argument.value("type", "") != "global_reference")
+                continue;
+            const std::string path = argument.value("path", "");
+            if (path.empty())
+                continue;
+            const size_t separator = path.find('.');
+            const std::string root = path.substr(0, separator);
+            if (!applicationRoots.contains(root))
+                continue;
+            roots.insert(root);
+            paths.insert(path);
+        }
+        size_t anchorCount = 0;
+        for (const std::string& anchor : engineAnchors)
+            anchorCount += roots.contains(anchor) ? 1 : 0;
+        if (anchorCount < 2 || roots.size() < 4)
+            continue;
+
+        const uint64_t parentPrototype = parent->second.value("prototype", uint64_t(0));
+        const uint64_t childPrototype = activation.value("prototype", uint64_t(0));
+        auto child = runtime.prototypes.find(childPrototype);
+        if (parentPrototype == 0 || childPrototype == 0 || child == runtime.prototypes.end())
+            continue;
+        const size_t score = anchorCount * 1000000 + roots.size() * 1000 + child->second.instructions.size();
+        if (selected && score <= selectedScore)
+            continue;
+        selectedScore = score;
+        selected = LuraphPayloadRootEvidence{
+            callerActivation,
+            parentPrototype,
+            activationId,
+            childPrototype,
+            activation["caller_pc"].get<int64_t>(),
+            activation.contains("caller_opcode") && activation["caller_opcode"].is_number_integer()
+                ? activation["caller_opcode"].get<int64_t>() : int64_t(-1),
+            0,
+            activation.value("entry_vm_count", uint64_t(0)),
+            "runtime_application_global_handoff",
+            std::vector<std::string>(paths.begin(), paths.end()),
         };
     }
     return selected;
