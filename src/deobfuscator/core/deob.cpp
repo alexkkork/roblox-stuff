@@ -15884,6 +15884,7 @@ json luraphPayloadCfgArtifact(const json& payloadClosure)
     std::map<uint64_t, std::set<size_t>> observedEntryPcs;
     std::map<uint64_t, std::set<size_t>> observedPcs;
     std::map<std::pair<uint64_t, size_t>, std::set<size_t>> observedNextPcs;
+    std::set<std::pair<uint64_t, size_t>> observedReturnSites;
     if (payloadClosure.contains("activations") && payloadClosure["activations"].is_array())
         for (const json& activation : payloadClosure["activations"])
             if (activation.contains("entry_pc") && activation["entry_pc"].is_number_integer())
@@ -15905,6 +15906,19 @@ json luraphPayloadCfgArtifact(const json& payloadClosure)
                     const uint64_t prototype = step["prototype"].get<uint64_t>();
                     observedNextPcs[{prototype, static_cast<size_t>(pc)}].insert(static_cast<size_t>(nextPc));
                     observedPcs[prototype].insert(static_cast<size_t>(pc));
+                }
+            }
+    if (payloadClosure.contains("observed_returns") && payloadClosure["observed_returns"].is_array())
+        for (const json& returned : payloadClosure["observed_returns"])
+            if (returned.contains("prototype") && returned["prototype"].is_number_integer() &&
+                returned.contains("pc") && returned["pc"].is_number_integer())
+            {
+                const int64_t prototype = returned["prototype"].get<int64_t>();
+                const int64_t pc = returned["pc"].get<int64_t>();
+                if (prototype > 0 && pc > 0)
+                {
+                    observedReturnSites.emplace(static_cast<uint64_t>(prototype), static_cast<size_t>(pc));
+                    observedPcs[static_cast<uint64_t>(prototype)].insert(static_cast<size_t>(pc));
                 }
             }
     json prototypeRows = json::array();
@@ -15959,6 +15973,12 @@ json luraphPayloadCfgArtifact(const json& payloadClosure)
                         successors.push_back(target);
                 }
                 terminator = "observed_" + terminator;
+                ++observedEdgeSites;
+            }
+            else if (observedReturnSites.contains({prototypeId, pc}))
+            {
+                successors.clear();
+                terminator = "observed_return";
                 ++observedEdgeSites;
             }
             else
