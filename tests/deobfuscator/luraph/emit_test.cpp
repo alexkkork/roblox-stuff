@@ -1538,6 +1538,56 @@ bool testStaticRegisterTableWriteRendersEffectfully()
             "complete static opcode-57 table write was marked unsupported");
 }
 
+bool testExactHelperAndOperandTableLoadsPreserveSharedStorage()
+{
+    const json operandTableLoad = {
+        {"pc", 1},
+        {"opcode", 142},
+        {"lanes", {{"Q", number(4)}}},
+        {"semantic_operation", {
+            {"kind", "register_write"},
+            {"static_semantic", true},
+            {"protector_state", true},
+            {"register", immediate("Q", 4)},
+            {"value", {{"kind", "operand_table"}, {"lane", "Q"}}},
+        }},
+    };
+    const json helperLoad = {
+        {"pc", 2},
+        {"opcode", 87},
+        {"lanes", {{"Q", number(7)}, {"V", number(6)}, {"h", number(10)}}},
+        {"semantic_operation", {
+            {"kind", "register_write"},
+            {"static_semantic", true},
+            {"register", immediate("V", 6)},
+            {"value", {
+                {"kind", "index_read"},
+                {"table", {
+                    {"kind", "index_read"},
+                    {"table", {{"kind", "helper_table"}}},
+                    {"index", {{"kind", "constant"}, {"value", 1.0}}},
+                }},
+                {"index", immediate("h", 10)},
+            }},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(
+        json::array({operandTableLoad, helperLoad}), 0, 2);
+
+    return require(candidate.source.find("operand_values[2] = {") != std::string::npos &&
+            candidate.source.find("[\"Q\"] = {") != std::string::npos &&
+            candidate.source.find("[1] = 4") != std::string::npos &&
+            candidate.source.find("[2] = 7") != std::string::npos,
+        "prototype operand-lane values were not materialized as shared storage") &&
+        require(candidate.source.find("registers[4] = operand_values[2][\"Q\"];") != std::string::npos,
+            "opcode-142 operand-table alias was not preserved") &&
+        require(candidate.source.find("registers[6] =") != std::string::npos &&
+                candidate.source.find("helper_values[1]") != std::string::npos,
+            "opcode-87 helper-bank lookup was not preserved") &&
+        require(candidate.unsupported_operations == 0,
+            "exact helper or operand-table load was marked unsupported");
+}
+
 json exactOpcode8Call(int functionRegister, int argumentBegin, int argumentEnd,
     std::string resultMode, int resultBase, int resultEnd = -1)
 {
@@ -2529,6 +2579,7 @@ int main()
     ok &= testSequenceTerminalReturnSuppressesCfgFallthrough();
     ok &= testPathSpecificWritesCallAndReturnRenderCleanly();
     ok &= testStaticRegisterTableWriteRendersEffectfully();
+    ok &= testExactHelperAndOperandTableLoadsPreserveSharedStorage();
     ok &= testExactOpcode8CallsPreserveFixedAndOpenResults();
     ok &= testOpcode72MoveAcceptsChangedThenIdentityFramedUnchangedVisits();
     ok &= testOpcode72MoveAcceptsIdentityFramedUnchangedOnlyVisits();
