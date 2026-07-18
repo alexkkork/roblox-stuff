@@ -417,6 +417,7 @@ public:
         initialize("runtime-lane parsing", [&] { parseLaneReplaySequences(); });
         initialize("instruction parsing", [&] { parseInstructions(); });
         initialize("root-argument parsing", [&] { parseRootArguments(); });
+        initialize("closure-object parsing", [&] { parseClosureObjectTargets(); });
         initialize("activation-argument table parsing", [&] { parseActivationArgumentTables(); });
         initialize("capture-provenance parsing", [&] { parseCaptureProvenance(); });
         initialize("root-capture hydration parsing", [&] { parseRootCaptureHydrations(); });
@@ -472,6 +473,9 @@ public:
         append("local function call_recovered(value, fallback, fallback_captures, ...)\n");
         append("  if type(value) == \"function\" then return value(...) end\n");
         append("  return fallback(fallback_captures, ...)\n");
+        append("end\n");
+        append("local function bind_observed_closure(prototype, captures)\n");
+        append("  return function(...) return prototype(captures, ...) end\n");
         append("end\n");
         append("local function hydrate_observed_table(value, entries)\n");
         append("  if type(value) ~= \"table\" then value = {} end\n");
@@ -781,6 +785,8 @@ private:
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> closureRegisterTargets;
     std::map<uint64_t, std::map<int64_t, std::set<uint64_t>>> captureClosureTargets;
     std::map<uint64_t, std::map<size_t, ArgumentTableHydration>> argumentTableHydrations;
+    std::map<uint64_t, json> closureDescriptorsByFunctionObject;
+    std::set<uint64_t> ambiguousClosureFunctionObjects;
     std::map<uint64_t, std::set<int64_t>> rootArgumentCaptureHydrations;
     uint64_t rootPrototype = 0;
     std::map<int64_t, std::string> rootArgumentExpressions;
@@ -1054,6 +1060,99 @@ private:
         result.root_call_frame_specialized = rootCallFrameSpecialized;
     }
 
+    void parseClosureObjectTargets()
+    {
+        const json descriptors = reachableIr.value("closure_descriptors", json::array());
+        if (!descriptors.is_array())
+            return;
+        for (const json& descriptor : descriptors)
+        {
+            const uint64_t target = positiveUnsignedField(descriptor, "target_prototype");
+            if (!descriptor.is_object() || !descriptor.value("complete", false) || target == 0 ||
+                !instructions.contains(target) || !descriptor.contains("function_object_ids") ||
+                !descriptor["function_object_ids"].is_array())
+                continue;
+            for (const json& object : descriptor["function_object_ids"])
+            {
+                const std::optional<uint64_t> objectId = nonnegativeInteger(object);
+                if (!objectId || *objectId == 0 || ambiguousClosureFunctionObjects.contains(*objectId))
+                    continue;
+                const auto existing = closureDescriptorsByFunctionObject.find(*objectId);
+                if (existing == closureDescriptorsByFunctionObject.end())
+                    closureDescriptorsByFunctionObject[*objectId] = descriptor;
+                else if (existing->second != descriptor)
+                {
+                    closureDescriptorsByFunctionObject.erase(existing);
+                    ambiguousClosureFunctionObjects.insert(*objectId);
+                }
+            }
+        }
+    }
+
+    bool rootArgumentValueCaptureProven(const json& descriptor) const
+    {
+        const uint64_t parent = positiveUnsignedField(descriptor, "prototype");
+        const size_t descriptorPc = static_cast<size_t>(positiveUnsignedField(descriptor, "pc"));
+        if (parent == 0 || descriptorPc == 0 || !rootArgumentPrototypes.contains(parent) ||
+            !descriptor.contains("captures") || !descriptor["captures"].is_array() ||
+            descriptor["captures"].size() != 1)
+            return false;
+        const json& capture = descriptor["captures"].front();
+        if (integerField(capture, "capture_index").value_or(-1) != 0 ||
+            integerField(capture, "capture_kind").value_or(-1) != 1 ||
+            integerField(capture, "slot").value_or(-1) != 1)
+            return false;
+
+        bool rootArgumentLoaded = false;
+        const auto prototype = instructions.find(parent);
+        if (prototype == instructions.end())
+            return false;
+        for (const auto& [pc, rows] : prototype->second)
+        {
+            if (pc > descriptorPc)
+                break;
+            for (const json& instruction : rows)
+            {
+                const json* semantic = semanticOperationForInstruction(instruction);
+                if (!semantic)
+                    continue;
+                if (semantic->value("kind", "") == "load_arguments")
+                {
+                    const json bindings = semantic->value("argument_bindings", json::array());
+                    if (bindings.is_array())
+                        for (const json& binding : bindings)
+                            if (binding.value("argument_index", size_t(0)) == 1 &&
+                                binding.value("destination_register", int64_t(-1)) == 1)
+                                rootArgumentLoaded = true;
+                    continue;
+                }
+                if (rootArgumentLoaded && writesRegister(*semantic, 1))
+                    return false;
+            }
+        }
+        return rootArgumentLoaded;
+    }
+
+    std::optional<std::string> observedArgumentTableExpression(
+        const json& value, uint64_t consumerPrototype) const
+    {
+        if (const std::optional<std::string> direct = observedBootstrapExpression(value))
+            return direct;
+        if (!value.is_object() || value.value("type", "") != "function" ||
+            !value.contains("object_id") || !value["object_id"].is_number_unsigned() ||
+            !rootArgumentPrototypes.contains(consumerPrototype))
+            return std::nullopt;
+        const uint64_t objectId = value["object_id"].get<uint64_t>();
+        const auto descriptor = closureDescriptorsByFunctionObject.find(objectId);
+        if (descriptor == closureDescriptorsByFunctionObject.end() ||
+            !rootArgumentValueCaptureProven(descriptor->second))
+            return std::nullopt;
+        const uint64_t target = positiveUnsignedField(descriptor->second, "target_prototype");
+        if (target == 0)
+            return std::nullopt;
+        return "bind_observed_closure(" + prototypeName(target) + ", { [0] = registers[1] })";
+    }
+
     void parseActivationArgumentTables()
     {
         const json rows = reachableIr.value("observed_activation_argument_tables", json::array());
@@ -1104,7 +1203,7 @@ private:
                     continue;
                 }
                 const std::optional<int64_t> key = primitiveIntegerValue(entry["key"]);
-                const std::optional<std::string> value = observedBootstrapExpression(entry["value"]);
+                const std::optional<std::string> value = observedArgumentTableExpression(entry["value"], prototype);
                 if (!key || *key < 0 || !value)
                     continue;
                 if (!snapshot.emplace(*key, *value).second)
@@ -3827,8 +3926,13 @@ private:
             append(prefix + "end\n");
             for (const ArgumentBinding& binding : shape->bindings)
             {
-                const std::optional<std::string> observed = stableObservedPrototypeArgument(
-                    context.prototype, shape->arity, binding.argument);
+                std::optional<std::string> observed;
+                if (binding.argument == 1 && binding.destination == 1 &&
+                    rootArgumentPrototypes.contains(context.prototype))
+                    observed = "shared_root_arguments";
+                else
+                    observed = stableObservedPrototypeArgument(
+                        context.prototype, shape->arity, binding.argument);
                 append(prefix + "registers[" + std::to_string(binding.destination) + "] = " +
                     (observed ? *observed : "select_value(" + std::to_string(binding.argument) + ", ...)") + ";\n");
             }
@@ -3837,6 +3941,39 @@ private:
         }
         if (kind == "capture_varargs")
         {
+            const json argumentBindings = value.value("argument_bindings", json::array());
+            if (argumentBindings.is_array() && !argumentBindings.empty())
+            {
+                const json observedArities = value.value("observed_argument_arities", json::array());
+                std::set<size_t> destinations;
+                std::set<size_t> arguments;
+                std::vector<ArgumentBinding> bindings;
+                bool valid = observedArities.is_array() && observedArities.size() >= 2;
+                for (const json& binding : argumentBindings)
+                {
+                    const size_t argument = binding.value("argument_index", size_t(0));
+                    const int64_t destination = binding.value("destination_register", int64_t(-1));
+                    if (argument == 0 || destination < 0 ||
+                        !arguments.insert(argument).second ||
+                        !destinations.insert(static_cast<size_t>(destination)).second)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    bindings.push_back({argument, destination});
+                }
+                if (!valid)
+                {
+                    unsupportedOperation(kind,
+                        "variadic register bindings are incomplete or conflicting", depth, context);
+                    return;
+                }
+                for (const ArgumentBinding& binding : bindings)
+                    append(prefix + "registers[" + std::to_string(binding.destination) + "] = select_value(" +
+                        std::to_string(binding.argument) + ", ...);\n");
+                ++result.variadic_argument_captures;
+                return;
+            }
             const std::string valuesSlot = jsonStringOr(value, "values_slot");
             const std::string countSlot = jsonStringOr(value, "count_slot");
             if (valuesSlot.empty() || countSlot.empty() || valuesSlot == countSlot)
