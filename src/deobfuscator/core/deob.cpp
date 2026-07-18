@@ -7803,7 +7803,7 @@ std::optional<std::string> buildStructuralLuraphTraceProbe(
         }
         instrumentation += "print(\"@@LPH_OPERAND_FRAME_V1@@\",_G.__vmc,__aid,__alex_lph_pre_pc,__alex_lph_pre_op,"
             "#__alex_lph_operand_frame_parts,table.concat(__alex_lph_operand_frame_parts,\"|\"));end;";
-        instrumentation += "if __alex_lph_step_enabled and __alex_lph_pre_op==8 then local __alex_lph_frame_keys={};";
+        instrumentation += "if __alex_lph_step_enabled then local __alex_lph_frame_keys={};";
         instrumentation += "for __alex_lph_key in __alex_lph_pre_regs do if #__alex_lph_frame_keys>=512 then break end;__alex_lph_frame_keys[#__alex_lph_frame_keys+1]=__alex_lph_key;end;";
         instrumentation += "table.sort(__alex_lph_frame_keys);local __alex_lph_frame_parts={};";
         instrumentation += "for __alex_lph_frame_index=1,#__alex_lph_frame_keys do local __alex_lph_key=__alex_lph_frame_keys[__alex_lph_frame_index];";
