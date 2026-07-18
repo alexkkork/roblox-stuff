@@ -1653,6 +1653,40 @@ bool testFixedArgumentLoadUsesProvenRegisterDestinations()
             "fixed argument load provenance was not retained in the candidate and block map");
 }
 
+bool testExactArgumentCopyDoesNotInventArityFailure()
+{
+    const json instruction = {
+        {"pc", 1},
+        {"opcode", 23},
+        {"observational_semantic_operation", nullptr},
+        {"semantic_operation", {
+            {"kind", "load_arguments"},
+            {"semantic_family", "arguments"},
+            {"static_semantic", true},
+            {"path_specific", false},
+            {"proof", "locked_opcode23_argument_copy_loop"},
+            {"argument_copy_count", 3},
+            {"enforce_exact_arity", false},
+            {"observed_argument_arities", json::array({3})},
+            {"argument_bindings", json::array({
+                {{"argument_index", 1}, {"destination_register", 1}},
+                {{"argument_index", 2}, {"destination_register", 2}},
+                {{"argument_index", 3}, {"destination_register", 3}},
+            })},
+        }},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({instruction}), 0);
+
+    return require(candidate.source.find("fixed argument arity mismatch") == std::string::npos,
+               "exact opcode-23 argument copy invented an argument-count failure") &&
+        require(candidate.source.find("registers[1] = select_value(1, ...);") != std::string::npos &&
+                candidate.source.find("registers[2] = select_value(2, ...);") != std::string::npos &&
+                candidate.source.find("registers[3] = select_value(3, ...);") != std::string::npos,
+            "exact opcode-23 argument copy did not emit the complete identity binding range") &&
+        require(candidate.fixed_argument_loads == 1 && candidate.unsupported_operations == 0,
+            "exact opcode-23 argument copy did not render cleanly");
+}
+
 bool testFixedArgumentLoadUsesStableIncomingCallIdentities()
 {
     const json load = pathSpecificInstruction(1, {
@@ -2469,6 +2503,7 @@ int main()
     ok &= testOpcode72MoveRejectsUnframedUnchangedObjectVisits();
     ok &= testObservedGlobalIdentitySpecializesCallArgument();
     ok &= testFixedArgumentLoadUsesProvenRegisterDestinations();
+    ok &= testExactArgumentCopyDoesNotInventArityFailure();
     ok &= testFixedArgumentLoadUsesStableIncomingCallIdentities();
     ok &= testArgumentLoadSeparatesVariadicAndIncompleteShapes();
     ok &= testProvenRegisterClearRangeEmitsInclusiveLuau();

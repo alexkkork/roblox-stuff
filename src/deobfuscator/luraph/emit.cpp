@@ -390,6 +390,7 @@ struct ArgumentBinding
 struct LoadArgumentsShape
 {
     size_t arity = 0;
+    bool enforce_exact_arity = true;
     std::vector<ArgumentBinding> bindings;
 };
 
@@ -3519,6 +3520,24 @@ private:
 
         LoadArgumentsShape shape;
         shape.arity = static_cast<size_t>(*arity);
+        if (value.contains("enforce_exact_arity"))
+        {
+            if (!value["enforce_exact_arity"].is_boolean())
+            {
+                reason = "enforce_exact_arity must be a boolean";
+                return std::nullopt;
+            }
+            shape.enforce_exact_arity = value["enforce_exact_arity"].get<bool>();
+        }
+        if (value.contains("argument_copy_count"))
+        {
+            const std::optional<uint64_t> copyCount = nonnegativeInteger(value["argument_copy_count"]);
+            if (!copyCount || *copyCount != shape.arity)
+            {
+                reason = "argument_copy_count disagrees with the proven argument binding range";
+                return std::nullopt;
+            }
+        }
         std::set<int64_t> destinations;
         const json* bindings = nullptr;
         for (std::string_view name : {"argument_bindings", "argument_writes", "register_writes"})
@@ -3619,6 +3638,23 @@ private:
         {
             reason = "load_arguments has no proven argument-to-register bindings";
             return std::nullopt;
+        }
+        if (!shape.enforce_exact_arity)
+        {
+            std::set<size_t> copiedArguments;
+            for (const ArgumentBinding& binding : shape.bindings)
+                copiedArguments.insert(binding.argument);
+            if (copiedArguments.size() != shape.arity || shape.bindings.size() != shape.arity)
+            {
+                reason = "unguarded argument copy requires a complete fixed binding range";
+                return std::nullopt;
+            }
+            for (size_t argument = 1; argument <= shape.arity; ++argument)
+                if (!copiedArguments.contains(argument))
+                {
+                    reason = "unguarded argument copy has a gap in its fixed binding range";
+                    return std::nullopt;
+                }
         }
         if (value.contains("write_count"))
         {
@@ -4022,11 +4058,14 @@ private:
                 unsupportedOperation(kind, reason, depth, context);
                 return;
             }
-            append(prefix + "if argument_count ~= " + std::to_string(shape->arity) + " then\n");
-            append(prefix + "  unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
-                std::to_string(context.pc) + ", \"load_arguments\", \"fixed argument arity mismatch: expected " +
-                std::to_string(shape->arity) + ", got \" .. tostring(argument_count))\n");
-            append(prefix + "end\n");
+            if (shape->enforce_exact_arity)
+            {
+                append(prefix + "if argument_count ~= " + std::to_string(shape->arity) + " then\n");
+                append(prefix + "  unsupported_semantic_operation(" + std::to_string(context.prototype) + ", " +
+                    std::to_string(context.pc) + ", \"load_arguments\", \"fixed argument arity mismatch: expected " +
+                    std::to_string(shape->arity) + ", got \" .. tostring(argument_count))\n");
+                append(prefix + "end\n");
+            }
             for (const ArgumentBinding& binding : shape->bindings)
             {
                 std::optional<std::string> observed;

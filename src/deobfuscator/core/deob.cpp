@@ -12952,6 +12952,165 @@ json luraphImmediateRuntimeLane(const json& lanes, std::string_view name)
     };
 }
 
+bool luraphOpcode23ArgumentCopyHandlerMatches(const json& handler)
+{
+    if (handler.value("opcode", int64_t(-1)) != 23 ||
+        !handler.value("vm_state_independent", false))
+        return false;
+
+    constexpr std::string_view exactArgumentCopyBranch =
+        "p=({...});for L=1.0,V[_]do(t)[L]=(p[L]);end";
+    if (handler.value("candidate_source", "").find(exactArgumentCopyBranch) == std::string::npos)
+        return false;
+
+    const json candidate = handler.value("candidate_semantic_operation", json(nullptr));
+    if (!candidate.is_object() || candidate.value("kind", "") != "numeric_for" ||
+        !candidate.value("opcode_specialized", false) ||
+        candidate.value("proof", "") != "branch_condition_resolved_from_current_opcode" ||
+        candidate.value("index", "") != "loop_index")
+        return false;
+
+    const auto exactConstant = [](const json& value, double expected) {
+        return value.is_object() && value.value("kind", "") == "constant" &&
+            value.contains("value") && value["value"].is_number() &&
+            value["value"].get<double>() == expected;
+    };
+    const json from = candidate.value("from", json(nullptr));
+    const json to = candidate.value("to", json(nullptr));
+    const json step = candidate.value("step", json(nullptr));
+    if (!exactConstant(from, 1.0) || !exactConstant(step, 1.0) ||
+        !to.is_object() || to.value("kind", "") != "operand" || to.value("lane", "") != "V")
+        return false;
+
+    const json body = candidate.value("body", json(nullptr));
+    if (!body.is_array() || body.size() != 1 || !body.front().is_object() ||
+        body.front().value("kind", "") != "register_write")
+        return false;
+    const json destination = body.front().value("register", json(nullptr));
+    const json value = body.front().value("value", json(nullptr));
+    if (!destination.is_object() || destination.value("kind", "") != "semantic_local" ||
+        destination.value("name", "") != "loop_index" || !value.is_object() ||
+        value.value("kind", "") != "index_read")
+        return false;
+    const json index = value.value("index", json(nullptr));
+    const json table = value.value("table", json(nullptr));
+    if (!index.is_object() || index.value("kind", "") != "semantic_local" ||
+        index.value("name", "") != "loop_index" || !table.is_object() ||
+        table.value("kind", "") != "table")
+        return false;
+    const json entries = table.value("entries", json(nullptr));
+    return entries.is_array() && entries.size() == 1 && entries.front().is_object() &&
+        entries.front().value("entry_kind", "") == "list" &&
+        entries.front().contains("key") && entries.front()["key"].is_null() &&
+        entries.front().contains("value") && entries.front()["value"].is_object() &&
+        entries.front()["value"].value("kind", "") == "varargs";
+}
+
+LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
+    const json& handler,
+    const json& effectiveLanes,
+    const std::vector<json>* observations,
+    const LuraphRuntimeStructureTrace& trace)
+{
+    LuraphExactLeafRecognition output;
+    if (!luraphOpcode23ArgumentCopyHandlerMatches(handler))
+    {
+        output.status = "handler_mismatch";
+        output.diagnostic = "opcode-23 handler does not match the locked argument-copy loop";
+        return output;
+    }
+
+    const std::optional<int64_t> arity = luraphRuntimeLaneInteger(effectiveLanes, "V");
+    constexpr int64_t kMaximumRecoveredArgumentCount = 1000;
+    if (!arity || *arity < 0 || *arity > kMaximumRecoveredArgumentCount)
+    {
+        output.status = "operand_mismatch";
+        output.diagnostic = "opcode-23 operand V is not a bounded nonnegative fixed arity";
+        return output;
+    }
+
+    if (observations)
+    {
+        for (const json& observation : *observations)
+        {
+            const json runtimeLanes = observation.value("runtime_lanes", json::object());
+            const std::optional<int64_t> observedArity = luraphRuntimeLaneInteger(runtimeLanes, "V");
+            const json writes = observation.value("register_writes", json(nullptr));
+            const json origins = observation.value("write_origins", json(nullptr));
+            const uint64_t activation = observation.value("activation", uint64_t(0));
+            const auto activationRow = trace.activations.find(activation);
+            if (observation.value("opcode", int64_t(-1)) != 23 || !observedArity ||
+                *observedArity != *arity ||
+                observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
+                !writes.is_array() || !origins.is_object() || activationRow == trace.activations.end() ||
+                activationRow->second.value("argument_count", size_t(kMaximumRecoveredArgumentCount + 1)) !=
+                    static_cast<size_t>(*arity))
+            {
+                output.status = "evidence_mismatch";
+                output.diagnostic = "opcode-23 runtime evidence disagrees with fixed argument-copy semantics";
+                return output;
+            }
+
+            std::set<int64_t> changedDestinations;
+            for (const json& write : writes)
+            {
+                const int64_t destination = write.value(
+                    "register", std::numeric_limits<int64_t>::min());
+                const auto origin = origins.find(std::to_string(destination));
+                if (destination < 1 || destination > *arity ||
+                    !changedDestinations.insert(destination).second || origin == origins.end() ||
+                    !origin->is_array() || origin->size() != 1 || !origin->front().is_object() ||
+                    origin->front().value("kind", "") != "argument" ||
+                    origin->front().value("index", int64_t(-1)) != destination)
+                {
+                    output.status = "evidence_mismatch";
+                    output.diagnostic = "opcode-23 changed writes are not identity argument-to-register copies";
+                    return output;
+                }
+            }
+            for (auto origin = origins.begin(); origin != origins.end(); ++origin)
+            {
+                const std::optional<int64_t> destination = parseTraceInteger<int64_t>(origin.key());
+                if (!destination || !changedDestinations.contains(*destination))
+                {
+                    output.status = "evidence_mismatch";
+                    output.diagnostic = "opcode-23 write origins contain an unrecorded destination";
+                    return output;
+                }
+            }
+            ++output.validated_observations;
+        }
+    }
+
+    json bindings = json::array();
+    for (int64_t argument = 1; argument <= *arity; ++argument)
+        bindings.push_back({
+            {"argument_index", argument},
+            {"destination_register", argument},
+            {"proof", "exact_handler_loop"},
+        });
+
+    output.status = "recognized";
+    output.diagnostic = output.validated_observations > 0
+        ? "the locked argument-copy loop agrees with every runtime observation"
+        : "the locked argument-copy loop proves the complete fixed-arity register mapping";
+    output.operation = {
+        {"kind", "load_arguments"},
+        {"semantic_family", "arguments"},
+        {"static_semantic", true},
+        {"path_specific", false},
+        {"source_claim", false},
+        {"proof", "locked_opcode23_argument_copy_loop"},
+        {"observation_count", output.validated_observations},
+        {"argument_copy_count", *arity},
+        {"enforce_exact_arity", false},
+        {"observed_argument_arities", json::array({*arity})},
+        {"argument_bindings", std::move(bindings)},
+        {"unchanged_or_nil_writes_may_be_unobserved", true},
+    };
+    return output;
+}
+
 LuraphExactLeafRecognition recognizeLuraphOpcode28IndexRead(
     const json& effectiveLanes,
     const std::vector<json>* observations)
@@ -13604,6 +13763,11 @@ json luraphRuntimeSemanticDispatchArtifact(
     size_t opcode8CallObservationsValidated = 0;
     size_t opcode8EncodedOneQuirkSites = 0;
     json opcode8RecognitionStatusCounts = json::object();
+    size_t opcode23SitesTotal = 0;
+    size_t opcode23SitesStatic = 0;
+    size_t opcode23SitesRejected = 0;
+    size_t opcode23ObservationsValidated = 0;
+    json opcode23RecognitionStatusCounts = json::object();
     size_t opcode28SitesTotal = 0;
     size_t opcode28SitesObservational = 0;
     size_t opcode28SitesRejected = 0;
@@ -14023,6 +14187,33 @@ json luraphRuntimeSemanticDispatchArtifact(
                 else
                     ++opcode8CallSitesRejected;
             }
+            if (!semanticAccepted && opcode == 23 && handler != handlers.end() &&
+                row["observational_semantic_operation"].is_null())
+            {
+                ++opcode23SitesTotal;
+                const std::vector<json>* siteObservations = observedSite != observationsBySite.end()
+                    ? &observedSite->second : nullptr;
+                LuraphExactLeafRecognition recognized = recognizeLuraphOpcode23ArgumentCopy(
+                    handler->second, effectiveLanes, siteObservations, trace);
+                row["opcode23_argument_copy_recognition"] = {
+                    {"status", recognized.status},
+                    {"diagnostic", recognized.diagnostic},
+                    {"validated_observations", recognized.validated_observations},
+                    {"static_semantic", recognized.operation.is_object()},
+                };
+                opcode23RecognitionStatusCounts[recognized.status] =
+                    opcode23RecognitionStatusCounts.value(recognized.status, size_t(0)) + 1;
+                opcode23ObservationsValidated += recognized.validated_observations;
+                if (recognized.operation.is_object())
+                {
+                    row["semantic_operation"] = std::move(recognized.operation);
+                    semanticAccepted = true;
+                    ++semanticLifted;
+                    ++opcode23SitesStatic;
+                }
+                else
+                    ++opcode23SitesRejected;
+            }
             if (!semanticAccepted && opcode == 28 &&
                 row["observational_semantic_operation"].is_null())
             {
@@ -14403,6 +14594,18 @@ json luraphRuntimeSemanticDispatchArtifact(
             {"static_requires_complete_guard_path", true},
             {"runtime_evidence_is_path_specific", true},
             {"encoded_one_quirk_preserved", true},
+        }},
+        {"opcode23_argument_copy_coverage", {
+            {"available", opcode23SitesTotal > 0},
+            {"scope", "locked-v14.7-opcode-23-handler"},
+            {"sites_total", opcode23SitesTotal},
+            {"static_semantic_sites", opcode23SitesStatic},
+            {"unresolved_sites", opcode23SitesTotal - opcode23SitesStatic},
+            {"rejected_sites", opcode23SitesRejected},
+            {"validated_runtime_executions", opcode23ObservationsValidated},
+            {"recognition_status_counts", std::move(opcode23RecognitionStatusCounts)},
+            {"complete_argument_register_mapping", true},
+            {"unchanged_or_nil_write_elision_preserved", true},
         }},
         {"opcode28_index_read_coverage", {
             {"available", opcode28SitesTotal > 0},
