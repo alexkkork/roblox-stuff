@@ -13039,10 +13039,13 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
             const json origins = observation.value("write_origins", json(nullptr));
             const uint64_t activation = observation.value("activation", uint64_t(0));
             const auto activationRow = trace.activations.find(activation);
+            const json activationArguments = activationRow != trace.activations.end()
+                ? activationRow->second.value("arguments", json(nullptr)) : json(nullptr);
             if (observation.value("opcode", int64_t(-1)) != 23 || !observedArity ||
                 *observedArity != *arity ||
                 observation.value("next_pc", int64_t(-1)) != observation.value("pc", int64_t(-1)) + 1 ||
                 !writes.is_array() || !origins.is_object() || activationRow == trace.activations.end() ||
+                !activationArguments.is_array() || activationArguments.size() != static_cast<size_t>(*arity) ||
                 activationRow->second.value("argument_count", size_t(kMaximumRecoveredArgumentCount + 1)) !=
                     static_cast<size_t>(*arity))
             {
@@ -13059,13 +13062,24 @@ LuraphExactLeafRecognition recognizeLuraphOpcode23ArgumentCopy(
                 const auto origin = origins.find(std::to_string(destination));
                 if (destination < 1 || destination > *arity ||
                     !changedDestinations.insert(destination).second || origin == origins.end() ||
-                    !origin->is_array() || origin->size() != 1 || !origin->front().is_object() ||
-                    origin->front().value("kind", "") != "argument" ||
-                    origin->front().value("index", int64_t(-1)) != destination)
+                    !origin->is_array() || origin->empty() || !write.contains("value") ||
+                    !luraphObservedValuesEqual(
+                        write["value"], activationArguments[static_cast<size_t>(destination - 1)]))
                 {
                     output.status = "evidence_mismatch";
-                    output.diagnostic = "opcode-23 changed writes are not identity argument-to-register copies";
+                    output.diagnostic = "opcode-23 changed write disagrees with its same-index activation argument";
                     return output;
+                }
+                for (const json& possibleOrigin : *origin)
+                {
+                    const int64_t source = possibleOrigin.value("index", int64_t(-1));
+                    if (!possibleOrigin.is_object() || possibleOrigin.value("kind", "") != "argument" ||
+                        source < 1 || source > *arity)
+                    {
+                        output.status = "evidence_mismatch";
+                        output.diagnostic = "opcode-23 changed write has a non-argument provenance source";
+                        return output;
+                    }
                 }
             }
             for (auto origin = origins.begin(); origin != origins.end(); ++origin)
@@ -17691,6 +17705,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
     json runtimeObservationalOperationCounts = json::object();
     json runtimeWriteOriginEvidence = json::object();
     json runtimeOpcode8CallCoverage = json{{"available", false}};
+    json runtimeOpcode23ArgumentCopyCoverage = json{{"available", false}};
     json runtimeOpcode28IndexReadCoverage = json{{"available", false}};
     json runtimeOpcode89RangeClearCoverage = json{{"available", false}};
     json runtimeOpcode193EmptyTableCoverage = json{{"available", false}};
@@ -17744,6 +17759,8 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                         "write_origin_evidence", json::object());
                     runtimeOpcode8CallCoverage = runtimeSemanticDocument->value(
                         "opcode8_call_coverage", json{{"available", false}});
+                    runtimeOpcode23ArgumentCopyCoverage = runtimeSemanticDocument->value(
+                        "opcode23_argument_copy_coverage", json{{"available", false}});
                     runtimeOpcode28IndexReadCoverage = runtimeSemanticDocument->value(
                         "opcode28_index_read_coverage", json{{"available", false}});
                     runtimeOpcode89RangeClearCoverage = runtimeSemanticDocument->value(
@@ -17798,6 +17815,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
                 {"unobserved_instructions", runtimeUnobservedInstructions},
                 {"observational_operation_counts", runtimeObservationalOperationCounts},
                 {"opcode8_call_coverage", runtimeOpcode8CallCoverage},
+                {"opcode23_argument_copy_coverage", runtimeOpcode23ArgumentCopyCoverage},
                 {"opcode28_index_read_coverage", runtimeOpcode28IndexReadCoverage},
                 {"opcode89_range_clear_coverage", runtimeOpcode89RangeClearCoverage},
                 {"opcode193_empty_table_coverage", runtimeOpcode193EmptyTableCoverage},
@@ -19482,6 +19500,7 @@ Result finishLuraphAnalysis(const Options& options, std::string_view source, con
             {"trace_evidence_only_is_semantic", false},
         };
     report["coverage"]["opcode8_calls"] = runtimeOpcode8CallCoverage;
+    report["coverage"]["opcode23_argument_copies"] = runtimeOpcode23ArgumentCopyCoverage;
     report["coverage"]["opcode28_index_reads"] = runtimeOpcode28IndexReadCoverage;
     report["coverage"]["opcode89_range_clears"] = runtimeOpcode89RangeClearCoverage;
     report["coverage"]["opcode193_empty_tables"] = runtimeOpcode193EmptyTableCoverage;
