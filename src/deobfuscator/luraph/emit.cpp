@@ -4503,9 +4503,10 @@ private:
             context.prototype = id;
             std::optional<json> lastInstruction;
             bool terminatedByReturn = false;
+            bool terminatedByRecoveryBoundary = false;
             for (const auto& [pc, instructionRows] : rows->second)
             {
-                if (terminatedByReturn)
+                if (terminatedByReturn || terminatedByRecoveryBoundary)
                     break;
                 if (pc < block.start || pc > block.end)
                     continue;
@@ -4551,9 +4552,18 @@ private:
                         unsupportedOperation("observational_semantic_operation",
                             reason, 4, context);
                     }
+                    else if (instruction.value("semantic_coverage_class", "") == "unresolved")
+                    {
+                        ++result.unobserved_instruction_boundaries;
+                        unsupportedOperation("unobserved_instruction",
+                            "instruction was not executed in the captured trace and has no proven semantics",
+                            4, context);
+                        terminatedByRecoveryBoundary = true;
+                        break;
+                    }
                 }
             }
-            if (!terminatedByReturn)
+            if (!terminatedByReturn && !terminatedByRecoveryBoundary)
                 transition(block, lastInstruction, 4, context);
             json blockOperationProvenance = json::array();
             for (size_t index = firstProvenanceRecord;

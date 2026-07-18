@@ -2289,6 +2289,40 @@ bool testUnknownPathSpecificOperationPreservesIrAndProvenance()
             "unknown path-specific operation did not remain an explicit recovery boundary");
 }
 
+bool testUnobservedInstructionStopsAtRecoveryBoundary()
+{
+    json unresolved = {
+        {"pc", 2},
+        {"opcode", 72},
+        {"semantic_coverage_class", "unresolved"},
+        {"semantic_operation", nullptr},
+        {"observational_semantic_operation", nullptr},
+        {"trace_specialized_operation", nullptr},
+    };
+    const SemanticCandidate candidate = emitWithTarget(json::array({
+        registerAliasInstruction(1, 4, 3),
+        std::move(unresolved),
+        pathSpecificInstruction(3, {{"kind", "return"}, {"values", json::array()}}),
+    }), 0, 3);
+
+    const size_t boundary = candidate.source.find("elseif pc == 2 then");
+    const size_t nextBlock = candidate.source.find("elseif pc == 3 then", boundary);
+    const std::string boundaryBlock = boundary != std::string::npos && nextBlock != std::string::npos
+        ? candidate.source.substr(boundary, nextBlock - boundary) : std::string();
+    return require(boundary != std::string::npos && nextBlock != std::string::npos,
+               "unobserved recovery-boundary fixture was not emitted") &&
+        require(boundaryBlock.find(
+                    "unsupported_semantic_operation(2, 2, \"unobserved_instruction\"") !=
+                std::string::npos,
+            "unobserved instruction did not become an explicit recovery boundary") &&
+        require(boundaryBlock.find("pc = 3") == std::string::npos,
+            "unobserved instruction silently fell through to a later observed block") &&
+        require(candidate.unobserved_instruction_boundaries == 1,
+            "unobserved instruction boundary metric drifted") &&
+        require(!candidate.fully_rendered(),
+            "candidate with an unobserved instruction claimed complete rendering");
+}
+
 } // namespace
 
 int main()
@@ -2346,6 +2380,7 @@ int main()
     ok &= testRootArgumentTableHydratesProvenInheritedCapture();
     ok &= testSmallHelperLookupDoesNotHydrateRootCapture();
     ok &= testUnknownPathSpecificOperationPreservesIrAndProvenance();
+    ok &= testUnobservedInstructionStopsAtRecoveryBoundary();
     if (ok)
         std::cout << "Luraph semantic emitter capture-key provenance tests passed\n";
     return ok ? 0 : 1;

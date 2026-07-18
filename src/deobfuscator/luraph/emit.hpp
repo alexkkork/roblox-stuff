@@ -25,6 +25,7 @@ struct SemanticCandidate
     size_t steady_state_transition_sites = 0;
     size_t periodic_transition_sites = 0;
     size_t unobserved_branch_arms = 0;
+    size_t unobserved_instruction_boundaries = 0;
     size_t runtime_specializations = 0;
     size_t direct_prototype_calls = 0;
     size_t fixed_register_calls = 0;
